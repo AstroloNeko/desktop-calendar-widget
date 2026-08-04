@@ -100,7 +100,7 @@ class Event:
 DEFAULT_SETTINGS = {
     "window_mode": "desktop",
     "agenda_open": True,
-    "opacity": 0.97,
+    "opacity": 1.0,
     "x": None,
     "y": None,
     "default_reminder": 60,

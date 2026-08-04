@@ -30,8 +30,11 @@ from win_integration import (
     SingleInstance,
     bring_to_front,
     clamp_to_work_area,
+    enable_dpi_awareness,
     is_autostart_enabled,
+    is_foreground_process,
     make_tool_window,
+    raise_for_interaction,
     send_to_desktop,
     set_autostart,
 )
@@ -51,18 +54,20 @@ WINDOW_WIDTH = 372
 OPEN_HEIGHT = 548
 CLOSED_HEIGHT = 338
 
-SURFACE = "#F7F6F2"
+SURFACE = "#F8FAFC"
 CARD = "#FFFFFF"
-INK = "#25262B"
-SUBTLE = "#777A83"
-FAINT = "#A9ABB2"
-BORDER = "#D8D7D2"
-HOVER = "#ECECF1"
-ACCENT = "#6273D9"
-ACCENT_SOFT = "#E8EAF8"
-WEEKEND = "#BC6B6B"
-DANGER = "#D9515D"
+PANEL = "#F1F5F9"
+INK = "#1F2937"
+SUBTLE = "#64748B"
+FAINT = "#94A3B8"
+BORDER = "#DCE3EA"
+HOVER = "#EEF2F7"
+ACCENT = "#5B6FD8"
+ACCENT_SOFT = "#E9EDFF"
+WEEKEND = "#C96B70"
+DANGER = "#D84D5B"
 FONT = "Microsoft YaHei UI"
+NUMBER_FONT = "Segoe UI"
 
 
 def geometry_at(width: int, height: int, x: int, y: int) -> str:
@@ -231,7 +236,7 @@ class DayCell(tk.Canvas):
         if self.selected:
             self.create_oval(center_x - 14, 1, center_x + 14, 25, fill=ACCENT, outline="")
         elif self.today:
-            self.create_oval(center_x - 13, 2, center_x + 13, 24, outline=ACCENT, width=1.5)
+            self.create_oval(center_x - 13, 2, center_x + 13, 24, fill=ACCENT_SOFT, outline=ACCENT, width=1)
 
         if self.selected:
             color = "white"
@@ -242,10 +247,10 @@ class DayCell(tk.Canvas):
         else:
             color = INK
         weight = "bold" if self.today or self.selected else "normal"
-        self.create_text(center_x, 13, text=str(self.day.day), fill=color, font=(FONT, 9, weight))
+        self.create_text(center_x, 13, text=str(self.day.day), fill=color, font=(NUMBER_FONT, 10, weight))
 
         if self.holiday and self.in_month:
-            holiday_color = "white" if self.selected else {
+            holiday_color = ACCENT if self.selected else {
                 "day_off": DANGER,
                 "workday": "#C47B28",
             }.get(self.holiday.kind, "#8B70A8")
@@ -254,7 +259,7 @@ class DayCell(tk.Canvas):
                 27,
                 text=truncate(self.holiday.short_name, 3),
                 fill=holiday_color,
-                font=(FONT, 6, "bold" if self.holiday.kind != "festival" else "normal"),
+                font=(FONT, 7, "bold" if self.holiday.kind != "festival" else "normal"),
             )
 
         if self.event_colors:
@@ -262,8 +267,7 @@ class DayCell(tk.Canvas):
             start = center_x - (len(self.event_colors) - 1) * gap / 2
             for index, event_color in enumerate(self.event_colors):
                 x = start + index * gap
-                dot_color = "white" if self.selected else event_color
-                self.create_oval(x - 2, 32, x + 2, 36, fill=dot_color, outline="")
+                self.create_oval(x - 2, 32, x + 2, 36, fill=event_color, outline="")
 
 
 class EventEditor(tk.Toplevel):
@@ -309,7 +313,7 @@ class EventEditor(tk.Toplevel):
         self.title_entry = tk.Entry(
             shell,
             textvariable=self.title_var,
-            bg="#FBFBFA",
+            bg=SURFACE,
             fg=INK,
             insertbackground=INK,
             relief="flat",
@@ -334,7 +338,7 @@ class EventEditor(tk.Toplevel):
         shortcuts = tk.Frame(shell, bg=CARD)
         shortcuts.pack(fill="x", pady=(7, 10))
         for label, offset in (("今天", 0), ("明天", 1), ("一周后", 7)):
-            chip = tk.Label(shortcuts, text=label, bg="#F0F1F4", fg=SUBTLE, font=(FONT, 8), padx=8, pady=3, cursor="hand2")
+            chip = tk.Label(shortcuts, text=label, bg=PANEL, fg=SUBTLE, font=(FONT, 8), padx=8, pady=3, cursor="hand2")
             chip.pack(side="left", padx=(0, 6))
             chip.bind("<Button-1>", lambda _event, days=offset: self.date_var.set((date.today() + timedelta(days=days)).isoformat()))
 
@@ -348,7 +352,7 @@ class EventEditor(tk.Toplevel):
                 variable=self.priority_var,
                 value=priority,
                 indicatoron=False,
-                bg="#F0F1F4",
+                bg=PANEL,
                 fg=SUBTLE,
                 selectcolor=ACCENT_SOFT,
                 activebackground=ACCENT_SOFT,
@@ -415,7 +419,7 @@ class EventEditor(tk.Toplevel):
             delete.pack(side="left")
         save = tk.Button(actions, text="保存", command=self.save, bg=ACCENT, fg="white", activebackground="#5263C6", activeforeground="white", relief="flat", bd=0, padx=20, pady=7, font=(FONT, 9, "bold"), cursor="hand2")
         save.pack(side="right")
-        cancel = tk.Button(actions, text="取消", command=self.close, bg="#F0F1F4", fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2")
+        cancel = tk.Button(actions, text="取消", command=self.close, bg=PANEL, fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2")
         cancel.pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _event: self.close())
@@ -455,7 +459,7 @@ class EventEditor(tk.Toplevel):
             parent,
             textvariable=variable,
             width=width,
-            bg="#FBFBFA",
+            bg=SURFACE,
             fg=INK,
             insertbackground=INK,
             relief="flat",
@@ -570,13 +574,13 @@ class UpcomingDialog(tk.Toplevel):
                 last_day = item.due_date
                 day_text = "今天" if last_day == date.today() else f"{last_day.month}月{last_day.day}日 · {WEEKDAYS[last_day.weekday()]}"
                 tk.Label(inner, text=day_text, bg=CARD, fg=SUBTLE, font=(FONT, 8, "bold"), anchor="w").pack(fill="x", pady=(8, 4))
-            row = tk.Frame(inner, bg="#F6F6F4", cursor="hand2", padx=8, pady=7)
+            row = tk.Frame(inner, bg=PANEL, cursor="hand2", padx=8, pady=7)
             row.pack(fill="x", pady=2)
             tk.Frame(row, bg=item.color, width=4).pack(side="left", fill="y", padx=(0, 8))
-            title = tk.Label(row, text=truncate(item.title, 22), bg="#F6F6F4", fg=INK, font=(FONT, 9), anchor="w")
+            title = tk.Label(row, text=truncate(item.title, 22), bg=PANEL, fg=INK, font=(FONT, 9), anchor="w")
             title.pack(side="left", fill="x", expand=True)
             when = "逾期" if item.is_overdue else item.due_at.strftime("%H:%M")
-            meta = tk.Label(row, text=when, bg="#F6F6F4", fg=DANGER if item.is_overdue else SUBTLE, font=(FONT, 8))
+            meta = tk.Label(row, text=when, bg=PANEL, fg=DANGER if item.is_overdue else SUBTLE, font=(FONT, 8))
             meta.pack(side="right")
             for widget in (row, title, meta):
                 widget.bind("<Button-1>", lambda _event, event=item: self._edit(event))
@@ -656,6 +660,8 @@ class CalendarApp(tk.Tk):
         self.update_dialog: Optional[UpdateProgressDialog] = None
         self.update_busy = False
         self.show_holidays = bool(self.store.settings.get("show_holidays", True))
+        self.desktop_session_active = False
+        self._window_ready = False
         self.tray_icon: Optional[TrayIcon] = None
         self.tray_actions: queue.Queue[str] = queue.Queue()
 
@@ -668,10 +674,19 @@ class CalendarApp(tk.Tk):
                 pass
         self.configure(bg=BORDER)
         self.overrideredirect(True)
+        if not self.store.settings.get("crisp_text_migrated_v1", False):
+            self.store.settings["opacity"] = 1.0
+            self.store.settings["crisp_text_migrated_v1"] = True
+            try:
+                self.store.save()
+            except OSError:
+                # Keep the crisp in-memory default even if a portable/read-only
+                # launch cannot persist the one-time migration yet.
+                pass
         try:
-            opacity = min(1.0, max(0.82, float(self.store.settings.get("opacity", 0.97))))
+            opacity = min(1.0, max(0.90, float(self.store.settings.get("opacity", 1.0))))
         except (TypeError, ValueError):
-            opacity = 0.97
+            opacity = 1.0
         self.attributes("-alpha", opacity)
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -712,7 +727,7 @@ class CalendarApp(tk.Tk):
         self.header.pack_propagate(False)
         month_box = tk.Frame(self.header, bg=SURFACE)
         month_box.pack(side="left", fill="y")
-        self.month_label = tk.Label(month_box, text="", bg=SURFACE, fg=INK, font=(FONT, 13, "bold"), cursor="hand2")
+        self.month_label = tk.Label(month_box, text="", bg=SURFACE, fg=INK, font=(FONT, 14, "bold"), cursor="hand2")
         self.month_label.pack(anchor="w", pady=(8, 0))
         self.month_hint = tk.Label(month_box, text="", bg=SURFACE, fg=SUBTLE, font=(FONT, 8))
         self.month_hint.pack(anchor="w")
@@ -735,7 +750,7 @@ class CalendarApp(tk.Tk):
         Tooltip(previous, "上个月（滚轮向上 / PgUp）")
         Tooltip(today, "回到今天（Ctrl+T）")
         Tooltip(following, "下个月（滚轮向下 / PgDn）")
-        Tooltip(self.mode_button, "桌面模式不遮挡应用；点击可切换置顶")
+        Tooltip(self.mode_button, "桌面模式空闲时不遮挡应用；点击月历会临时前置")
         Tooltip(close, "退出，提醒也会停止")
 
         for widget in (self.header, month_box, self.month_hint):
@@ -812,10 +827,13 @@ class CalendarApp(tk.Tk):
         self.quick_entry = tk.Entry(
             quick,
             textvariable=self.quick_var,
-            bg="#EEEDE9",
+            bg=PANEL,
             fg=FAINT,
             insertbackground=INK,
             relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
             font=(FONT, 9),
         )
         self.quick_entry.pack(side="left", fill="x", expand=True, ipady=6)
@@ -850,7 +868,8 @@ class CalendarApp(tk.Tk):
 
     def _finish_window_setup(self) -> None:
         make_tool_window(self)
-        self.apply_window_mode()
+        self._window_ready = True
+        self.apply_window_mode(force_desktop=True)
 
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-n>", lambda _event: self.open_editor())
@@ -866,12 +885,14 @@ class CalendarApp(tk.Tk):
         self.bind("<Up>", lambda event: self._move_selection(event, -7))
         self.bind("<Down>", lambda event: self._move_selection(event, 7))
         self.bind("<FocusOut>", self._on_focus_out)
+        self.bind("<ButtonPress>", self._activate_desktop_session, add="+")
+        self.bind("<Escape>", lambda _event: self._end_desktop_session())
 
     def render(self) -> None:
         self.month_label.configure(text=f"{self.shown_year}年 {self.shown_month}月")
         today = date.today()
         self.month_hint.configure(text=f"今天 {today.month}月{today.day}日 · {WEEKDAYS[today.weekday()]}")
-        self.mode_button.configure(text="置顶" if self.window_mode == "pinned" else "桌面")
+        self._update_mode_badge()
 
         weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(self.shown_year, self.shown_month)
         while len(weeks) < 6:
@@ -922,8 +943,8 @@ class CalendarApp(tk.Tk):
         self.after_idle(self._update_scrollbar)
 
     def _build_event_card(self, item: Event) -> None:
-        card_bg = "#F0F0ED" if item.done else CARD
-        card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground="#E4E3DF", cursor="hand2")
+        card_bg = PANEL if item.done else CARD
+        card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground=BORDER, cursor="hand2")
         card.pack(fill="x", pady=(0, 5), padx=1)
         stripe = tk.Frame(card, bg="#C5C6CA" if item.done else item.color, width=4)
         stripe.pack(side="left", fill="y")
@@ -1125,11 +1146,12 @@ class CalendarApp(tk.Tk):
 
     def toggle_window_mode(self) -> None:
         self.window_mode = "pinned" if self.window_mode == "desktop" else "desktop"
+        self.desktop_session_active = False
         self.store.settings["window_mode"] = self.window_mode
-        self.apply_window_mode()
+        self.apply_window_mode(force_desktop=self.window_mode == "desktop")
         self.store.save()
 
-    def apply_window_mode(self) -> None:
+    def apply_window_mode(self, force_desktop: bool = False) -> None:
         if not self.winfo_exists():
             return
         make_tool_window(self)
@@ -1146,18 +1168,59 @@ class CalendarApp(tk.Tk):
             self.lift()
         else:
             self.attributes("-topmost", False)
-            send_to_desktop(self)
-        self.mode_button.configure(text="置顶" if self.window_mode == "pinned" else "桌面")
+            if force_desktop:
+                self.desktop_session_active = False
+            if self.desktop_session_active:
+                raise_for_interaction(self)
+            else:
+                send_to_desktop(self)
+        self._update_mode_badge()
 
-    def _on_focus_out(self, _event=None) -> None:
-        if self.window_mode != "desktop":
+    def _update_mode_badge(self) -> None:
+        if self.window_mode == "pinned":
+            self.mode_button.configure(text="置顶", fg=ACCENT)
+        elif self.desktop_session_active:
+            self.mode_button.configure(text="前台", fg=ACCENT)
+        else:
+            self.mode_button.configure(text="桌面", fg=SUBTLE)
+
+    def _activate_desktop_session(self, _event=None) -> None:
+        if not self._window_ready or self.window_mode != "desktop":
             return
         if self._lower_job:
             try:
                 self.after_cancel(self._lower_job)
             except tk.TclError:
                 pass
-        self._lower_job = self.after(120, self.apply_window_mode)
+            self._lower_job = None
+        self.desktop_session_active = True
+        raise_for_interaction(self)
+        self._update_mode_badge()
+
+    def _on_focus_out(self, _event=None) -> None:
+        if self.window_mode != "desktop" or not self.desktop_session_active:
+            return
+        if self._lower_job:
+            try:
+                self.after_cancel(self._lower_job)
+            except tk.TclError:
+                pass
+        self._lower_job = self.after(700, self._return_to_desktop_if_inactive)
+
+    def _return_to_desktop_if_inactive(self) -> None:
+        self._lower_job = None
+        if self.window_mode != "desktop" or not self.desktop_session_active:
+            return
+        if self._active_overlays() or is_foreground_process():
+            self._lower_job = self.after(900, self._return_to_desktop_if_inactive)
+            return
+        self._end_desktop_session()
+
+    def _end_desktop_session(self) -> None:
+        if self.window_mode != "desktop":
+            return
+        self.desktop_session_active = False
+        self.apply_window_mode(force_desktop=True)
 
     def _start_drag(self, event: tk.Event) -> None:
         self._drag_origin = (event.x_root, event.y_root, self.winfo_x(), self.winfo_y())
@@ -1222,7 +1285,7 @@ class CalendarApp(tk.Tk):
     def show_main_menu(self) -> None:
         menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
         menu.add_command(
-            label="切换为桌面模式" if self.window_mode == "pinned" else "临时置顶",
+            label="切换为桌面模式" if self.window_mode == "pinned" else "始终置顶",
             command=self.toggle_window_mode,
         )
         menu.add_command(label="收起日程区" if self.agenda_open else "展开日程区", command=self.toggle_agenda)
@@ -1231,9 +1294,9 @@ class CalendarApp(tk.Tk):
         opacity_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         current_opacity = round(float(self.attributes("-alpha")), 2)
         self.opacity_var = tk.DoubleVar(value=current_opacity)
-        for label, value in (("100%", 1.0), ("97%", 0.97), ("92%", 0.92), ("85%", 0.85)):
+        for label, value in (("清晰（100%，推荐）", 1.0), ("轻透（97%）", 0.97), ("柔和（92%）", 0.92)):
             opacity_menu.add_radiobutton(label=label, variable=self.opacity_var, value=value, command=lambda v=value: self.set_opacity(v))
-        menu.add_cascade(label="透明度", menu=opacity_menu)
+        menu.add_cascade(label="透明度（半透明会降低文字清晰度）", menu=opacity_menu)
         self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
         menu.add_checkbutton(label="开机自动启动", variable=self.autostart_var, command=lambda: self.toggle_autostart(self.autostart_var.get()))
         self.holiday_var = tk.BooleanVar(value=self.show_holidays)
@@ -1295,7 +1358,9 @@ class CalendarApp(tk.Tk):
             self.on_close()
             return
         self.deiconify()
-        bring_to_front(self)
+        self._activate_desktop_session()
+        if self.window_mode == "pinned":
+            bring_to_front(self)
         if action == "new":
             self.after(40, self.open_editor)
         elif action == "today":
@@ -1333,7 +1398,7 @@ class CalendarApp(tk.Tk):
             "Ctrl+N：新建日程\n"
             "Ctrl+T：回到今天\n"
             "拖动顶部：移动挂件位置\n\n"
-            "桌面模式会待在普通应用窗口后面；需要临时覆盖其他窗口时，点击顶部“桌面”切换为置顶。",
+            "桌面模式空闲时会待在普通应用窗口后面。单击月历后会临时进入前台，完成操作并切换到其他应用后自动回到桌面层；按 Esc 可立即归位。需要一直覆盖其他窗口时，再点击顶部“桌面”切换为置顶。",
             parent=self,
         )
 
@@ -1529,6 +1594,7 @@ class CalendarApp(tk.Tk):
 
 def main() -> None:
     sys.excepthook = log_exception
+    enable_dpi_awareness()
     instance = SingleInstance()
     if instance.already_running:
         root = tk.Tk()

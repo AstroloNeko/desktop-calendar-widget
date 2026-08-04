@@ -36,6 +36,10 @@ class StoreTests(unittest.TestCase):
         store = Store(self.data_file)
         self.assertEqual(store.settings["window_mode"], "desktop")
 
+    def test_new_install_defaults_to_crisp_opacity(self):
+        store = Store(self.data_file)
+        self.assertEqual(store.settings["opacity"], 1.0)
+
     def test_legacy_hex_color_is_preserved(self):
         event = Event("legacy", "旧版颜色", "2026-08-04T10:00", color="#F05252")
         self.assertEqual(event.color, "#F05252")

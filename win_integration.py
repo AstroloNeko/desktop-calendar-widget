@@ -147,6 +147,39 @@ def bring_to_front(widget) -> None:
     user32.SetForegroundWindow(hwnd)
 
 
+def raise_for_interaction(widget) -> None:
+    """Raise a gadget as a normal foreground window without making it always-on-top."""
+    if not IS_WINDOWS:
+        try:
+            widget.lift()
+        except Exception:
+            pass
+        return
+    hwnd = window_handle(widget)
+    if not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    flags = 0x0001 | 0x0002 | 0x0040  # NOSIZE | NOMOVE | SHOWWINDOW
+    user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, flags)  # HWND_NOTOPMOST
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags)  # HWND_TOP within normal windows
+    user32.BringWindowToTop(hwnd)
+    user32.SetForegroundWindow(hwnd)
+
+
+def is_foreground_process() -> bool:
+    """Whether the currently active native window belongs to this process."""
+    if not IS_WINDOWS:
+        return True
+    user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return False
+    process_id = ctypes.c_ulong()
+    user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(process_id))
+    return process_id.value == os.getpid()
+
+
 def clamp_to_work_area(x: int, y: int, width: int, height: int) -> tuple[int, int]:
     """Keep a saved gadget position visible on the nearest monitor, including negative coordinates."""
     if not IS_WINDOWS:
