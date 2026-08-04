@@ -981,7 +981,7 @@ class CalendarApp(tk.Tk):
             opacity = 1.0
         self.attributes("-alpha", opacity)
         self.resizable(False, False)
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
 
         self._configure_style()
         self._build_ui()
@@ -1047,13 +1047,13 @@ class CalendarApp(tk.Tk):
         self.mode_button.pack(side="left", padx=(3, 0))
         self.menu_button = button_label(controls, "···", self.show_main_menu, width=3, font_size=10)
         self.menu_button.pack(side="left")
-        close = button_label(controls, "×", self.on_close, width=2, fg=SUBTLE, hover="#F6DFE2", font_size=12)
-        close.pack(side="left")
+        minimize = button_label(controls, "—", self.hide_to_tray, width=2, fg=SUBTLE, hover=HOVER, font_size=11)
+        minimize.pack(side="left")
         Tooltip(previous, "上个月（滚轮向上 / PgUp）")
         Tooltip(today, "回到今天（Ctrl+T）")
         Tooltip(following, "下个月（滚轮向下 / PgDn）")
         Tooltip(self.mode_button, "桌面模式空闲时不遮挡应用；点击月历会临时前置")
-        Tooltip(close, "退出，提醒也会停止")
+        Tooltip(minimize, "隐藏到通知区域，提醒仍会继续")
 
         for widget in (self.header, month_box, self.month_hint):
             widget.bind("<ButtonPress-1>", self._start_drag)
@@ -1698,7 +1698,7 @@ class CalendarApp(tk.Tk):
             return
         intro_key = "tray_intro_version"
         first_for_version = self.store.settings.get(intro_key) != __version__
-        message = "启动完成。双击此图标可显示月历，右键可新建日程或检查更新。" if first_for_version else None
+        message = "启动完成。顶部横线可隐藏到这里，单击托盘图标可重新显示月历。" if first_for_version else None
         self.tray_icon = TrayIcon(
             f"{APP_NAME} v{__version__}",
             resource_path("assets/calendar.ico"),
@@ -1771,6 +1771,8 @@ class CalendarApp(tk.Tk):
             "Ctrl+N：新建日程\n"
             "Ctrl+T：回到今天\n"
             "拖动顶部：移动挂件位置\n\n"
+            "顶部横线 / Alt+F4：隐藏到通知区域，提醒继续运行\n"
+            "真正退出：右键托盘图标并选择“退出桌面月历”\n\n"
             "桌面模式空闲时会待在普通应用窗口后面。单击月历后会临时进入前台，完成操作并切换到其他应用后自动回到桌面层；按 Esc 可立即归位。需要一直覆盖其他窗口时，再点击顶部“桌面”切换为置顶。",
             parent=self,
         )
@@ -2017,6 +2019,25 @@ class CalendarApp(tk.Tk):
         self.store.upsert(event)
         popup.destroy()
         self.render()
+
+    def hide_to_tray(self) -> None:
+        if not self.tray_icon:
+            self._start_tray_icon()
+        if not self.tray_icon or self.tray_icon.error or not self.tray_icon.is_available:
+            messagebox.showwarning(APP_NAME, "系统通知区域图标暂时不可用，月历没有隐藏。", parent=self)
+            return
+        try:
+            self._save_window_settings()
+        except (OSError, tk.TclError):
+            pass
+        if self._lower_job:
+            try:
+                self.after_cancel(self._lower_job)
+            except tk.TclError:
+                pass
+            self._lower_job = None
+        self.desktop_session_active = False
+        self.withdraw()
 
     def on_close(self) -> None:
         try:

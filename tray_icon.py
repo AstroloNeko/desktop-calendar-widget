@@ -113,6 +113,10 @@ class TrayIcon:
         self._ready.wait(2.0)
         return bool(self._hwnd)
 
+    @property
+    def is_available(self) -> bool:
+        return bool(self._hwnd)
+
     def stop(self) -> None:
         if IS_WINDOWS and self._hwnd:
             post_message = ctypes.windll.user32.PostMessageW
