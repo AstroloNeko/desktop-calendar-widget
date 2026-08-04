@@ -1,0 +1,87 @@
+# 桌面月历 Desktop Calendar
+
+一个轻量的 Windows 桌面月历挂件：像经典 Win7 Gadget 一样停留在桌面层，不遮挡普通应用，同时提供 DDL、颜色分类、优先级和提前提醒。
+
+## 下载和使用
+
+1. 在 [Releases](https://github.com/AstroloNeko/desktop-calendar-widget/releases) 下载 `DesktopCalendar-win64.zip`。
+2. 解压到任意可写目录。
+3. 双击 `DesktopCalendar.exe`。
+
+软件默认位于普通应用窗口后面；按 `Win+D` 可以快速回到桌面查看。点击顶部“桌面”可临时切换为“置顶”。
+
+不要只把 EXE 单独移出解压目录；程序旁边的 `_internal` 和 `DesktopCalendarUpdater.exe` 都是运行、更新所需文件。
+
+## 功能
+
+- 372 像素宽的无边框桌面挂件，可拖动并记忆位置
+- 桌面模式与临时置顶模式
+- 月历色点、当天日程、逾期状态和完成状态
+- 单击日期查看，双击日期新建，右键打开快捷菜单
+- 快速输入标题并按 Enter 保存
+- 颜色分类、四档优先级、备注和多种提前提醒
+- 提醒弹窗支持稍后 10 分钟与直接完成
+- 未来 7 天和逾期事项汇总
+- 日程区展开/收起、透明度调整和多显示器边界保护
+- 可选开机启动、JSON 数据备份和单实例保护
+- 从 GitHub Releases 检查、校验、下载并自动安装更新
+
+日程数据保存在 `%APPDATA%\DesktopCalendar\calendar_data.json`，升级软件不会覆盖个人数据。
+
+## 自动更新
+
+打开右上角 `···` 菜单，点击“检查更新”。如果 GitHub Releases 存在更高版本，软件会：
+
+1. 下载 `DesktopCalendar-win64.zip`；
+2. 使用 Release 中的 `.sha256` 文件校验完整性；
+3. 启动独立更新器并关闭当前版本；
+4. 覆盖程序文件并自动重启。
+
+源码模式只检查版本，不会覆盖源码；自动安装仅在打包后的发布版中启用。
+
+## 常用操作
+
+| 操作 | 效果 |
+|---|---|
+| 单击日期 | 查看当天日程 |
+| 双击日期 | 新建当天日程 |
+| 右键日期或日程 | 打开快捷菜单 |
+| 单击日程 | 编辑日程 |
+| 单击日程左侧圆圈 | 完成或恢复 |
+| 月历上滚轮 | 切换月份 |
+| 拖动顶部 | 移动挂件 |
+| Ctrl+N / N / Enter | 新建日程 |
+| Ctrl+T / T / Home | 回到今天 |
+| PageUp / PageDown | 切换月份 |
+| 方向键 | 移动所选日期 |
+
+## 从源码运行
+
+需要 Python 3.9 或更新版本，不依赖第三方运行库：
+
+```powershell
+pyw -3 app.py
+```
+
+也可以双击 `启动桌面月历.pyw`、`.vbs` 或 `.bat`。
+
+## 构建发布包
+
+安装 PyInstaller 后运行：
+
+```powershell
+py -3 -m pip install pyinstaller
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1
+```
+
+生成结果位于 `release/`。发布 Release 时必须同时上传 ZIP 和对应的 `.sha256` 文件，否则客户端会拒绝自动安装。
+
+## 测试
+
+```powershell
+py -3 -m unittest discover -s tests -v
+```
+
+## License
+
+[MIT](LICENSE)
