@@ -30,7 +30,6 @@ from win_integration import (
     SingleInstance,
     bring_to_front,
     clamp_to_work_area,
-    enable_dpi_awareness,
     is_autostart_enabled,
     is_foreground_process,
     make_tool_window,
@@ -54,20 +53,18 @@ WINDOW_WIDTH = 372
 OPEN_HEIGHT = 548
 CLOSED_HEIGHT = 338
 
-SURFACE = "#F8FAFC"
+SURFACE = "#F7F6F2"
 CARD = "#FFFFFF"
-PANEL = "#F1F5F9"
-INK = "#1F2937"
-SUBTLE = "#64748B"
-FAINT = "#94A3B8"
-BORDER = "#DCE3EA"
-HOVER = "#EEF2F7"
-ACCENT = "#5B6FD8"
-ACCENT_SOFT = "#E9EDFF"
-WEEKEND = "#C96B70"
-DANGER = "#D84D5B"
+INK = "#25262B"
+SUBTLE = "#777A83"
+FAINT = "#A9ABB2"
+BORDER = "#D8D7D2"
+HOVER = "#ECECF1"
+ACCENT = "#6273D9"
+ACCENT_SOFT = "#E8EAF8"
+WEEKEND = "#BC6B6B"
+DANGER = "#D9515D"
 FONT = "Microsoft YaHei UI"
-NUMBER_FONT = "Segoe UI"
 
 
 def geometry_at(width: int, height: int, x: int, y: int) -> str:
@@ -236,7 +233,7 @@ class DayCell(tk.Canvas):
         if self.selected:
             self.create_oval(center_x - 14, 1, center_x + 14, 25, fill=ACCENT, outline="")
         elif self.today:
-            self.create_oval(center_x - 13, 2, center_x + 13, 24, fill=ACCENT_SOFT, outline=ACCENT, width=1)
+            self.create_oval(center_x - 13, 2, center_x + 13, 24, outline=ACCENT, width=1.5)
 
         if self.selected:
             color = "white"
@@ -247,7 +244,7 @@ class DayCell(tk.Canvas):
         else:
             color = INK
         weight = "bold" if self.today or self.selected else "normal"
-        self.create_text(center_x, 13, text=str(self.day.day), fill=color, font=(NUMBER_FONT, 10, weight))
+        self.create_text(center_x, 13, text=str(self.day.day), fill=color, font=(FONT, 9, weight))
 
         if self.holiday and self.in_month:
             holiday_color = ACCENT if self.selected else {
@@ -259,7 +256,7 @@ class DayCell(tk.Canvas):
                 27,
                 text=truncate(self.holiday.short_name, 3),
                 fill=holiday_color,
-                font=(FONT, 7, "bold" if self.holiday.kind != "festival" else "normal"),
+                font=(FONT, 6, "bold" if self.holiday.kind != "festival" else "normal"),
             )
 
         if self.event_colors:
@@ -313,7 +310,7 @@ class EventEditor(tk.Toplevel):
         self.title_entry = tk.Entry(
             shell,
             textvariable=self.title_var,
-            bg=SURFACE,
+            bg="#FBFBFA",
             fg=INK,
             insertbackground=INK,
             relief="flat",
@@ -338,7 +335,7 @@ class EventEditor(tk.Toplevel):
         shortcuts = tk.Frame(shell, bg=CARD)
         shortcuts.pack(fill="x", pady=(7, 10))
         for label, offset in (("今天", 0), ("明天", 1), ("一周后", 7)):
-            chip = tk.Label(shortcuts, text=label, bg=PANEL, fg=SUBTLE, font=(FONT, 8), padx=8, pady=3, cursor="hand2")
+            chip = tk.Label(shortcuts, text=label, bg="#F0F1F4", fg=SUBTLE, font=(FONT, 8), padx=8, pady=3, cursor="hand2")
             chip.pack(side="left", padx=(0, 6))
             chip.bind("<Button-1>", lambda _event, days=offset: self.date_var.set((date.today() + timedelta(days=days)).isoformat()))
 
@@ -352,7 +349,7 @@ class EventEditor(tk.Toplevel):
                 variable=self.priority_var,
                 value=priority,
                 indicatoron=False,
-                bg=PANEL,
+                bg="#F0F1F4",
                 fg=SUBTLE,
                 selectcolor=ACCENT_SOFT,
                 activebackground=ACCENT_SOFT,
@@ -419,7 +416,7 @@ class EventEditor(tk.Toplevel):
             delete.pack(side="left")
         save = tk.Button(actions, text="保存", command=self.save, bg=ACCENT, fg="white", activebackground="#5263C6", activeforeground="white", relief="flat", bd=0, padx=20, pady=7, font=(FONT, 9, "bold"), cursor="hand2")
         save.pack(side="right")
-        cancel = tk.Button(actions, text="取消", command=self.close, bg=PANEL, fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2")
+        cancel = tk.Button(actions, text="取消", command=self.close, bg="#F0F1F4", fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2")
         cancel.pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _event: self.close())
@@ -459,7 +456,7 @@ class EventEditor(tk.Toplevel):
             parent,
             textvariable=variable,
             width=width,
-            bg=SURFACE,
+            bg="#FBFBFA",
             fg=INK,
             insertbackground=INK,
             relief="flat",
@@ -574,13 +571,13 @@ class UpcomingDialog(tk.Toplevel):
                 last_day = item.due_date
                 day_text = "今天" if last_day == date.today() else f"{last_day.month}月{last_day.day}日 · {WEEKDAYS[last_day.weekday()]}"
                 tk.Label(inner, text=day_text, bg=CARD, fg=SUBTLE, font=(FONT, 8, "bold"), anchor="w").pack(fill="x", pady=(8, 4))
-            row = tk.Frame(inner, bg=PANEL, cursor="hand2", padx=8, pady=7)
+            row = tk.Frame(inner, bg="#F6F6F4", cursor="hand2", padx=8, pady=7)
             row.pack(fill="x", pady=2)
             tk.Frame(row, bg=item.color, width=4).pack(side="left", fill="y", padx=(0, 8))
-            title = tk.Label(row, text=truncate(item.title, 22), bg=PANEL, fg=INK, font=(FONT, 9), anchor="w")
+            title = tk.Label(row, text=truncate(item.title, 22), bg="#F6F6F4", fg=INK, font=(FONT, 9), anchor="w")
             title.pack(side="left", fill="x", expand=True)
             when = "逾期" if item.is_overdue else item.due_at.strftime("%H:%M")
-            meta = tk.Label(row, text=when, bg=PANEL, fg=DANGER if item.is_overdue else SUBTLE, font=(FONT, 8))
+            meta = tk.Label(row, text=when, bg="#F6F6F4", fg=DANGER if item.is_overdue else SUBTLE, font=(FONT, 8))
             meta.pack(side="right")
             for widget in (row, title, meta):
                 widget.bind("<Button-1>", lambda _event, event=item: self._edit(event))
@@ -727,7 +724,7 @@ class CalendarApp(tk.Tk):
         self.header.pack_propagate(False)
         month_box = tk.Frame(self.header, bg=SURFACE)
         month_box.pack(side="left", fill="y")
-        self.month_label = tk.Label(month_box, text="", bg=SURFACE, fg=INK, font=(FONT, 14, "bold"), cursor="hand2")
+        self.month_label = tk.Label(month_box, text="", bg=SURFACE, fg=INK, font=(FONT, 13, "bold"), cursor="hand2")
         self.month_label.pack(anchor="w", pady=(8, 0))
         self.month_hint = tk.Label(month_box, text="", bg=SURFACE, fg=SUBTLE, font=(FONT, 8))
         self.month_hint.pack(anchor="w")
@@ -827,13 +824,10 @@ class CalendarApp(tk.Tk):
         self.quick_entry = tk.Entry(
             quick,
             textvariable=self.quick_var,
-            bg=PANEL,
+            bg="#EEEDE9",
             fg=FAINT,
             insertbackground=INK,
             relief="flat",
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            highlightcolor=ACCENT,
             font=(FONT, 9),
         )
         self.quick_entry.pack(side="left", fill="x", expand=True, ipady=6)
@@ -943,8 +937,8 @@ class CalendarApp(tk.Tk):
         self.after_idle(self._update_scrollbar)
 
     def _build_event_card(self, item: Event) -> None:
-        card_bg = PANEL if item.done else CARD
-        card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground=BORDER, cursor="hand2")
+        card_bg = "#F0F0ED" if item.done else CARD
+        card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground="#E4E3DF", cursor="hand2")
         card.pack(fill="x", pady=(0, 5), padx=1)
         stripe = tk.Frame(card, bg="#C5C6CA" if item.done else item.color, width=4)
         stripe.pack(side="left", fill="y")
@@ -1594,7 +1588,6 @@ class CalendarApp(tk.Tk):
 
 def main() -> None:
     sys.excepthook = log_exception
-    enable_dpi_awareness()
     instance = SingleInstance()
     if instance.already_running:
         root = tk.Tk()
