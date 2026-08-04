@@ -104,6 +104,7 @@ DEFAULT_SETTINGS = {
     "x": None,
     "y": None,
     "default_reminder": 60,
+    "show_holidays": True,
 }
 
 

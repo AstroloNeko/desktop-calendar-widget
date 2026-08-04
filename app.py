@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import queue
 import shutil
 import sys
 import threading
@@ -23,8 +24,11 @@ from calendar_core import (
     Event,
     Store,
 )
+from holiday_data import HolidayInfo, holiday_for
+from tray_icon import TrayIcon
 from win_integration import (
     SingleInstance,
+    bring_to_front,
     clamp_to_work_area,
     is_autostart_enabled,
     make_tool_window,
@@ -71,6 +75,11 @@ def position_at(x: int, y: int) -> str:
 
 def truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
+
+
+def resource_path(relative: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / relative
 
 
 def log_exception(exc_type, exc_value, exc_traceback) -> None:
@@ -167,6 +176,7 @@ class DayCell(tk.Canvas):
         self.today = False
         self.hovered = False
         self.event_colors: list[str] = []
+        self.holiday: Optional[HolidayInfo] = None
         self.bind("<Configure>", lambda _event: self.draw())
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
@@ -174,12 +184,21 @@ class DayCell(tk.Canvas):
         self.bind("<Double-Button-1>", self._double_click)
         self.bind("<Button-3>", self._right_click)
 
-    def update_day(self, day: date, in_month: bool, selected: bool, today: bool, colors: list[str]) -> None:
+    def update_day(
+        self,
+        day: date,
+        in_month: bool,
+        selected: bool,
+        today: bool,
+        colors: list[str],
+        holiday: Optional[HolidayInfo] = None,
+    ) -> None:
         self.day = day
         self.in_month = in_month
         self.selected = selected
         self.today = today
         self.event_colors = colors[:3]
+        self.holiday = holiday
         self.draw()
 
     def _enter(self, _event=None) -> None:
@@ -208,11 +227,11 @@ class DayCell(tk.Canvas):
         width = max(self.winfo_width(), 38)
         center_x = width / 2
         if self.hovered and not self.selected:
-            self.create_oval(center_x - 15, 2, center_x + 15, 32, fill=HOVER, outline="")
+            self.create_oval(center_x - 14, 1, center_x + 14, 25, fill=HOVER, outline="")
         if self.selected:
-            self.create_oval(center_x - 15, 2, center_x + 15, 32, fill=ACCENT, outline="")
+            self.create_oval(center_x - 14, 1, center_x + 14, 25, fill=ACCENT, outline="")
         elif self.today:
-            self.create_oval(center_x - 14, 3, center_x + 14, 31, outline=ACCENT, width=1.5)
+            self.create_oval(center_x - 13, 2, center_x + 13, 24, outline=ACCENT, width=1.5)
 
         if self.selected:
             color = "white"
@@ -223,7 +242,20 @@ class DayCell(tk.Canvas):
         else:
             color = INK
         weight = "bold" if self.today or self.selected else "normal"
-        self.create_text(center_x, 17, text=str(self.day.day), fill=color, font=(FONT, 9, weight))
+        self.create_text(center_x, 13, text=str(self.day.day), fill=color, font=(FONT, 9, weight))
+
+        if self.holiday and self.in_month:
+            holiday_color = "white" if self.selected else {
+                "day_off": DANGER,
+                "workday": "#C47B28",
+            }.get(self.holiday.kind, "#8B70A8")
+            self.create_text(
+                center_x,
+                27,
+                text=truncate(self.holiday.short_name, 3),
+                fill=holiday_color,
+                font=(FONT, 6, "bold" if self.holiday.kind != "festival" else "normal"),
+            )
 
         if self.event_colors:
             gap = 7
@@ -231,7 +263,7 @@ class DayCell(tk.Canvas):
             for index, event_color in enumerate(self.event_colors):
                 x = start + index * gap
                 dot_color = "white" if self.selected else event_color
-                self.create_oval(x - 2, 31, x + 2, 35, fill=dot_color, outline="")
+                self.create_oval(x - 2, 32, x + 2, 36, fill=dot_color, outline="")
 
 
 class EventEditor(tk.Toplevel):
@@ -246,7 +278,6 @@ class EventEditor(tk.Toplevel):
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.transient(master)
         self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
 
         due = event.due_at if event else self._suggest_due(selected)
@@ -393,7 +424,15 @@ class EventEditor(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
         self._center_near_master()
-        self.title_entry.focus_set()
+        self.after_idle(self._present)
+        self.after(80, self._present)
+        self.after(260, self._present)
+
+    def _present(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.master_app.present_overlay(self)
+        self.title_entry.focus_force()
 
     @staticmethod
     def _suggest_due(day: date) -> datetime:
@@ -500,7 +539,6 @@ class UpcomingDialog(tk.Toplevel):
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.transient(master)
         self.geometry("360x450")
 
         shell = tk.Frame(self, bg=CARD)
@@ -549,6 +587,7 @@ class UpcomingDialog(tk.Toplevel):
         y = master.winfo_rooty() + 40
         x, y = clamp_to_work_area(x, y, 360, 450)
         self.geometry(geometry_at(360, 450, x, y))
+        self.after_idle(lambda: self.master_app.present_overlay(self))
 
     def _edit(self, event: Event) -> None:
         self.close()
@@ -566,7 +605,6 @@ class UpdateProgressDialog(tk.Toplevel):
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.transient(master)
         self.geometry("340x138")
         shell = tk.Frame(self, bg=CARD, padx=18, pady=14)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
@@ -581,6 +619,7 @@ class UpdateProgressDialog(tk.Toplevel):
         y = master.winfo_rooty() + 90
         x, y = clamp_to_work_area(x, y, 340, 138)
         self.geometry(geometry_at(340, 138, x, y))
+        self.after_idle(lambda: master.present_overlay(self))
 
     def set_status(self, status: str) -> None:
         if self.winfo_exists():
@@ -612,11 +651,21 @@ class CalendarApp(tk.Tk):
         self._drag_origin: Optional[tuple[int, int, int, int]] = None
         self._lower_job: Optional[str] = None
         self.notification_windows: list[tk.Toplevel] = []
+        self.overlay_windows: list[tk.Toplevel] = []
         self.editor_window: Optional[EventEditor] = None
         self.update_dialog: Optional[UpdateProgressDialog] = None
         self.update_busy = False
+        self.show_holidays = bool(self.store.settings.get("show_holidays", True))
+        self.tray_icon: Optional[TrayIcon] = None
+        self.tray_actions: queue.Queue[str] = queue.Queue()
 
         self.title(APP_NAME)
+        icon_path = resource_path("assets/calendar.ico")
+        if icon_path.exists():
+            try:
+                self.iconbitmap(default=str(icon_path))
+            except tk.TclError:
+                pass
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         try:
@@ -633,6 +682,8 @@ class CalendarApp(tk.Tk):
         self._bind_shortcuts()
         self.render()
         self.after(80, self._finish_window_setup)
+        self.after(220, self._start_tray_icon)
+        self.after(250, self._poll_tray_actions)
         self.after(1200, self.check_reminders)
         if self.store.load_error:
             self.after(250, lambda: messagebox.showwarning(APP_NAME, f"日历数据读取失败，已先打开空日历。\n\n{self.store.load_error}", parent=self))
@@ -841,6 +892,7 @@ class CalendarApp(tk.Tk):
                 selected=day == self.selected,
                 today=day == today,
                 colors=colors,
+                holiday=holiday_for(day) if self.show_holidays else None,
             )
         self.render_agenda()
 
@@ -848,7 +900,9 @@ class CalendarApp(tk.Tk):
         for child in self.agenda_inner.winfo_children():
             child.destroy()
         events = self.store.events_on(self.selected)
-        self.agenda_title.configure(text=f"{self.selected.month}月{self.selected.day}日 · {WEEKDAYS[self.selected.weekday()]}")
+        holiday = holiday_for(self.selected) if self.show_holidays else None
+        holiday_text = f" · {holiday.name}" if holiday else ""
+        self.agenda_title.configure(text=f"{self.selected.month}月{self.selected.day}日 · {WEEKDAYS[self.selected.weekday()]}{holiday_text}")
         self.agenda_count.configure(text=f"{len(events)} 项" if events else "无安排")
         self.agenda_toggle.configure(text="⌃" if self.agenda_open else "⌄")
 
@@ -963,10 +1017,52 @@ class CalendarApp(tk.Tk):
 
     def open_editor(self, event: Optional[Event] = None, selected: Optional[date] = None) -> None:
         if self.editor_window and self.editor_window.winfo_exists():
-            self.editor_window.lift()
-            self.editor_window.focus_force()
+            self.present_overlay(self.editor_window)
             return
+        if self._lower_job:
+            try:
+                self.after_cancel(self._lower_job)
+            except tk.TclError:
+                pass
+            self._lower_job = None
+        self.attributes("-topmost", False)
+        send_to_desktop(self)
         self.editor_window = EventEditor(self, selected or (event.due_date if event else self.selected), event)
+
+    def present_overlay(self, window: tk.Toplevel) -> None:
+        if not window.winfo_exists():
+            return
+        if window not in self.overlay_windows:
+            self.overlay_windows.append(window)
+            window.bind(
+                "<Destroy>",
+                lambda event, overlay=window: self._overlay_destroyed(event, overlay),
+                add="+",
+            )
+        self.attributes("-topmost", False)
+        send_to_desktop(self)
+        make_tool_window(window)
+        window.attributes("-topmost", True)
+        window.lift()
+        bring_to_front(window)
+
+    def _overlay_destroyed(self, event: tk.Event, window: tk.Toplevel) -> None:
+        if event.widget is not window:
+            return
+        if window in self.overlay_windows:
+            self.overlay_windows.remove(window)
+        if self.winfo_exists() and not self._active_overlays():
+            self.after(80, self.apply_window_mode)
+
+    def _active_overlays(self) -> list[tk.Toplevel]:
+        active: list[tk.Toplevel] = []
+        for window in self.overlay_windows:
+            try:
+                if window.winfo_exists() and window.state() != "withdrawn":
+                    active.append(window)
+            except tk.TclError:
+                continue
+        return active
 
     def upsert_event(self, event: Event) -> None:
         self.store.upsert(event)
@@ -1037,6 +1133,14 @@ class CalendarApp(tk.Tk):
         if not self.winfo_exists():
             return
         make_tool_window(self)
+        overlays = self._active_overlays()
+        if overlays:
+            self.attributes("-topmost", False)
+            send_to_desktop(self)
+            for overlay in overlays:
+                overlay.attributes("-topmost", True)
+            bring_to_front(overlays[-1])
+            return
         if self.window_mode == "pinned":
             self.attributes("-topmost", True)
             self.lift()
@@ -1132,6 +1236,8 @@ class CalendarApp(tk.Tk):
         menu.add_cascade(label="透明度", menu=opacity_menu)
         self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
         menu.add_checkbutton(label="开机自动启动", variable=self.autostart_var, command=lambda: self.toggle_autostart(self.autostart_var.get()))
+        self.holiday_var = tk.BooleanVar(value=self.show_holidays)
+        menu.add_checkbutton(label="显示节假日与常用节日", variable=self.holiday_var, command=lambda: self.toggle_holidays(self.holiday_var.get()))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
         menu.add_command(label="导出数据备份…", command=self.export_backup)
         menu.add_separator()
@@ -1145,6 +1251,57 @@ class CalendarApp(tk.Tk):
         self.attributes("-alpha", value)
         self.store.settings["opacity"] = value
         self.store.save()
+
+    def toggle_holidays(self, enabled: bool) -> None:
+        self.show_holidays = enabled
+        self.store.settings["show_holidays"] = enabled
+        self.store.save()
+        self.render()
+
+    def _start_tray_icon(self) -> None:
+        if self.tray_icon or not self.winfo_exists():
+            return
+        intro_key = "tray_intro_version"
+        first_for_version = self.store.settings.get(intro_key) != __version__
+        message = "启动完成。双击此图标可显示月历，右键可新建日程或检查更新。" if first_for_version else None
+        self.tray_icon = TrayIcon(
+            f"{APP_NAME} v{__version__}",
+            resource_path("assets/calendar.ico"),
+            self.tray_actions.put,
+            startup_message=message,
+        )
+        if self.tray_icon.start() and first_for_version:
+            self.store.settings[intro_key] = __version__
+            self.store.save()
+        elif self.tray_icon.error:
+            log_exception(
+                RuntimeError,
+                RuntimeError(f"系统托盘初始化失败：{self.tray_icon.error}"),
+                None,
+            )
+
+    def _poll_tray_actions(self) -> None:
+        if not self.winfo_exists():
+            return
+        try:
+            while True:
+                self._handle_tray_action(self.tray_actions.get_nowait())
+        except queue.Empty:
+            pass
+        self.after(120, self._poll_tray_actions)
+
+    def _handle_tray_action(self, action: str) -> None:
+        if action == "exit":
+            self.on_close()
+            return
+        self.deiconify()
+        bring_to_front(self)
+        if action == "new":
+            self.after(40, self.open_editor)
+        elif action == "today":
+            self.go_today()
+        elif action == "update":
+            self.after(40, self.check_for_updates)
 
     def toggle_autostart(self, enabled: bool) -> None:
         try:
@@ -1336,6 +1493,7 @@ class CalendarApp(tk.Tk):
         x = popup.winfo_screenwidth() - 358
         y = popup.winfo_screenheight() - 225 - offset
         popup.geometry(geometry_at(340, 168, x, max(8, y)))
+        self.present_overlay(popup)
         self.notification_windows.append(popup)
         popup.bind("<Destroy>", lambda _event, window=popup: self._forget_notification(window), add="+")
         popup.after(90000, lambda: popup.destroy() if popup.winfo_exists() else None)
@@ -1363,6 +1521,9 @@ class CalendarApp(tk.Tk):
             pass
         if self.instance_guard:
             self.instance_guard.close()
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.tray_icon = None
         self.destroy()
 
 

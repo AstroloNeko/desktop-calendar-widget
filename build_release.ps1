@@ -13,17 +13,26 @@ New-Item -ItemType Directory -Path (Join-Path $buildDir "spec") -Force | Out-Nul
 
 & $pythonCommand @pythonPrefix -m PyInstaller --noconfirm --clean --windowed --onedir `
     --name DesktopCalendar `
+    --icon (Join-Path $projectDir "assets\calendar.ico") `
+    --add-data "$projectDir\assets;assets" `
     --distpath $distDir `
     --workpath (Join-Path $buildDir "app") `
     --specpath (Join-Path $buildDir "spec") `
     app.py
+if ($LASTEXITCODE -ne 0) {
+    throw "DesktopCalendar build failed with exit code $LASTEXITCODE"
+}
 
 & $pythonCommand @pythonPrefix -m PyInstaller --noconfirm --clean --windowed --onefile `
     --name DesktopCalendarUpdater `
+    --icon (Join-Path $projectDir "assets\calendar.ico") `
     --distpath (Join-Path $buildDir "updater-dist") `
     --workpath (Join-Path $buildDir "updater") `
     --specpath (Join-Path $buildDir "spec") `
     updater.py
+if ($LASTEXITCODE -ne 0) {
+    throw "DesktopCalendarUpdater build failed with exit code $LASTEXITCODE"
+}
 
 Copy-Item (Join-Path $buildDir "updater-dist\DesktopCalendarUpdater.exe") $appDir -Force
 Copy-Item (Join-Path $projectDir "README.md") $appDir -Force

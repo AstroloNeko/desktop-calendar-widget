@@ -128,6 +128,25 @@ def send_to_desktop(widget) -> None:
     user32.SetWindowPos(hwnd, 1, 0, 0, 0, 0, flags)  # Conservative fallback: HWND_BOTTOM.
 
 
+def bring_to_front(widget) -> None:
+    """Present a short-lived editor/notification above the desktop-layer gadget."""
+    if not IS_WINDOWS:
+        try:
+            widget.lift()
+            widget.focus_force()
+        except Exception:
+            pass
+        return
+    hwnd = window_handle(widget)
+    if not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    flags = 0x0001 | 0x0002 | 0x0040  # NOSIZE | NOMOVE | SHOWWINDOW
+    user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, flags)  # HWND_TOPMOST
+    user32.BringWindowToTop(hwnd)
+    user32.SetForegroundWindow(hwnd)
+
+
 def clamp_to_work_area(x: int, y: int, width: int, height: int) -> tuple[int, int]:
     """Keep a saved gadget position visible on the nearest monitor, including negative coordinates."""
     if not IS_WINDOWS:
