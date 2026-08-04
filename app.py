@@ -22,9 +22,10 @@ from calendar_core import (
     REMINDERS,
     WEEKDAYS,
     Event,
+    RoutineItem,
     Store,
 )
-from holiday_data import HolidayInfo, holiday_for
+from holiday_data import HolidayInfo, holiday_for, is_workday
 from tray_icon import TrayIcon
 from win_integration import (
     SingleInstance,
@@ -229,11 +230,17 @@ class DayCell(tk.Canvas):
         width = max(self.winfo_width(), 38)
         center_x = width / 2
         if self.hovered and not self.selected:
-            self.create_oval(center_x - 14, 1, center_x + 14, 25, fill=HOVER, outline="")
+            self.create_rectangle(center_x - 14, 1, center_x + 14, 25, fill=HOVER, outline="")
         if self.selected:
-            self.create_oval(center_x - 14, 1, center_x + 14, 25, fill=ACCENT, outline="")
+            if self.app.day_selected_image:
+                self.create_image(center_x, 13, image=self.app.day_selected_image)
+            else:
+                self.create_oval(center_x - 13, 0, center_x + 13, 26, fill=ACCENT, outline="")
         elif self.today:
-            self.create_oval(center_x - 13, 2, center_x + 13, 24, outline=ACCENT, width=1.5)
+            if self.app.day_today_image:
+                self.create_image(center_x, 13, image=self.app.day_today_image)
+            else:
+                self.create_oval(center_x - 13, 0, center_x + 13, 26, outline=ACCENT, width=1)
 
         if self.selected:
             color = "white"
@@ -256,7 +263,7 @@ class DayCell(tk.Canvas):
                 27,
                 text=truncate(self.holiday.short_name, 3),
                 fill=holiday_color,
-                font=(FONT, 6, "bold" if self.holiday.kind != "festival" else "normal"),
+                font=(FONT, 7, "bold" if self.holiday.kind != "festival" else "normal"),
             )
 
         if self.event_colors:
@@ -264,7 +271,7 @@ class DayCell(tk.Canvas):
             start = center_x - (len(self.event_colors) - 1) * gap / 2
             for index, event_color in enumerate(self.event_colors):
                 x = start + index * gap
-                self.create_oval(x - 2, 32, x + 2, 36, fill=event_color, outline="")
+                self.create_rectangle(x - 2, 33, x + 2, 35, fill=event_color, outline="")
 
 
 class EventEditor(tk.Toplevel):
@@ -532,6 +539,290 @@ class EventEditor(tk.Toplevel):
         self.master_app.after(120, self.master_app.apply_window_mode)
 
 
+class RoutineEditor(tk.Toplevel):
+    WIDTH = 360
+    HEIGHT = 350
+
+    def __init__(self, master: "CalendarApp", item: Optional[RoutineItem] = None) -> None:
+        super().__init__(master)
+        self.master_app = master
+        self.item = item
+        self.title("编辑清单项" if item else "新增清单项")
+        self.configure(bg=BORDER)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.title_var = tk.StringVar(value=item.title if item else "")
+        self.kind_var = tk.StringVar(value=item.kind if item else "habit")
+        self.color_var = tk.StringVar(value=item.color if item else COLORS["薄荷绿"])
+        self.color_canvases: list[tuple[tk.Canvas, str]] = []
+
+        shell = tk.Frame(self, bg=CARD, padx=20)
+        shell.pack(fill="both", expand=True, padx=1, pady=1)
+        header = tk.Frame(shell, bg=CARD, height=54)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text="编辑清单项" if item else "新增清单项", bg=CARD, fg=INK, font=(FONT, 12, "bold")).pack(side="left", pady=13)
+        button_label(header, "×", self.close, width=2, bg=CARD, font_size=13).pack(side="right", pady=8)
+
+        tk.Label(shell, text="每天要做什么？", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
+        self.title_entry = tk.Entry(
+            shell,
+            textvariable=self.title_var,
+            bg="#FBFBFA",
+            fg=INK,
+            insertbackground=INK,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            font=(FONT, 11),
+        )
+        self.title_entry.pack(fill="x", pady=(5, 14), ipady=7)
+
+        tk.Label(shell, text="类型", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
+        kind_row = tk.Frame(shell, bg=CARD)
+        kind_row.pack(fill="x", pady=(5, 6))
+        for text, value in (("习惯 · 每个工作日重置", "habit"), ("待办 · 完成一次即结束", "todo")):
+            tk.Radiobutton(
+                kind_row,
+                text=text,
+                variable=self.kind_var,
+                value=value,
+                indicatoron=False,
+                bg="#F0F1F4",
+                fg=SUBTLE,
+                selectcolor=ACCENT_SOFT,
+                activebackground=ACCENT_SOFT,
+                activeforeground=INK,
+                relief="flat",
+                bd=0,
+                font=(FONT, 8),
+                padx=10,
+                pady=5,
+                cursor="hand2",
+            ).pack(side="left", padx=(0, 7))
+        tk.Label(shell, text="习惯只记录当天完成；待办完成后不会在次日出现。", bg=CARD, fg=FAINT, font=(FONT, 8)).pack(anchor="w", pady=(0, 14))
+
+        tk.Label(shell, text="颜色", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
+        color_row = tk.Frame(shell, bg=CARD)
+        color_row.pack(fill="x", pady=(5, 20))
+        color_values = list(COLORS.values())
+        if self.color_var.get() not in color_values:
+            color_values.append(self.color_var.get())
+        for color in color_values:
+            swatch = tk.Canvas(color_row, width=30, height=26, bg=CARD, bd=0, highlightthickness=0, cursor="hand2")
+            swatch.pack(side="left", padx=(0, 7))
+            swatch.bind("<Button-1>", lambda _event, value=color: self._choose_color(value))
+            self.color_canvases.append((swatch, color))
+        self._draw_colors()
+
+        actions = tk.Frame(shell, bg=CARD)
+        actions.pack(fill="x", side="bottom", pady=(0, 17))
+        if item:
+            tk.Button(actions, text="删除", command=self.delete, bg="#FCEDEF", fg=DANGER, relief="flat", bd=0, padx=14, pady=7, cursor="hand2").pack(side="left")
+        tk.Button(actions, text="保存", command=self.save, bg=ACCENT, fg="white", activebackground="#5263C6", activeforeground="white", relief="flat", bd=0, padx=20, pady=7, font=(FONT, 9, "bold"), cursor="hand2").pack(side="right")
+        tk.Button(actions, text="取消", command=self.close, bg="#F0F1F4", fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2").pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _event: self.close())
+        self.bind("<Control-Return>", lambda _event: self.save())
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.WIDTH) // 2
+        y = master.winfo_rooty() + 48
+        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
+        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        self.after_idle(self._present)
+
+    def _present(self) -> None:
+        if self.winfo_exists():
+            self.master_app.present_overlay(self)
+            self.title_entry.focus_force()
+
+    def _choose_color(self, color: str) -> None:
+        self.color_var.set(color)
+        self._draw_colors()
+
+    def _draw_colors(self) -> None:
+        selected = self.color_var.get()
+        for canvas, color in self.color_canvases:
+            canvas.delete("all")
+            canvas.create_rectangle(2, 2, 28, 24, fill=CARD, outline=INK if color == selected else CARD, width=2)
+            canvas.create_rectangle(6, 6, 24, 20, fill=color, outline="")
+
+    def save(self) -> None:
+        title = self.title_var.get().strip()
+        if not title:
+            messagebox.showinfo(APP_NAME, "请先填写清单内容。", parent=self)
+            self.title_entry.focus_set()
+            return
+        item = RoutineItem(
+            id=self.item.id if self.item else str(uuid.uuid4()),
+            title=title,
+            kind=self.kind_var.get(),
+            color=self.color_var.get(),
+            created_on=self.item.created_on if self.item else date.today().isoformat(),
+            completed_on=self.item.completed_on if self.item else None,
+            habit_done=list(self.item.habit_done) if self.item else [],
+            enabled=self.item.enabled if self.item else True,
+        )
+        self.master_app.store.upsert_routine(item)
+        self.master_app.render()
+        if self.master_app.routine_manager and self.master_app.routine_manager.winfo_exists():
+            self.master_app.routine_manager.refresh()
+        self.close()
+
+    def delete(self) -> None:
+        if self.item and messagebox.askyesno(APP_NAME, f"确定删除“{self.item.title}”？", parent=self):
+            self.master_app.store.delete_routine(self.item.id)
+            self.master_app.render()
+            if self.master_app.routine_manager and self.master_app.routine_manager.winfo_exists():
+                self.master_app.routine_manager.refresh()
+            self.close()
+
+    def close(self) -> None:
+        if self.master_app.routine_editor is self:
+            self.master_app.routine_editor = None
+        self.destroy()
+        manager = self.master_app.routine_manager
+        if manager and manager.winfo_exists():
+            self.master_app.after(60, lambda: self.master_app.present_overlay(manager))
+        else:
+            self.master_app.after(120, self.master_app.apply_window_mode)
+
+
+class RoutineManager(tk.Toplevel):
+    WIDTH = 400
+    HEIGHT = 500
+
+    def __init__(self, master: "CalendarApp") -> None:
+        super().__init__(master)
+        self.master_app = master
+        self.title("工作日清单")
+        self.configure(bg=BORDER)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.reminder_enabled = tk.BooleanVar(value=bool(master.store.settings.get("routine_reminder_enabled", True)))
+        self.reminder_time = tk.StringVar(value=str(master.store.settings.get("routine_reminder_time", "09:00")))
+
+        shell = tk.Frame(self, bg=CARD)
+        shell.pack(fill="both", expand=True, padx=1, pady=1)
+        header = tk.Frame(shell, bg=CARD, padx=18, pady=10)
+        header.pack(fill="x")
+        title_box = tk.Frame(header, bg=CARD)
+        title_box.pack(side="left")
+        tk.Label(title_box, text="工作日清单", bg=CARD, fg=INK, font=(FONT, 13, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(title_box, text="习惯每天回来，待办完成一次即结束", bg=CARD, fg=FAINT, font=(FONT, 8), anchor="w").pack(anchor="w")
+        button_label(header, "×", self.close, width=2, bg=CARD, font_size=13).pack(side="right")
+        tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
+
+        reminder = tk.Frame(shell, bg="#F7F7F5", padx=16, pady=10)
+        reminder.pack(fill="x")
+        tk.Checkbutton(
+            reminder,
+            text="工作日提醒",
+            variable=self.reminder_enabled,
+            command=self._save_reminder,
+            bg="#F7F7F5",
+            activebackground="#F7F7F5",
+            fg=INK,
+            selectcolor=CARD,
+            font=(FONT, 9),
+        ).pack(side="left")
+        tk.Label(reminder, text="每天", bg="#F7F7F5", fg=SUBTLE, font=(FONT, 8)).pack(side="left", padx=(12, 5))
+        time_entry = tk.Entry(
+            reminder,
+            textvariable=self.reminder_time,
+            width=7,
+            justify="center",
+            bg=CARD,
+            fg=INK,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            font=(FONT, 9),
+        )
+        time_entry.pack(side="left", ipady=4)
+        time_entry.bind("<Return>", lambda _event: self._save_reminder(show_error=True))
+        time_entry.bind("<FocusOut>", lambda _event: self._save_reminder())
+        tk.Label(reminder, text="法定节假日跳过", bg="#F7F7F5", fg=FAINT, font=(FONT, 8)).pack(side="right")
+
+        list_shell = tk.Frame(shell, bg=CARD, padx=14, pady=10)
+        list_shell.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(list_shell, bg=CARD, bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_shell, orient="vertical", command=self.canvas.yview)
+        self.list_inner = tk.Frame(self.canvas, bg=CARD)
+        self.list_window = self.canvas.create_window((0, 0), window=self.list_inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.list_inner.bind("<Configure>", lambda _event: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda event: self.canvas.itemconfigure(self.list_window, width=event.width))
+        self.canvas.bind("<MouseWheel>", lambda event: self.canvas.yview_scroll(int(-event.delta / 120), "units"))
+
+        footer = tk.Frame(shell, bg=CARD, padx=16, pady=12)
+        footer.pack(fill="x")
+        tk.Button(footer, text="＋ 新增清单项", command=lambda: self.master_app.open_routine_editor(), bg=ACCENT, fg="white", activebackground="#5263C6", activeforeground="white", relief="flat", bd=0, padx=16, pady=7, font=(FONT, 9, "bold"), cursor="hand2").pack(side="right")
+        tk.Label(footer, text="仅在工作日显示", bg=CARD, fg=FAINT, font=(FONT, 8)).pack(side="left")
+
+        self.bind("<Escape>", lambda _event: self.close())
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.refresh()
+        self.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.WIDTH) // 2
+        y = master.winfo_rooty() + 24
+        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
+        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        self.after_idle(lambda: master.present_overlay(self))
+
+    def _save_reminder(self, show_error: bool = False) -> None:
+        value = self.reminder_time.get().strip()
+        try:
+            datetime.strptime(value, "%H:%M")
+        except ValueError:
+            fallback = str(self.master_app.store.settings.get("routine_reminder_time", "09:00"))
+            self.reminder_time.set(fallback)
+            if show_error:
+                messagebox.showinfo(APP_NAME, "提醒时间请使用 HH:MM，例如 09:00。", parent=self)
+            return
+        self.master_app.store.settings["routine_reminder_enabled"] = self.reminder_enabled.get()
+        self.master_app.store.settings["routine_reminder_time"] = value
+        self.master_app.store.save()
+
+    def refresh(self) -> None:
+        for child in self.list_inner.winfo_children():
+            child.destroy()
+        if not self.master_app.store.routines:
+            tk.Label(self.list_inner, text="还没有每日清单\n点击下方按钮添加第一项", bg=CARD, fg=FAINT, font=(FONT, 9), justify="center", pady=48).pack(fill="x")
+            return
+        for item in self.master_app.store.routines:
+            row = tk.Frame(self.list_inner, bg="#F6F6F4", highlightthickness=1, highlightbackground="#E4E3DF", cursor="hand2")
+            row.pack(fill="x", pady=(0, 7), padx=1)
+            tk.Frame(row, bg=item.color, width=5).pack(side="left", fill="y")
+            content = tk.Frame(row, bg="#F6F6F4", padx=10, pady=8)
+            content.pack(side="left", fill="both", expand=True)
+            title = tk.Label(content, text=truncate(item.title, 28), bg="#F6F6F4", fg=INK, font=(FONT, 9), anchor="w")
+            title.pack(fill="x")
+            type_text = "习惯 · 每个工作日" if item.kind == "habit" else ("待办 · 已完成" if item.completed_on else "待办 · 等待完成")
+            meta = tk.Label(content, text=type_text, bg="#F6F6F4", fg=SUBTLE, font=(FONT, 8), anchor="w")
+            meta.pack(fill="x", pady=(2, 0))
+            more = tk.Label(row, text="›", bg="#F6F6F4", fg=FAINT, font=(FONT, 13), width=3, cursor="hand2")
+            more.pack(side="right", fill="y")
+            for widget in (row, content, title, meta, more):
+                widget.bind("<Button-1>", lambda _event, entry=item: self.master_app.open_routine_editor(entry))
+                widget.bind("<MouseWheel>", lambda event: self.canvas.yview_scroll(int(-event.delta / 120), "units"))
+
+    def close(self) -> None:
+        if self.master_app.routine_editor and self.master_app.routine_editor.winfo_exists():
+            self.master_app.routine_editor.close()
+        if self.master_app.routine_manager is self:
+            self.master_app.routine_manager = None
+        self.destroy()
+        self.master_app.after(120, self.master_app.apply_window_mode)
+
+
 class UpcomingDialog(tk.Toplevel):
     def __init__(self, master: "CalendarApp") -> None:
         super().__init__(master)
@@ -654,6 +945,8 @@ class CalendarApp(tk.Tk):
         self.notification_windows: list[tk.Toplevel] = []
         self.overlay_windows: list[tk.Toplevel] = []
         self.editor_window: Optional[EventEditor] = None
+        self.routine_manager: Optional[RoutineManager] = None
+        self.routine_editor: Optional[RoutineEditor] = None
         self.update_dialog: Optional[UpdateProgressDialog] = None
         self.update_busy = False
         self.show_holidays = bool(self.store.settings.get("show_holidays", True))
@@ -669,6 +962,8 @@ class CalendarApp(tk.Tk):
                 self.iconbitmap(default=str(icon_path))
             except tk.TclError:
                 pass
+        self.day_selected_image = self._load_image("assets/day_selected.png")
+        self.day_today_image = self._load_image("assets/day_today.png")
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         if not self.store.settings.get("crisp_text_migrated_v1", False):
@@ -699,6 +994,16 @@ class CalendarApp(tk.Tk):
         self.after(1200, self.check_reminders)
         if self.store.load_error:
             self.after(250, lambda: messagebox.showwarning(APP_NAME, f"日历数据读取失败，已先打开空日历。\n\n{self.store.load_error}", parent=self))
+
+    @staticmethod
+    def _load_image(relative: str) -> Optional[tk.PhotoImage]:
+        path = resource_path(relative)
+        if not path.exists():
+            return None
+        try:
+            return tk.PhotoImage(file=str(path))
+        except tk.TclError:
+            return None
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -795,7 +1100,10 @@ class CalendarApp(tk.Tk):
         self.agenda_count.pack(side="left", padx=(7, 0))
         add = button_label(self.agenda_bar, "+", lambda: self.open_editor(), width=2, bg=SURFACE, fg=ACCENT, hover=ACCENT_SOFT, font_size=13)
         add.pack(side="right", pady=4)
+        routines = button_label(self.agenda_bar, "清单", self.open_routine_manager, width=4, bg=SURFACE, fg=ACCENT, hover=ACCENT_SOFT, font_size=8)
+        routines.pack(side="right", pady=4, padx=(0, 2))
         Tooltip(add, "添加这一天的日程（Ctrl+N 或双击日期）")
+        Tooltip(routines, "管理工作日习惯与一次性待办")
         for widget in (self.agenda_bar, self.agenda_toggle, self.agenda_title, self.agenda_count):
             widget.bind("<Button-1>", lambda _event: self.toggle_agenda())
 
@@ -915,19 +1223,24 @@ class CalendarApp(tk.Tk):
         for child in self.agenda_inner.winfo_children():
             child.destroy()
         events = self.store.events_on(self.selected)
+        routine_items = self.store.routines_on(self.selected) if is_workday(self.selected) else []
         holiday = holiday_for(self.selected) if self.show_holidays else None
         holiday_text = f" · {holiday.name}" if holiday else ""
         self.agenda_title.configure(text=f"{self.selected.month}月{self.selected.day}日 · {WEEKDAYS[self.selected.weekday()]}{holiday_text}")
-        self.agenda_count.configure(text=f"{len(events)} 项" if events else "无安排")
+        total_items = len(events) + len(routine_items)
+        self.agenda_count.configure(text=f"{total_items} 项" if total_items else "无安排")
         self.agenda_toggle.configure(text="⌃" if self.agenda_open else "⌄")
 
-        if not events:
+        if not events and not routine_items:
             empty = tk.Frame(self.agenda_inner, bg=SURFACE, height=114)
             empty.pack(fill="both", expand=True)
             empty.pack_propagate(False)
-            tk.Label(empty, text="这一天很清静", bg=SURFACE, fg=SUBTLE, font=(FONT, 9)).pack(pady=(27, 2))
-            tk.Label(empty, text="双击日期，或在下方直接输入", bg=SURFACE, fg=FAINT, font=(FONT, 8)).pack()
+            empty_title = "休息日不安排每日清单" if not is_workday(self.selected) and self.store.routines else "这一天很清静"
+            tk.Label(empty, text=empty_title, bg=SURFACE, fg=SUBTLE, font=(FONT, 9)).pack(pady=(27, 2))
+            tk.Label(empty, text="双击日期添加日程，清单仅在工作日出现", bg=SURFACE, fg=FAINT, font=(FONT, 8)).pack()
         else:
+            for item in routine_items:
+                self._build_routine_card(item)
             for item in events:
                 self._build_event_card(item)
 
@@ -945,7 +1258,7 @@ class CalendarApp(tk.Tk):
         stripe.pack_propagate(False)
         check = tk.Label(
             card,
-            text="✓" if item.done else "○",
+            text="✓" if item.done else "□",
             bg=card_bg,
             fg="#999BA2" if item.done else item.color,
             font=(FONT, 11, "bold"),
@@ -978,6 +1291,48 @@ class CalendarApp(tk.Tk):
         for widget in (card, content, title, meta, more, stripe):
             widget.bind("<Button-1>", lambda _event, event=item: self.open_editor(event))
             widget.bind("<Button-3>", lambda event, item=item: self.show_event_menu(item, event.x_root, event.y_root))
+            widget.bind("<MouseWheel>", self._agenda_wheel)
+
+    def _build_routine_card(self, item: RoutineItem) -> None:
+        done = item.is_done_on(self.selected)
+        card_bg = "#F0F0ED" if done else CARD
+        card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground="#E4E3DF", cursor="hand2")
+        card.pack(fill="x", pady=(0, 5), padx=1)
+        stripe = tk.Frame(card, bg="#C5C6CA" if done else item.color, width=4)
+        stripe.pack(side="left", fill="y")
+        stripe.pack_propagate(False)
+        check = tk.Label(
+            card,
+            text="✓" if done else "□",
+            bg=card_bg,
+            fg="#999BA2" if done else item.color,
+            font=(FONT, 11, "bold"),
+            width=3,
+            cursor="hand2",
+        )
+        check.pack(side="left", fill="y", padx=(3, 0))
+        check.bind("<Button-1>", lambda _event, entry=item: self.toggle_routine(entry))
+        content = tk.Frame(card, bg=card_bg, padx=1, pady=5)
+        content.pack(side="left", fill="both", expand=True)
+        title = tk.Label(
+            content,
+            text=truncate(item.title, 22),
+            bg=card_bg,
+            fg="#96989E" if done else INK,
+            font=(FONT, 9, "overstrike" if done else "normal"),
+            anchor="w",
+        )
+        title.pack(fill="x")
+        if item.kind == "habit":
+            meta_text = "习惯 · 今日已完成，下一工作日继续" if done else "习惯 · 每个工作日"
+        else:
+            meta_text = "待办 · 已完成" if done else "待办 · 完成一次即结束"
+        meta = tk.Label(content, text=meta_text, bg=card_bg, fg=SUBTLE, font=(FONT, 8), anchor="w")
+        meta.pack(fill="x", pady=(1, 0))
+        tag = tk.Label(card, text="习惯" if item.kind == "habit" else "待办", bg=ACCENT_SOFT if item.kind == "habit" else "#F8EED7", fg=ACCENT if item.kind == "habit" else "#A56E14", font=(FONT, 7), padx=5, pady=2)
+        tag.pack(side="right", padx=(2, 7))
+        for widget in (card, content, title, meta, tag, stripe):
+            widget.bind("<Button-1>", lambda _event, entry=item: self.open_routine_editor(entry))
             widget.bind("<MouseWheel>", self._agenda_wheel)
 
     def _update_scrollbar(self) -> None:
@@ -1044,6 +1399,22 @@ class CalendarApp(tk.Tk):
         send_to_desktop(self)
         self.editor_window = EventEditor(self, selected or (event.due_date if event else self.selected), event)
 
+    def open_routine_manager(self) -> None:
+        if self.routine_manager and self.routine_manager.winfo_exists():
+            self.present_overlay(self.routine_manager)
+            return
+        self.attributes("-topmost", False)
+        send_to_desktop(self)
+        self.routine_manager = RoutineManager(self)
+
+    def open_routine_editor(self, item: Optional[RoutineItem] = None) -> None:
+        if self.routine_editor and self.routine_editor.winfo_exists():
+            self.present_overlay(self.routine_editor)
+            return
+        self.attributes("-topmost", False)
+        send_to_desktop(self)
+        self.routine_editor = RoutineEditor(self, item)
+
     def present_overlay(self, window: tk.Toplevel) -> None:
         if not window.winfo_exists():
             return
@@ -1094,6 +1465,12 @@ class CalendarApp(tk.Tk):
         event.snooze_until = None
         self.store.upsert(event)
         self.render()
+
+    def toggle_routine(self, item: RoutineItem) -> None:
+        self.store.toggle_routine(item, self.selected)
+        self.render()
+        if self.routine_manager and self.routine_manager.winfo_exists():
+            self.routine_manager.refresh()
 
     def quick_add(self, _event=None) -> str:
         title = self.quick_var.get().strip()
@@ -1284,6 +1661,7 @@ class CalendarApp(tk.Tk):
         )
         menu.add_command(label="收起日程区" if self.agenda_open else "展开日程区", command=self.toggle_agenda)
         menu.add_command(label="查看未来 7 天", command=lambda: UpcomingDialog(self))
+        menu.add_command(label="管理工作日清单…", command=self.open_routine_manager)
         menu.add_separator()
         opacity_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         current_opacity = round(float(self.attributes("-alpha")), 2)
@@ -1386,7 +1764,8 @@ class CalendarApp(tk.Tk):
             "单击日期：查看当天安排\n"
             "双击日期：新建当天日程\n"
             "右键日期：打开快捷菜单\n"
-            "单击日程：编辑；圆圈：完成\n"
+            "单击日程：编辑；方框：完成\n"
+            "工作日清单：习惯每天重置，待办完成一次即结束\n"
             "滚轮 / PgUp / PgDn：切换月份\n"
             "方向键：移动所选日期\n"
             "Ctrl+N：新建日程\n"
@@ -1517,10 +1896,76 @@ class CalendarApp(tk.Tk):
                     event.snooze_until = None
                 self.show_notification(event)
                 changed = True
+        if self._check_routine_reminder(now):
+            changed = True
         if changed:
             self.store.save()
             self.render()
         self.after(15000, self.check_reminders)
+
+    def _check_routine_reminder(self, now: datetime) -> bool:
+        if not self.store.settings.get("routine_reminder_enabled", True) or not is_workday(now.date()):
+            return False
+        reminder_value = str(self.store.settings.get("routine_reminder_time", "09:00"))
+        try:
+            reminder_time = datetime.strptime(reminder_value, "%H:%M").time()
+        except ValueError:
+            return False
+        if now.time() < reminder_time:
+            return False
+        key = f"routine:{now.date().isoformat()}:{reminder_value}"
+        if key in self.store.notified:
+            return False
+        incomplete = [item for item in self.store.routines_on(now.date()) if not item.is_done_on(now.date())]
+        if not incomplete:
+            return False
+        self.store.notified.add(key)
+        self.show_routine_notification(incomplete)
+        return True
+
+    def show_routine_notification(self, items: list[RoutineItem]) -> None:
+        try:
+            self.bell()
+        except tk.TclError:
+            pass
+        popup = tk.Toplevel(self)
+        popup.title("工作日清单提醒")
+        popup.configure(bg=BORDER)
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.geometry("350x190")
+        shell = tk.Frame(popup, bg=CARD)
+        shell.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Frame(shell, bg=ACCENT, height=5).pack(fill="x")
+        tk.Label(shell, text="今天的工作日清单", bg=CARD, fg=SUBTLE, font=(FONT, 8), anchor="w").pack(fill="x", padx=15, pady=(10, 2))
+        tk.Label(shell, text=f"还有 {len(items)} 项没有完成", bg=CARD, fg=INK, font=(FONT, 12, "bold"), anchor="w").pack(fill="x", padx=15)
+        preview = "  ·  ".join(truncate(item.title, 8) for item in items[:3])
+        if len(items) > 3:
+            preview += f"  等 {len(items)} 项"
+        tk.Label(shell, text=preview, bg=CARD, fg=SUBTLE, font=(FONT, 8), anchor="w").pack(fill="x", padx=15, pady=(5, 12))
+        actions = tk.Frame(shell, bg=CARD, padx=12)
+        actions.pack(fill="x")
+        tk.Button(actions, text="打开清单", command=lambda: self._open_from_routine_notification(popup), bg=ACCENT, fg="white", relief="flat", bd=0, padx=14, pady=6, font=(FONT, 9, "bold"), cursor="hand2").pack(side="right")
+        tk.Button(actions, text="知道了", command=popup.destroy, bg="#F0F1F4", fg=SUBTLE, relief="flat", bd=0, padx=12, pady=6, cursor="hand2").pack(side="right", padx=(0, 7))
+        popup.update_idletasks()
+        offset = min(len(self.notification_windows), 3) * 198
+        x = popup.winfo_screenwidth() - 368
+        y = popup.winfo_screenheight() - 247 - offset
+        popup.geometry(geometry_at(350, 190, x, max(8, y)))
+        self.present_overlay(popup)
+        self.notification_windows.append(popup)
+        popup.bind("<Destroy>", lambda _event, window=popup: self._forget_notification(window), add="+")
+        popup.after(90000, lambda: popup.destroy() if popup.winfo_exists() else None)
+
+    def _open_from_routine_notification(self, popup: tk.Toplevel) -> None:
+        popup.destroy()
+        self.go_today()
+        if not self.agenda_open:
+            self.toggle_agenda()
+        self.deiconify()
+        self._activate_desktop_session()
+        if self.window_mode == "pinned":
+            bring_to_front(self)
 
     def show_notification(self, event: Event) -> None:
         try:

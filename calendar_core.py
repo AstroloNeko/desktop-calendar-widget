@@ -4,7 +4,7 @@ import json
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -35,6 +35,7 @@ REMINDERS = {
     "提前 1 周": 10080,
 }
 WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+ROUTINE_KINDS = ("habit", "todo")
 
 
 @dataclass
@@ -97,6 +98,65 @@ class Event:
         return cls(**data)
 
 
+@dataclass
+class RoutineItem:
+    id: str
+    title: str
+    kind: str = "habit"
+    color: str = "#52B788"
+    created_on: str = ""
+    completed_on: Optional[str] = None
+    habit_done: list[str] = field(default_factory=list)
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.created_on:
+            self.created_on = date.today().isoformat()
+        date.fromisoformat(self.created_on)
+        if self.kind not in ROUTINE_KINDS:
+            self.kind = "habit"
+        if not isinstance(self.color, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", self.color):
+            self.color = COLORS["薄荷绿"]
+        normalized: list[str] = []
+        for value in self.habit_done:
+            if not isinstance(value, str):
+                continue
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                continue
+            if value not in normalized:
+                normalized.append(value)
+        self.habit_done = sorted(normalized)
+        if self.completed_on:
+            try:
+                date.fromisoformat(self.completed_on)
+            except (TypeError, ValueError):
+                self.completed_on = None
+        self.enabled = bool(self.enabled)
+
+    @property
+    def created_date(self) -> date:
+        return date.fromisoformat(self.created_on)
+
+    def is_done_on(self, day: date) -> bool:
+        if self.kind == "habit":
+            return day.isoformat() in self.habit_done
+        return self.completed_on == day.isoformat()
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "RoutineItem":
+        allowed = {item.name for item in fields(cls)}
+        data = {key: value for key, value in raw.items() if key in allowed}
+        if not isinstance(data.get("id"), str) or not data["id"]:
+            raise ValueError("invalid routine id")
+        if not isinstance(data.get("title"), str) or not data["title"].strip():
+            raise ValueError("invalid routine title")
+        if not isinstance(data.get("habit_done", []), list):
+            data["habit_done"] = []
+        return cls(**data)
+
+
 DEFAULT_SETTINGS = {
     "window_mode": "desktop",
     "agenda_open": True,
@@ -105,6 +165,8 @@ DEFAULT_SETTINGS = {
     "y": None,
     "default_reminder": 60,
     "show_holidays": True,
+    "routine_reminder_enabled": True,
+    "routine_reminder_time": "09:00",
 }
 
 
@@ -112,6 +174,7 @@ class Store:
     def __init__(self, data_file: Optional[Path] = None) -> None:
         self.data_file = data_file or DATA_FILE
         self.events: list[Event] = []
+        self.routines: list[RoutineItem] = []
         self.settings = dict(DEFAULT_SETTINGS)
         self.notified: set[str] = set()
         self.load_error: Optional[str] = None
@@ -127,6 +190,13 @@ class Store:
                 except (TypeError, ValueError, KeyError):
                     continue
             self.events = loaded
+            routines: list[RoutineItem] = []
+            for item in raw.get("routines", []):
+                try:
+                    routines.append(RoutineItem.from_dict(item))
+                except (TypeError, ValueError, KeyError):
+                    continue
+            self.routines = routines
             settings = raw.get("settings", {})
             if isinstance(settings, dict):
                 self.settings.update(settings)
@@ -148,8 +218,9 @@ class Store:
         notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
         self.notified = set(notification_history)
         payload = {
-            "version": 2,
+            "version": 3,
             "events": [asdict(event) for event in self.events],
+            "routines": [asdict(item) for item in self.routines],
             "settings": self.settings,
             "notified": notification_history,
         }
@@ -193,7 +264,7 @@ class Store:
 
     def create_quick(self, title: str, day: date) -> Event:
         now = datetime.now()
-        if day == now.date() and now.hour < 23:
+        if day == now.date():
             due = now.replace(second=0, microsecond=0) + timedelta(minutes=30)
             due = due.replace(minute=(due.minute // 30) * 30)
         else:
@@ -208,3 +279,34 @@ class Store:
         )
         self.upsert(event)
         return event
+
+    def upsert_routine(self, item: RoutineItem) -> None:
+        self.routines = [existing for existing in self.routines if existing.id != item.id]
+        self.routines.append(item)
+        self.save()
+
+    def delete_routine(self, item_id: str) -> None:
+        self.routines = [item for item in self.routines if item.id != item_id]
+        self.save()
+
+    def routines_on(self, day: date) -> list[RoutineItem]:
+        visible: list[RoutineItem] = []
+        for item in self.routines:
+            if not item.enabled or day < item.created_date:
+                continue
+            if item.kind == "todo" and item.completed_on and day > date.fromisoformat(item.completed_on):
+                continue
+            visible.append(item)
+        return sorted(visible, key=lambda item: (item.is_done_on(day), item.kind == "todo", item.created_on, item.title))
+
+    def toggle_routine(self, item: RoutineItem, day: date) -> None:
+        day_key = day.isoformat()
+        if item.kind == "habit":
+            if day_key in item.habit_done:
+                item.habit_done.remove(day_key)
+            else:
+                item.habit_done.append(day_key)
+                item.habit_done.sort()
+        else:
+            item.completed_on = None if item.completed_on == day_key else day_key
+        self.upsert_routine(item)

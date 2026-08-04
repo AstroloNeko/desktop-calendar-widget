@@ -122,5 +122,15 @@ def holiday_for(day: date) -> Optional[HolidayInfo]:
     return common
 
 
+def is_workday(day: date) -> bool:
+    """Use the official schedule when known and weekdays everywhere else."""
+    info = holiday_for(day)
+    if info and info.kind == "workday":
+        return True
+    if info and info.kind == "day_off":
+        return False
+    return day.weekday() < 5
+
+
 def official_schedule_years() -> tuple[int, ...]:
     return (2026,)

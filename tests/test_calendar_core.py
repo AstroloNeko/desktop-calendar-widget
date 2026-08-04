@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from calendar_core import COLORS, Event, Store
+from calendar_core import COLORS, Event, RoutineItem, Store
 
 
 class StoreTests(unittest.TestCase):
@@ -83,6 +83,32 @@ class StoreTests(unittest.TestCase):
             Event("later", "以后", (now + timedelta(days=10)).isoformat(timespec="minutes")),
         ]
         self.assertEqual([event.id for event in store.upcoming(7)], ["late", "soon"])
+
+    def test_habit_completion_is_scoped_to_one_day(self):
+        store = Store(self.data_file)
+        item = RoutineItem("habit", "读书", kind="habit", created_on="2026-08-03")
+        store.upsert_routine(item)
+        store.toggle_routine(item, date(2026, 8, 4))
+        self.assertTrue(item.is_done_on(date(2026, 8, 4)))
+        self.assertFalse(item.is_done_on(date(2026, 8, 5)))
+        self.assertEqual([entry.id for entry in store.routines_on(date(2026, 8, 5))], ["habit"])
+
+    def test_todo_completion_hides_it_after_completion_day(self):
+        store = Store(self.data_file)
+        item = RoutineItem("todo", "交材料", kind="todo", created_on="2026-08-03")
+        store.upsert_routine(item)
+        store.toggle_routine(item, date(2026, 8, 4))
+        self.assertTrue(item.is_done_on(date(2026, 8, 4)))
+        self.assertEqual(store.routines_on(date(2026, 8, 5)), [])
+
+    def test_routines_round_trip(self):
+        store = Store(self.data_file)
+        item = RoutineItem("habit", "拉伸", kind="habit", color=COLORS["薄荷绿"], created_on="2026-08-03")
+        store.upsert_routine(item)
+        store.toggle_routine(item, date(2026, 8, 4))
+        loaded = Store(self.data_file)
+        self.assertEqual(len(loaded.routines), 1)
+        self.assertTrue(loaded.routines[0].is_done_on(date(2026, 8, 4)))
 
 
 if __name__ == "__main__":

@@ -30,3 +30,22 @@ draw.text((x, y), text, font=font, fill="#25262B")
 
 image.save(ASSETS / "calendar.png")
 image.save(ASSETS / "calendar.ico", sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+
+
+def save_day_indicator(filename: str, *, fill: str | None = None, outline: str | None = None) -> None:
+    output_size = 28
+    scale = 4
+    canvas = Image.new("RGBA", (output_size * scale, output_size * scale), (0, 0, 0, 0))
+    indicator = ImageDraw.Draw(canvas)
+    inset = 1.5 * scale
+    indicator.ellipse(
+        (inset, inset, output_size * scale - inset, output_size * scale - inset),
+        fill=fill,
+        outline=outline,
+        width=2 * scale if outline else 1,
+    )
+    canvas.resize((output_size, output_size), Image.Resampling.LANCZOS).save(ASSETS / filename)
+
+
+save_day_indicator("day_selected.png", fill="#6273D9")
+save_day_indicator("day_today.png", outline="#6273D9")

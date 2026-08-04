@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from holiday_data import holiday_for, official_schedule_years
+from holiday_data import holiday_for, is_workday, official_schedule_years
 
 
 class HolidayDataTests(unittest.TestCase):
@@ -24,6 +24,12 @@ class HolidayDataTests(unittest.TestCase):
 
     def test_schedule_year_metadata(self) -> None:
         self.assertEqual(official_schedule_years(), (2026,))
+
+    def test_workday_rule_respects_weekends_holidays_and_makeup_days(self) -> None:
+        self.assertTrue(is_workday(date(2026, 8, 3)))
+        self.assertFalse(is_workday(date(2026, 8, 2)))
+        self.assertFalse(is_workday(date(2026, 10, 2)))
+        self.assertTrue(is_workday(date(2026, 10, 10)))
 
 
 if __name__ == "__main__":
