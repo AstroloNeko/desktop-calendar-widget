@@ -76,10 +76,34 @@ class StoreTests(unittest.TestCase):
         )
         store = Store(self.data_file)
         self.assertTrue(store.events[0].has_time)
+        self.assertEqual(store.events[0].duration_days, 1)
 
     def test_untimed_event_cannot_keep_a_relative_reminder(self):
         event = Event("untimed", "无具体时间", "2026-08-05T23:59", has_time=False, reminder=60)
         self.assertIsNone(event.reminder)
+
+    def test_multiday_event_appears_on_every_covered_day(self):
+        store = Store(self.data_file)
+        event = Event("span", "连续任务", "2026-08-05T23:59", has_time=False, duration_days=3)
+        store.upsert(event)
+        self.assertEqual([item.id for item in store.events_on(date(2026, 8, 5))], ["span"])
+        self.assertEqual([item.id for item in store.events_on(date(2026, 8, 6))], ["span"])
+        self.assertEqual([item.id for item in store.events_on(date(2026, 8, 7))], ["span"])
+        self.assertEqual(store.events_on(date(2026, 8, 8)), [])
+        self.assertEqual(event.end_date, date(2026, 8, 7))
+        self.assertEqual(event.day_number(date(2026, 8, 6)), 2)
+
+    def test_multiday_event_is_overdue_only_after_last_day(self):
+        now = datetime.now()
+        start = (now - timedelta(days=1)).replace(hour=23, minute=59, second=0, microsecond=0)
+        event = Event("active", "进行中的任务", start.isoformat(timespec="minutes"), has_time=False, duration_days=3)
+        self.assertFalse(event.is_overdue)
+
+    def test_multiday_duration_round_trips(self):
+        store = Store(self.data_file)
+        store.upsert(Event("span", "三天事项", "2026-08-05T10:00", duration_days=3))
+        loaded = Store(self.data_file)
+        self.assertEqual(loaded.events[0].duration_days, 3)
 
     def test_events_on_places_unfinished_before_finished(self):
         store = Store(self.data_file)

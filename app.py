@@ -300,6 +300,7 @@ class EventEditor(tk.Toplevel):
         self.title_var = tk.StringVar(value=event.title if event else "")
         self.date_var = tk.StringVar(value=due.strftime("%Y-%m-%d"))
         self.time_var = tk.StringVar(value=due.strftime("%H:%M") if event and event.has_time else "")
+        self.duration_var = tk.StringVar(value=str(event.duration_days if event else 1))
         self.priority_var = tk.StringVar(value=event.priority if event else "普通")
         self.color_var = tk.StringVar(value=event.color if event else COLORS["海盐蓝"])
         reminder_value = event.reminder if event else None
@@ -353,6 +354,25 @@ class EventEditor(tk.Toplevel):
             chip = tk.Label(shortcuts, text=label, bg="#F0F1F4", fg=SUBTLE, font=(FONT, 8), padx=8, pady=3, cursor="hand2")
             chip.pack(side="left", padx=(0, 6))
             chip.bind("<Button-1>", lambda _event, days=offset: self.date_var.set((date.today() + timedelta(days=days)).isoformat()))
+        tk.Label(shortcuts, text="持续", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(side="left", padx=(8, 3))
+        duration = tk.Spinbox(
+            shortcuts,
+            from_=1,
+            to=365,
+            textvariable=self.duration_var,
+            width=4,
+            justify="center",
+            bg="#FBFBFA",
+            fg=INK,
+            buttonbackground="#F0F1F4",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            font=(FONT, 8),
+        )
+        duration.pack(side="left", ipady=2)
+        tk.Label(shortcuts, text="天", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(side="left", padx=(3, 0))
 
         self._field_label(shell, "优先级")
         priority_row = tk.Frame(shell, bg=CARD)
@@ -511,11 +531,19 @@ class EventEditor(tk.Toplevel):
         except ValueError:
             messagebox.showinfo(APP_NAME, "日期或时间格式不正确。\n日期请使用 YYYY-MM-DD；时间可以留空，填写时请使用 HH:MM。", parent=self)
             return
+        try:
+            duration_days = int(self.duration_var.get().strip())
+            if not 1 <= duration_days <= 365:
+                raise ValueError
+        except ValueError:
+            messagebox.showinfo(APP_NAME, "持续天数请输入 1～365 之间的整数。", parent=self)
+            return
         item = Event(
             id=self.event.id if self.event else str(uuid.uuid4()),
             title=title,
             due=due.isoformat(timespec="minutes"),
             has_time=has_time,
+            duration_days=duration_days,
             color=self.color_var.get(),
             priority=self.priority_var.get(),
             reminder=REMINDERS[self.reminder_var.get()] if has_time else None,
@@ -866,7 +894,12 @@ class UpcomingDialog(tk.Toplevel):
             tk.Frame(row, bg=item.color, width=4).pack(side="left", fill="y", padx=(0, 8))
             title = tk.Label(row, text=truncate(item.title, 22), bg="#F6F6F4", fg=INK, font=(FONT, 9), anchor="w")
             title.pack(side="left", fill="x", expand=True)
-            when = "逾期" if item.is_overdue else (item.due_at.strftime("%H:%M") if item.has_time else "无具体时间")
+            if item.is_overdue:
+                when = "逾期"
+            else:
+                when = item.due_at.strftime("%H:%M") if item.has_time else "无具体时间"
+                if item.duration_days > 1:
+                    when = f"{when} · {item.duration_days}天"
             meta = tk.Label(row, text=when, bg="#F6F6F4", fg=DANGER if item.is_overdue else SUBTLE, font=(FONT, 8))
             meta.pack(side="right")
             for widget in (row, title, meta):
@@ -1200,8 +1233,13 @@ class CalendarApp(tk.Tk):
             start = weeks[-1][-1] + timedelta(days=1)
             weeks.append([start + timedelta(days=index) for index in range(7)])
         events_by_day: dict[date, list[Event]] = {}
+        visible_start, visible_end = weeks[0][0], weeks[-1][-1]
         for item in self.store.events:
-            events_by_day.setdefault(item.due_date, []).append(item)
+            current = max(item.due_date, visible_start)
+            covered_end = min(item.end_date, visible_end)
+            while current <= covered_end:
+                events_by_day.setdefault(current, []).append(item)
+                current += timedelta(days=1)
 
         for index, cell in enumerate(self.day_cells):
             row, column = divmod(index, 7)
@@ -1283,6 +1321,8 @@ class CalendarApp(tk.Tk):
         else:
             timing = (item.due_at.strftime("%H:%M") if item.has_time else "无具体时间") + f" · {item.priority}优先级"
             timing_color = SUBTLE
+        if item.duration_days > 1:
+            timing += f" · 第{item.day_number(self.selected)}/{item.duration_days}天"
         meta = tk.Label(content, text=timing, bg=card_bg, fg=timing_color, font=(FONT, 8), anchor="w")
         meta.pack(fill="x", pady=(1, 0))
         more = tk.Label(card, text="›", bg=card_bg, fg=FAINT, font=(FONT, 12), width=2, cursor="hand2")
@@ -1984,7 +2024,10 @@ class CalendarApp(tk.Tk):
         tk.Frame(shell, bg=event.color, height=5).pack(fill="x")
         tk.Label(shell, text="DDL 提醒", bg=CARD, fg=SUBTLE, font=(FONT, 8), anchor="w").pack(fill="x", padx=15, pady=(10, 1))
         tk.Label(shell, text=truncate(event.title, 26), bg=CARD, fg=INK, font=(FONT, 12, "bold"), anchor="w").pack(fill="x", padx=15)
-        due_text = event.due_at.strftime("%m月%d日 %H:%M") if event.has_time else event.due_at.strftime("%m月%d日 · 无具体时间")
+        date_text = event.due_at.strftime("%m月%d日")
+        if event.duration_days > 1:
+            date_text += f"—{event.end_date.month}月{event.end_date.day}日"
+        due_text = f"{date_text} {event.due_at.strftime('%H:%M')}" if event.has_time else f"{date_text} · 无具体时间"
         if event.is_overdue:
             due_text += " · 已逾期"
         tk.Label(shell, text=due_text, bg=CARD, fg=DANGER if event.is_overdue else SUBTLE, font=(FONT, 8), anchor="w").pack(fill="x", padx=15, pady=(3, 8))

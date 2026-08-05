@@ -51,6 +51,7 @@ class Event:
     created_at: str = ""
     snooze_until: Optional[str] = None
     has_time: bool = True
+    duration_days: int = 1
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -60,6 +61,10 @@ class Event:
         if not isinstance(self.color, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", self.color):
             self.color = COLORS["海盐蓝"]
         self.has_time = bool(self.has_time)
+        try:
+            self.duration_days = max(1, min(365, int(self.duration_days)))
+        except (TypeError, ValueError):
+            self.duration_days = 1
         if not self.has_time:
             self.reminder = None
 
@@ -72,8 +77,22 @@ class Event:
         return self.due_at.date()
 
     @property
+    def end_date(self) -> date:
+        return self.due_date + timedelta(days=self.duration_days - 1)
+
+    @property
+    def ends_at(self) -> datetime:
+        return datetime.combine(self.end_date, self.due_at.time())
+
+    def covers(self, day: date) -> bool:
+        return self.due_date <= day <= self.end_date
+
+    def day_number(self, day: date) -> int:
+        return (day - self.due_date).days + 1
+
+    @property
     def is_overdue(self) -> bool:
-        return not self.done and self.due_at < datetime.now()
+        return not self.done and self.ends_at < datetime.now()
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Event":
@@ -237,7 +256,13 @@ class Store:
         previous = next((item for item in self.events if item.id == event.id), None)
         self.events = [item for item in self.events if item.id != event.id]
         self.events.append(event)
-        if previous is None or previous.due != event.due or previous.reminder != event.reminder or previous.has_time != event.has_time:
+        if (
+            previous is None
+            or previous.due != event.due
+            or previous.reminder != event.reminder
+            or previous.has_time != event.has_time
+            or previous.duration_days != event.duration_days
+        ):
             self.clear_notifications(event.id)
         self.save()
 
@@ -251,7 +276,7 @@ class Store:
         self.notified = {key for key in self.notified if not key.startswith(prefix)}
 
     def events_on(self, day: date, include_done: bool = True) -> list[Event]:
-        events = [item for item in self.events if item.due_date == day and (include_done or not item.done)]
+        events = [item for item in self.events if item.covers(day) and (include_done or not item.done)]
         rank = {name: index for index, name in enumerate(PRIORITIES)}
         return sorted(events, key=lambda item: (item.done, item.due_at, -rank.get(item.priority, 1)))
 
@@ -262,7 +287,7 @@ class Store:
             (
                 item
                 for item in self.events
-                if not item.done and item.due_at <= end and (include_overdue or item.due_at >= now)
+                if not item.done and item.due_at <= end and (include_overdue or item.ends_at >= now)
             ),
             key=lambda item: item.due_at,
         )
