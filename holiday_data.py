@@ -97,7 +97,7 @@ def _common_festival(day: date) -> Optional[HolidayInfo]:
 
     moving = {
         _nth_weekday(day.year, 5, calendar.SUNDAY, 2): ("母亲节", "母亲"),
-        _nth_weekday(day.year, 6, calendar.SUNDAY, 3): ("父亲节", "父亲"),
+        _nth_weekday(day.year, 6, calendar.SUNDAY, 3): ("父亲节", "父亲节"),
         _nth_weekday(day.year, 11, calendar.THURSDAY, 4): ("感恩节", "感恩"),
     }
     if day in moving:

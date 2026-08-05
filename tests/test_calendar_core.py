@@ -40,6 +40,28 @@ class StoreTests(unittest.TestCase):
         store = Store(self.data_file)
         self.assertEqual(store.settings["opacity"], 1.0)
 
+    def test_new_install_defaults_to_modern_theme(self):
+        store = Store(self.data_file)
+        self.assertEqual(store.settings["theme"], "modern")
+
+    def test_legacy_settings_without_theme_use_modern(self):
+        self.data_file.write_text(json.dumps({"settings": {"agenda_open": False}}), encoding="utf-8")
+        store = Store(self.data_file)
+        self.assertEqual(store.settings["theme"], "modern")
+        self.assertFalse(store.settings["agenda_open"])
+
+    def test_theme_round_trips(self):
+        store = Store(self.data_file)
+        store.settings["theme"] = "win7_aero"
+        store.save()
+        loaded = Store(self.data_file)
+        self.assertEqual(loaded.settings["theme"], "win7_aero")
+
+    def test_invalid_theme_falls_back_to_modern(self):
+        self.data_file.write_text(json.dumps({"settings": {"theme": "neon_hud"}}), encoding="utf-8")
+        store = Store(self.data_file)
+        self.assertEqual(store.settings["theme"], "modern")
+
     def test_legacy_hex_color_is_preserved(self):
         event = Event("legacy", "旧版颜色", "2026-08-04T10:00", color="#F05252")
         self.assertEqual(event.color, "#F05252")

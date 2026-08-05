@@ -9,6 +9,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+from ui_theme import DEFAULT_THEME_NAME, normalize_theme_name
+
 
 APP_NAME = "桌面月历"
 APP_DIR = Path(__file__).resolve().parent
@@ -182,6 +184,7 @@ class RoutineItem:
 
 
 DEFAULT_SETTINGS = {
+    "theme": DEFAULT_THEME_NAME,
     "window_mode": "desktop",
     "agenda_open": True,
     "opacity": 1.0,
@@ -224,6 +227,7 @@ class Store:
             settings = raw.get("settings", {})
             if isinstance(settings, dict):
                 self.settings.update(settings)
+            self.settings["theme"] = normalize_theme_name(self.settings.get("theme"))
             # Migrate the first prototype's settings without changing the data.
             if "topmost" in settings and "window_mode" not in settings:
                 # The redesigned gadget intentionally defaults to the desktop layer,
