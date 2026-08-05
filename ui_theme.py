@@ -93,6 +93,20 @@ class Theme:
     danger: str
     danger_soft: str
     urgent_indicator: str
+    priority_low: str
+    priority_normal: str
+    priority_urgent: str
+    urgent_pinned_background: str
+    urgent_pinned_border: str
+    urgent_regular_background: str
+    urgent_regular_border: str
+    urgent_overdue_background: str
+    urgent_due_background: str
+    checkbox_border: str
+    checkbox_checked: str
+    date_leave_indicator: str
+    date_holiday_indicator: str
+    quick_success: str
     weekend: str
     holiday_workday: str
     holiday_festival: str
@@ -168,6 +182,20 @@ MODERN = Theme(
     danger="#D9515D",
     danger_soft="#FCEDEF",
     urgent_indicator="#D9515D",
+    priority_low="#79A99A",
+    priority_normal="#8C8F99",
+    priority_urgent="#D9515D",
+    urgent_pinned_background="#FBF3F2",
+    urgent_pinned_border="#EBC9C7",
+    urgent_regular_background="#F7F5F2",
+    urgent_regular_border="#E3DED7",
+    urgent_overdue_background="#FCE9E9",
+    urgent_due_background="#FBF2E7",
+    checkbox_border="#B9BBC2",
+    checkbox_checked="#9A9DA5",
+    date_leave_indicator="#C78363",
+    date_holiday_indicator="#B97863",
+    quick_success="#4F927C",
     weekend="#BC6B6B",
     holiday_workday="#C47B28",
     holiday_festival="#8B70A8",
@@ -251,6 +279,20 @@ WIN7_AERO = Theme(
     danger="#B84D58",
     danger_soft="#F6E3E5",
     urgent_indicator="#B84D58",
+    priority_low="#7EA89C",
+    priority_normal="#849397",
+    priority_urgent="#B84D58",
+    urgent_pinned_background="#F8F1EE",
+    urgent_pinned_border="#D8C0BA",
+    urgent_regular_background="#F3F4F1",
+    urgent_regular_border="#D7DDDA",
+    urgent_overdue_background="#F5E5E3",
+    urgent_due_background="#F5EEE2",
+    checkbox_border="#AAB6B8",
+    checkbox_checked="#8F9CA0",
+    date_leave_indicator="#AA765F",
+    date_holiday_indicator="#9F6B58",
+    quick_success="#5D8F7E",
     weekend="#986D70",
     holiday_workday="#AD6B20",
     holiday_festival="#79618D",
