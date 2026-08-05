@@ -92,6 +92,7 @@ class Theme:
     accent_soft: str
     danger: str
     danger_soft: str
+    urgent_indicator: str
     weekend: str
     holiday_workday: str
     holiday_festival: str
@@ -166,6 +167,7 @@ MODERN = Theme(
     accent_soft="#E8EAF8",
     danger="#D9515D",
     danger_soft="#FCEDEF",
+    urgent_indicator="#D9515D",
     weekend="#BC6B6B",
     holiday_workday="#C47B28",
     holiday_festival="#8B70A8",
@@ -248,6 +250,7 @@ WIN7_AERO = Theme(
     accent_soft="#E4F0F2",
     danger="#B84D58",
     danger_soft="#F6E3E5",
+    urgent_indicator="#B84D58",
     weekend="#986D70",
     holiday_workday="#AD6B20",
     holiday_festival="#79618D",

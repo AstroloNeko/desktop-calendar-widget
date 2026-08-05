@@ -7,8 +7,9 @@ import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
+from holiday_data import is_workday as system_is_workday
 from ui_theme import DEFAULT_THEME_NAME, normalize_theme_name
 
 
@@ -25,7 +26,32 @@ COLORS = {
     "珊瑚红": "#E65D67",
     "鸢尾紫": "#8B70D6",
 }
-PRIORITIES = ("低", "普通", "高", "紧急")
+PRIORITIES = ("low", "normal", "urgent")
+PRIORITY_LABELS = {
+    "low": "低",
+    "normal": "一般",
+    "urgent": "紧急",
+}
+PRIORITY_OPTIONS = tuple((value, PRIORITY_LABELS[value]) for value in PRIORITIES)
+PRIORITY_RANK = {"urgent": 0, "normal": 1, "low": 2}
+LEGACY_PRIORITY_MAP = {
+    "低": "low",
+    "低优先级": "low",
+    "普通": "normal",
+    "一般": "normal",
+    "普通优先级": "normal",
+    "一般优先级": "normal",
+    "高": "urgent",
+    "高优先级": "urgent",
+    "紧急": "urgent",
+    "紧急优先级": "urgent",
+}
+DATE_STATUSES = ("normal", "leave", "holiday")
+DATE_STATUS_LABELS = {
+    "normal": "正常",
+    "leave": "请假",
+    "holiday": "放假",
+}
 REMINDERS = {
     "不提醒": None,
     "准时": 0,
@@ -40,13 +66,26 @@ WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日"
 ROUTINE_KINDS = ("habit", "todo")
 
 
+def normalize_priority(value: object) -> str:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned in PRIORITIES:
+            return cleaned
+        return LEGACY_PRIORITY_MAP.get(cleaned, "normal")
+    return "normal"
+
+
+def normalize_date_status(value: object) -> str:
+    return value if isinstance(value, str) and value in DATE_STATUSES else "normal"
+
+
 @dataclass
 class Event:
     id: str
     title: str
     due: str
     color: str = "#6687F2"
-    priority: str = "普通"
+    priority: str = "normal"
     reminder: Optional[int] = 60
     notes: str = ""
     done: bool = False
@@ -54,12 +93,12 @@ class Event:
     snooze_until: Optional[str] = None
     has_time: bool = True
     duration_days: int = 1
+    skip_non_working_days: bool = False
 
     def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = datetime.now().isoformat(timespec="seconds")
-        if self.priority not in PRIORITIES:
-            self.priority = "普通"
+        self.priority = normalize_priority(self.priority)
         if not isinstance(self.color, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", self.color):
             self.color = COLORS["海盐蓝"]
         self.has_time = bool(self.has_time)
@@ -67,6 +106,7 @@ class Event:
             self.duration_days = max(1, min(365, int(self.duration_days)))
         except (TypeError, ValueError):
             self.duration_days = 1
+        self.skip_non_working_days = self.skip_non_working_days is True
         if not self.has_time:
             self.reminder = None
 
@@ -80,17 +120,40 @@ class Event:
 
     @property
     def end_date(self) -> date:
-        return self.due_date + timedelta(days=self.duration_days - 1)
+        return self.end_date_for(system_is_workday)
+
+    def occurrence_dates(
+        self,
+        workday_predicate: Callable[[date], bool] = system_is_workday,
+    ) -> tuple[date, ...]:
+        if not self.skip_non_working_days:
+            return tuple(self.due_date + timedelta(days=offset) for offset in range(self.duration_days))
+        result: list[date] = []
+        current = self.due_date
+        while len(result) < self.duration_days:
+            if workday_predicate(current):
+                result.append(current)
+            current += timedelta(days=1)
+        return tuple(result)
+
+    def end_date_for(self, workday_predicate: Callable[[date], bool] = system_is_workday) -> date:
+        return self.occurrence_dates(workday_predicate)[-1]
 
     @property
     def ends_at(self) -> datetime:
-        return datetime.combine(self.end_date, self.due_at.time())
+        return self.ends_at_for(system_is_workday)
 
-    def covers(self, day: date) -> bool:
-        return self.due_date <= day <= self.end_date
+    def ends_at_for(self, workday_predicate: Callable[[date], bool] = system_is_workday) -> datetime:
+        return datetime.combine(self.end_date_for(workday_predicate), self.due_at.time())
 
-    def day_number(self, day: date) -> int:
-        return (day - self.due_date).days + 1
+    def covers(self, day: date, workday_predicate: Callable[[date], bool] = system_is_workday) -> bool:
+        return day in self.occurrence_dates(workday_predicate)
+
+    def day_number(self, day: date, workday_predicate: Callable[[date], bool] = system_is_workday) -> int:
+        try:
+            return self.occurrence_dates(workday_predicate).index(day) + 1
+        except ValueError:
+            return 0
 
     @property
     def is_overdue(self) -> bool:
@@ -115,6 +178,7 @@ class Event:
             data["notes"] = str(data.get("notes", ""))
         data["done"] = bool(data.get("done", False))
         data["has_time"] = bool(data.get("has_time", True))
+        data["skip_non_working_days"] = data.get("skip_non_working_days", False) is True
         snooze = data.get("snooze_until")
         if snooze:
             try:
@@ -202,6 +266,7 @@ class Store:
         self.data_file = data_file or DATA_FILE
         self.events: list[Event] = []
         self.routines: list[RoutineItem] = []
+        self.date_states: dict[str, str] = {}
         self.settings = dict(DEFAULT_SETTINGS)
         self.notified: set[str] = set()
         self.load_error: Optional[str] = None
@@ -224,6 +289,18 @@ class Store:
                 except (TypeError, ValueError, KeyError):
                     continue
             self.routines = routines
+            date_states = raw.get("date_states", {})
+            if isinstance(date_states, dict):
+                for day_key, status in date_states.items():
+                    if not isinstance(day_key, str):
+                        continue
+                    try:
+                        date.fromisoformat(day_key)
+                    except ValueError:
+                        continue
+                    normalized_status = normalize_date_status(status)
+                    if normalized_status != "normal":
+                        self.date_states[day_key] = normalized_status
             settings = raw.get("settings", {})
             if isinstance(settings, dict):
                 self.settings.update(settings)
@@ -246,9 +323,10 @@ class Store:
         notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
         self.notified = set(notification_history)
         payload = {
-            "version": 3,
+            "version": 4,
             "events": [asdict(event) for event in self.events],
             "routines": [asdict(item) for item in self.routines],
+            "date_states": self.date_states,
             "settings": self.settings,
             "notified": notification_history,
         }
@@ -258,14 +336,17 @@ class Store:
 
     def upsert(self, event: Event) -> None:
         previous = next((item for item in self.events if item.id == event.id), None)
-        self.events = [item for item in self.events if item.id != event.id]
-        self.events.append(event)
+        if previous is None:
+            self.events.append(event)
+        else:
+            self.events[self.events.index(previous)] = event
         if (
             previous is None
             or previous.due != event.due
             or previous.reminder != event.reminder
             or previous.has_time != event.has_time
             or previous.duration_days != event.duration_days
+            or previous.skip_non_working_days != event.skip_non_working_days
         ):
             self.clear_notifications(event.id)
         self.save()
@@ -280,9 +361,8 @@ class Store:
         self.notified = {key for key in self.notified if not key.startswith(prefix)}
 
     def events_on(self, day: date, include_done: bool = True) -> list[Event]:
-        events = [item for item in self.events if item.covers(day) and (include_done or not item.done)]
-        rank = {name: index for index, name in enumerate(PRIORITIES)}
-        return sorted(events, key=lambda item: (item.done, item.due_at, -rank.get(item.priority, 1)))
+        events = [item for item in self.events if self.event_covers(item, day) and (include_done or not item.done)]
+        return sorted(events, key=lambda item: (item.done, PRIORITY_RANK[item.priority]))
 
     def upcoming(self, days: int = 7, include_overdue: bool = True) -> list[Event]:
         now = datetime.now()
@@ -291,28 +371,38 @@ class Store:
             (
                 item
                 for item in self.events
-                if not item.done and item.due_at <= end and (include_overdue or item.ends_at >= now)
+                if not item.done and self.event_starts_at(item) <= end and (include_overdue or self.event_ends_at(item) >= now)
             ),
-            key=lambda item: item.due_at,
+            key=lambda item: self.event_starts_at(item),
         )
 
-    def create_quick(self, title: str, day: date) -> Event:
+    def create_quick(
+        self,
+        title: str,
+        day: date,
+        *,
+        color: Optional[str] = None,
+        priority: str = "normal",
+    ) -> Event:
         due = datetime.combine(day, datetime.min.time()).replace(hour=23, minute=59)
         event = Event(
             id=str(uuid.uuid4()),
             title=title.strip(),
             due=due.isoformat(timespec="minutes"),
             has_time=False,
-            color=COLORS["海盐蓝"],
-            priority="普通",
+            color=color or COLORS["海盐蓝"],
+            priority=priority,
             reminder=None,
         )
         self.upsert(event)
         return event
 
     def upsert_routine(self, item: RoutineItem) -> None:
-        self.routines = [existing for existing in self.routines if existing.id != item.id]
-        self.routines.append(item)
+        previous = next((existing for existing in self.routines if existing.id == item.id), None)
+        if previous is None:
+            self.routines.append(item)
+        else:
+            self.routines[self.routines.index(previous)] = item
         self.save()
 
     def delete_routine(self, item_id: str) -> None:
@@ -328,6 +418,91 @@ class Store:
                 continue
             visible.append(item)
         return sorted(visible, key=lambda item: (item.is_done_on(day), item.kind == "todo", item.created_on, item.title))
+
+    def agenda_items_on(self, day: date) -> list[Event | RoutineItem]:
+        routines = self.routines_on(day) if self.is_workday(day) else []
+        items: list[Event | RoutineItem] = [*self.events_on(day), *routines]
+
+        def sort_key(item: Event | RoutineItem) -> tuple[bool, int]:
+            if isinstance(item, Event):
+                return item.done, PRIORITY_RANK[item.priority]
+            return item.is_done_on(day), PRIORITY_RANK["normal"]
+
+        return sorted(items, key=sort_key)
+
+    def date_status(self, day: date) -> str:
+        return self.date_states.get(day.isoformat(), "normal")
+
+    def set_date_status(self, day: date, status: object) -> None:
+        normalized = normalize_date_status(status)
+        key = day.isoformat()
+        if normalized == "normal":
+            self.date_states.pop(key, None)
+        else:
+            self.date_states[key] = normalized
+        for event in self.events:
+            if event.skip_non_working_days:
+                self.clear_notifications(event.id)
+        self.save()
+
+    def is_workday(self, day: date) -> bool:
+        if self.date_status(day) in ("leave", "holiday"):
+            return False
+        return system_is_workday(day)
+
+    def event_dates(self, event: Event) -> tuple[date, ...]:
+        return event.occurrence_dates(self.is_workday)
+
+    def event_covers(self, event: Event, day: date) -> bool:
+        return event.covers(day, self.is_workday)
+
+    def event_start_date(self, event: Event) -> date:
+        return self.event_dates(event)[0]
+
+    def event_starts_at(self, event: Event) -> datetime:
+        return datetime.combine(self.event_start_date(event), event.due_at.time())
+
+    def event_end_date(self, event: Event) -> date:
+        return event.end_date_for(self.is_workday)
+
+    def event_ends_at(self, event: Event) -> datetime:
+        return event.ends_at_for(self.is_workday)
+
+    def event_day_number(self, event: Event, day: date) -> int:
+        return event.day_number(day, self.is_workday)
+
+    def is_event_overdue(self, event: Event, now: Optional[datetime] = None) -> bool:
+        return not event.done and self.event_ends_at(event) < (now or datetime.now())
+
+    def has_urgent_on(self, day: date) -> bool:
+        return any(item.priority == "urgent" for item in self.events_on(day, include_done=False))
+
+    def urgent_events(self, now: Optional[datetime] = None) -> list[Event]:
+        reference = now or datetime.now()
+        urgent = [item for item in self.events if not item.done and item.priority == "urgent"]
+        return sorted(
+            urgent,
+            key=lambda item: (
+                not self.is_event_overdue(item, reference),
+                self.event_ends_at(item),
+            ),
+        )
+
+    def grouped_urgent_events(
+        self,
+        now: Optional[datetime] = None,
+        pinned_hours: int = 24,
+    ) -> tuple[list[Event], list[Event]]:
+        reference = now or datetime.now()
+        pinned_deadline = reference + timedelta(hours=max(0, pinned_hours))
+        pinned: list[Event] = []
+        regular: list[Event] = []
+        for item in self.urgent_events(reference):
+            if self.event_ends_at(item) <= pinned_deadline:
+                pinned.append(item)
+            else:
+                regular.append(item)
+        return pinned, regular
 
     def toggle_routine(self, item: RoutineItem, day: date) -> None:
         day_key = day.isoformat()
