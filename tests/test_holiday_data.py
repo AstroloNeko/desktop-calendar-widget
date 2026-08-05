@@ -21,6 +21,7 @@ class HolidayDataTests(unittest.TestCase):
         self.assertEqual(holiday_for(date(2028, 4, 4)).name, "清明节")
         self.assertEqual(holiday_for(date(2026, 5, 10)).name, "母亲节")
         self.assertEqual(holiday_for(date(2026, 6, 21)).kind, "day_off")
+        self.assertEqual(holiday_for(date(2026, 6, 21)).short_name, "父亲节")
 
     def test_schedule_year_metadata(self) -> None:
         self.assertEqual(official_schedule_years(), (2026,))
