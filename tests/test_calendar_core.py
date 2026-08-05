@@ -60,11 +60,26 @@ class StoreTests(unittest.TestCase):
         store.upsert(Event("one", "事项", "2026-08-04T11:00"))
         self.assertFalse(any(key.startswith("one:") for key in store.notified))
 
-    def test_quick_event_is_scheduled_in_the_future_for_today(self):
+    def test_quick_event_uses_optional_time(self):
         store = Store(self.data_file)
-        before = datetime.now()
         event = store.create_quick("快速事项", date.today())
-        self.assertGreater(event.due_at, before)
+        self.assertEqual(event.due_date, date.today())
+        self.assertFalse(event.has_time)
+        self.assertIsNone(event.reminder)
+        loaded = Store(self.data_file)
+        self.assertFalse(loaded.events[0].has_time)
+
+    def test_legacy_event_defaults_to_having_a_time(self):
+        self.data_file.write_text(
+            json.dumps({"events": [{"id": "legacy", "title": "旧日程", "due": "2026-08-05T18:00"}]}),
+            encoding="utf-8",
+        )
+        store = Store(self.data_file)
+        self.assertTrue(store.events[0].has_time)
+
+    def test_untimed_event_cannot_keep_a_relative_reminder(self):
+        event = Event("untimed", "无具体时间", "2026-08-05T23:59", has_time=False, reminder=60)
+        self.assertIsNone(event.reminder)
 
     def test_events_on_places_unfinished_before_finished(self):
         store = Store(self.data_file)

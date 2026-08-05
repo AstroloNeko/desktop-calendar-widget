@@ -50,6 +50,7 @@ class Event:
     done: bool = False
     created_at: str = ""
     snooze_until: Optional[str] = None
+    has_time: bool = True
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -58,6 +59,9 @@ class Event:
             self.priority = "普通"
         if not isinstance(self.color, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", self.color):
             self.color = COLORS["海盐蓝"]
+        self.has_time = bool(self.has_time)
+        if not self.has_time:
+            self.reminder = None
 
     @property
     def due_at(self) -> datetime:
@@ -89,6 +93,7 @@ class Event:
         if not isinstance(data.get("notes", ""), str):
             data["notes"] = str(data.get("notes", ""))
         data["done"] = bool(data.get("done", False))
+        data["has_time"] = bool(data.get("has_time", True))
         snooze = data.get("snooze_until")
         if snooze:
             try:
@@ -232,7 +237,7 @@ class Store:
         previous = next((item for item in self.events if item.id == event.id), None)
         self.events = [item for item in self.events if item.id != event.id]
         self.events.append(event)
-        if previous is None or previous.due != event.due or previous.reminder != event.reminder:
+        if previous is None or previous.due != event.due or previous.reminder != event.reminder or previous.has_time != event.has_time:
             self.clear_notifications(event.id)
         self.save()
 
@@ -263,19 +268,15 @@ class Store:
         )
 
     def create_quick(self, title: str, day: date) -> Event:
-        now = datetime.now()
-        if day == now.date():
-            due = now.replace(second=0, microsecond=0) + timedelta(minutes=30)
-            due = due.replace(minute=(due.minute // 30) * 30)
-        else:
-            due = datetime.combine(day, datetime.min.time()).replace(hour=18)
+        due = datetime.combine(day, datetime.min.time()).replace(hour=23, minute=59)
         event = Event(
             id=str(uuid.uuid4()),
             title=title.strip(),
             due=due.isoformat(timespec="minutes"),
+            has_time=False,
             color=COLORS["海盐蓝"],
             priority="普通",
-            reminder=self.settings.get("default_reminder", 60),
+            reminder=None,
         )
         self.upsert(event)
         return event

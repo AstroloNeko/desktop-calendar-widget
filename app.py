@@ -85,6 +85,14 @@ def resource_path(relative: str) -> Path:
     return base / relative
 
 
+def parse_event_due(date_text: str, time_text: str) -> tuple[datetime, bool]:
+    selected_date = datetime.strptime(date_text.strip(), "%Y-%m-%d").date()
+    cleaned_time = time_text.strip()
+    if cleaned_time:
+        return datetime.strptime(f"{selected_date.isoformat()} {cleaned_time}", "%Y-%m-%d %H:%M"), True
+    return datetime.combine(selected_date, datetime.min.time()).replace(hour=23, minute=59), False
+
+
 def log_exception(exc_type, exc_value, exc_traceback) -> None:
     """Keep pythonw failures diagnosable without reopening a console window."""
     try:
@@ -288,14 +296,14 @@ class EventEditor(tk.Toplevel):
         self.attributes("-topmost", True)
         self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
 
-        due = event.due_at if event else self._suggest_due(selected)
+        due = event.due_at if event else datetime.combine(selected, datetime.min.time()).replace(hour=23, minute=59)
         self.title_var = tk.StringVar(value=event.title if event else "")
         self.date_var = tk.StringVar(value=due.strftime("%Y-%m-%d"))
-        self.time_var = tk.StringVar(value=due.strftime("%H:%M"))
+        self.time_var = tk.StringVar(value=due.strftime("%H:%M") if event and event.has_time else "")
         self.priority_var = tk.StringVar(value=event.priority if event else "普通")
         self.color_var = tk.StringVar(value=event.color if event else COLORS["海盐蓝"])
-        reminder_value = event.reminder if event else master.store.settings.get("default_reminder", 60)
-        reminder_label = next((label for label, value in REMINDERS.items() if value == reminder_value), "提前 1 小时")
+        reminder_value = event.reminder if event else None
+        reminder_label = next((label for label, value in REMINDERS.items() if value == reminder_value), "不提醒")
         self.reminder_var = tk.StringVar(value=reminder_label)
         self._drag_origin: Optional[tuple[int, int, int, int]] = None
         self.color_canvases: list[tuple[tk.Canvas, str]] = []
@@ -336,7 +344,7 @@ class EventEditor(tk.Toplevel):
         time_col.pack(side="right", padx=(6, 0))
         self._field_label(date_col, "日期")
         self._flat_entry(date_col, self.date_var).pack(fill="x", ipady=6)
-        self._field_label(time_col, "时间")
+        self._field_label(time_col, "时间（可选）")
         self._flat_entry(time_col, self.time_var, width=10).pack(fill="x", ipady=6)
 
         shortcuts = tk.Frame(shell, bg=CARD)
@@ -374,7 +382,7 @@ class EventEditor(tk.Toplevel):
         reminder_row.pack(fill="x", pady=(0, 10))
         reminder_col = tk.Frame(reminder_row, bg=CARD)
         reminder_col.pack(side="left", fill="x", expand=True)
-        self._field_label(reminder_col, "提醒")
+        self._field_label(reminder_col, "提醒（需填写时间）")
         reminder_box = ttk.Combobox(
             reminder_col,
             textvariable=self.reminder_var,
@@ -443,17 +451,6 @@ class EventEditor(tk.Toplevel):
         self.title_entry.focus_force()
 
     @staticmethod
-    def _suggest_due(day: date) -> datetime:
-        now = datetime.now()
-        if day == now.date():
-            candidate = now + timedelta(minutes=30)
-            minute = 30 if candidate.minute <= 30 else 0
-            if minute == 0:
-                candidate += timedelta(hours=1)
-            return candidate.replace(minute=minute, second=0, microsecond=0)
-        return datetime.combine(day, datetime.min.time()).replace(hour=18)
-
-    @staticmethod
     def _field_label(parent: tk.Widget, text: str) -> None:
         tk.Label(parent, text=text, bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
 
@@ -508,18 +505,20 @@ class EventEditor(tk.Toplevel):
             messagebox.showinfo(APP_NAME, "请先填写日程标题。", parent=self)
             self.title_entry.focus_set()
             return
+        time_text = self.time_var.get().strip()
         try:
-            due = datetime.strptime(f"{self.date_var.get().strip()} {self.time_var.get().strip()}", "%Y-%m-%d %H:%M")
+            due, has_time = parse_event_due(self.date_var.get(), time_text)
         except ValueError:
-            messagebox.showinfo(APP_NAME, "日期或时间格式不正确。\n请使用 YYYY-MM-DD 和 HH:MM。", parent=self)
+            messagebox.showinfo(APP_NAME, "日期或时间格式不正确。\n日期请使用 YYYY-MM-DD；时间可以留空，填写时请使用 HH:MM。", parent=self)
             return
         item = Event(
             id=self.event.id if self.event else str(uuid.uuid4()),
             title=title,
             due=due.isoformat(timespec="minutes"),
+            has_time=has_time,
             color=self.color_var.get(),
             priority=self.priority_var.get(),
-            reminder=REMINDERS[self.reminder_var.get()],
+            reminder=REMINDERS[self.reminder_var.get()] if has_time else None,
             notes=self.notes.get("1.0", "end").strip(),
             done=self.event.done if self.event else False,
             created_at=self.event.created_at if self.event else "",
@@ -867,7 +866,7 @@ class UpcomingDialog(tk.Toplevel):
             tk.Frame(row, bg=item.color, width=4).pack(side="left", fill="y", padx=(0, 8))
             title = tk.Label(row, text=truncate(item.title, 22), bg="#F6F6F4", fg=INK, font=(FONT, 9), anchor="w")
             title.pack(side="left", fill="x", expand=True)
-            when = "逾期" if item.is_overdue else item.due_at.strftime("%H:%M")
+            when = "逾期" if item.is_overdue else (item.due_at.strftime("%H:%M") if item.has_time else "无具体时间")
             meta = tk.Label(row, text=when, bg="#F6F6F4", fg=DANGER if item.is_overdue else SUBTLE, font=(FONT, 8))
             meta.pack(side="right")
             for widget in (row, title, meta):
@@ -1047,7 +1046,7 @@ class CalendarApp(tk.Tk):
         self.mode_button.pack(side="left", padx=(3, 0))
         self.menu_button = button_label(controls, "···", self.show_main_menu, width=3, font_size=10)
         self.menu_button.pack(side="left")
-        minimize = button_label(controls, "—", self.hide_to_tray, width=2, fg=SUBTLE, hover=HOVER, font_size=11)
+        minimize = button_label(controls, "−", self.hide_to_tray, width=2, fg=SUBTLE, hover=HOVER, font_size=10)
         minimize.pack(side="left")
         Tooltip(previous, "上个月（滚轮向上 / PgUp）")
         Tooltip(today, "回到今天（Ctrl+T）")
@@ -1279,10 +1278,10 @@ class CalendarApp(tk.Tk):
         )
         title.pack(fill="x")
         if item.is_overdue:
-            timing = "已逾期 · " + item.due_at.strftime("%H:%M")
+            timing = "已逾期" + (" · " + item.due_at.strftime("%H:%M") if item.has_time else "")
             timing_color = DANGER
         else:
-            timing = item.due_at.strftime("%H:%M") + f" · {item.priority}优先级"
+            timing = (item.due_at.strftime("%H:%M") if item.has_time else "无具体时间") + f" · {item.priority}优先级"
             timing_color = SUBTLE
         meta = tk.Label(content, text=timing, bg=card_bg, fg=timing_color, font=(FONT, 8), anchor="w")
         meta.pack(fill="x", pady=(1, 0))
@@ -1985,7 +1984,7 @@ class CalendarApp(tk.Tk):
         tk.Frame(shell, bg=event.color, height=5).pack(fill="x")
         tk.Label(shell, text="DDL 提醒", bg=CARD, fg=SUBTLE, font=(FONT, 8), anchor="w").pack(fill="x", padx=15, pady=(10, 1))
         tk.Label(shell, text=truncate(event.title, 26), bg=CARD, fg=INK, font=(FONT, 12, "bold"), anchor="w").pack(fill="x", padx=15)
-        due_text = event.due_at.strftime("%m月%d日 %H:%M")
+        due_text = event.due_at.strftime("%m月%d日 %H:%M") if event.has_time else event.due_at.strftime("%m月%d日 · 无具体时间")
         if event.is_overdue:
             due_text += " · 已逾期"
         tk.Label(shell, text=due_text, bg=CARD, fg=DANGER if event.is_overdue else SUBTLE, font=(FONT, 8), anchor="w").pack(fill="x", padx=15, pady=(3, 8))
