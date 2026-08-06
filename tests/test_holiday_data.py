@@ -19,9 +19,26 @@ class HolidayDataTests(unittest.TestCase):
     def test_recurring_and_moving_festivals(self) -> None:
         self.assertEqual(holiday_for(date(2028, 9, 10)).name, "教师节")
         self.assertEqual(holiday_for(date(2028, 4, 4)).name, "清明节")
-        self.assertEqual(holiday_for(date(2026, 5, 10)).name, "母亲节")
+        self.assertEqual(holiday_for(date(2027, 2, 14)).short_name, "情人节")
+        self.assertEqual(holiday_for(date(2026, 5, 10)).short_name, "母亲节")
         self.assertEqual(holiday_for(date(2026, 6, 21)).kind, "day_off")
         self.assertEqual(holiday_for(date(2026, 6, 21)).short_name, "父亲节")
+        self.assertEqual(holiday_for(date(2026, 8, 1)).short_name, "建军节")
+        self.assertEqual(holiday_for(date(2026, 8, 19)).short_name, "七夕")
+
+    def test_festivals_use_full_names_while_schedule_statuses_stay_compact(self) -> None:
+        for year in range(2024, 2031):
+            day = date(year, 1, 1)
+            while day.year == year:
+                info = holiday_for(day)
+                if info:
+                    if info.short_name == "休":
+                        self.assertEqual(info.kind, "day_off", f"{day}: {info}")
+                    elif info.short_name == "班":
+                        self.assertEqual(info.kind, "workday", f"{day}: {info}")
+                    else:
+                        self.assertEqual(info.short_name, info.name, f"{day}: {info}")
+                day = day.fromordinal(day.toordinal() + 1)
 
     def test_schedule_year_metadata(self) -> None:
         self.assertEqual(official_schedule_years(), (2026,))
