@@ -10,6 +10,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+from dpi_utils import DpiManager, LogicalCanvas, enable_dpi_awareness, scale_px, scaled_geometry, unscale_px
+
+
+DPI_AWARENESS_MODE = enable_dpi_awareness()
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
@@ -168,11 +174,28 @@ def event_type_badge_style(theme: Theme, event_type: str) -> tuple[str, str, str
 
 
 def geometry_at(width: int, height: int, x: int, y: int) -> str:
-    return f"{width}x{height}{x:+d}{y:+d}"
+    return scaled_geometry(width, height, x, y)
 
 
 def position_at(x: int, y: int) -> str:
     return f"{x:+d}{y:+d}"
+
+
+def center_toplevel(
+    window: tk.Toplevel,
+    master: tk.Misc,
+    width: int,
+    height: int,
+    *,
+    y_offset: int = 0,
+) -> None:
+    """Center a logical-size popup using device pixels on the master's monitor."""
+    device_width = scale_px(width)
+    device_height = scale_px(height)
+    x = master.winfo_rootx() + (master.winfo_width() - device_width) // 2
+    y = master.winfo_rooty() + scale_px(y_offset)
+    x, y = clamp_to_work_area(x, y, device_width, device_height)
+    window.geometry(geometry_at(width, height, x, y))
 
 
 def truncate(text: str, limit: int) -> str:
@@ -235,7 +258,7 @@ def button_label(
     return label
 
 
-class ThemeButton(tk.Canvas):
+class ThemeButton(LogicalCanvas):
     """Compact flat/Aero control used by the main gadget chrome."""
 
     def __init__(
@@ -262,6 +285,7 @@ class ThemeButton(tk.Canvas):
         self.state = "normal"
         super().__init__(
             parent,
+            dpi=app.dpi,
             width=width,
             height=height,
             bd=0,
@@ -294,8 +318,8 @@ class ThemeButton(tk.Canvas):
 
     def draw(self) -> None:
         theme = self.app.theme
-        width = max(2, int(self.cget("width")))
-        height = max(2, int(self.cget("height")))
+        width = max(2, self.logical_width())
+        height = max(2, self.logical_height())
         self.delete("all")
         if theme.style == "aero":
             background = (
@@ -355,7 +379,7 @@ class ThemeButton(tk.Canvas):
         )
 
 
-class TaskCheck(tk.Canvas):
+class TaskCheck(LogicalCanvas):
     """Compact themed checkbox with a generous, fixed click target."""
 
     def __init__(
@@ -370,6 +394,7 @@ class TaskCheck(tk.Canvas):
     ) -> None:
         super().__init__(
             parent,
+            dpi=app.dpi,
             width=34,
             height=height,
             bg=background,
@@ -387,7 +412,7 @@ class TaskCheck(tk.Canvas):
     def draw(self) -> None:
         self.delete("all")
         theme = self.app.theme
-        center_y = max(12, int(self.winfo_height() / 2))
+        center_y = max(12, int(self.logical_height() / 2))
         box_fill = theme.checkbox_checked if self.done else str(self.cget("bg"))
         rounded_rectangle(
             self,
@@ -449,11 +474,12 @@ class Tooltip:
             self.window = None
 
 
-class DayCell(tk.Canvas):
+class DayCell(LogicalCanvas):
     def __init__(self, parent: tk.Widget, app: "CalendarApp", column: int) -> None:
         cell_height = 35 if app.theme.style == "aero" else 36
         super().__init__(
             parent,
+            dpi=app.dpi,
             width=46,
             height=cell_height,
             bg=app.theme.calendar_background,
@@ -527,7 +553,7 @@ class DayCell(tk.Canvas):
         self.delete("all")
         theme = self.app.theme
         self.configure(bg=theme.calendar_background)
-        width = max(self.winfo_width(), 38)
+        width = max(self.logical_width(), 38)
         center_x = width // 2
         # Date states always frame the number only. Holiday text has its own
         # baseline below, so selecting a festival never changes the box size.
@@ -642,7 +668,7 @@ class DayCell(tk.Canvas):
         if self.event_colors:
             gap = 7
             start = center_x - (len(self.event_colors) - 1) * gap / 2
-            indicator_bottom = int(self.cget("height")) - 1
+            indicator_bottom = self.logical_height() - 1
             for index, event_color in enumerate(self.event_colors):
                 x = start + index * gap
                 self.create_rectangle(
@@ -668,7 +694,7 @@ class EventEditor(tk.Toplevel):
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
 
         due = event.due_at if event else datetime.combine(selected, datetime.min.time()).replace(hour=23, minute=59)
         self.title_var = tk.StringVar(value=event.title if event else "")
@@ -717,7 +743,7 @@ class EventEditor(tk.Toplevel):
         date_row.pack(fill="x")
         date_col = tk.Frame(date_row, bg=CARD)
         date_col.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        time_col = tk.Frame(date_row, bg=CARD, width=115)
+        time_col = tk.Frame(date_row, bg=CARD, width=scale_px(115))
         time_col.pack(side="right", padx=(6, 0))
         self._field_label(date_col, "日期与持续时间")
         self._flat_entry(date_col, self.date_var).pack(fill="x", ipady=6)
@@ -812,7 +838,16 @@ class EventEditor(tk.Toplevel):
         if self.color_var.get() not in color_values:
             color_values.append(self.color_var.get())
         for color in color_values:
-            swatch = tk.Canvas(color_row, width=28, height=28, bg=CARD, bd=0, highlightthickness=0, cursor="hand2")
+            swatch = LogicalCanvas(
+                color_row,
+                dpi=master.dpi,
+                width=28,
+                height=28,
+                bg=CARD,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
             swatch.pack(side="left", padx=(0, 8))
             swatch.bind("<Button-1>", lambda _event, value=color: self._choose_color(value))
             self.color_canvases.append((swatch, color))
@@ -915,10 +950,7 @@ class EventEditor(tk.Toplevel):
                 canvas.create_oval(5, 5, 23, 23, fill=color, outline="")
 
     def _center_near_master(self) -> None:
-        x = self.master_app.winfo_rootx() + (self.master_app.winfo_width() - self.WIDTH) // 2
-        y = self.master_app.winfo_rooty() + 10
-        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
-        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        center_toplevel(self, self.master_app, self.WIDTH, self.HEIGHT, y_offset=10)
 
     def _start_drag(self, event: tk.Event) -> None:
         self._drag_origin = (event.x_root, event.y_root, self.winfo_x(), self.winfo_y())
@@ -994,7 +1026,7 @@ class RoutineEditor(tk.Toplevel):
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
         self.title_var = tk.StringVar(value=item.title if item else "")
         self.kind_var = tk.StringVar(value=item.kind if item else "habit")
         self.color_var = tk.StringVar(value=item.color if item else COLORS["薄荷绿"])
@@ -1054,7 +1086,16 @@ class RoutineEditor(tk.Toplevel):
         if self.color_var.get() not in color_values:
             color_values.append(self.color_var.get())
         for color in color_values:
-            swatch = tk.Canvas(color_row, width=30, height=26, bg=CARD, bd=0, highlightthickness=0, cursor="hand2")
+            swatch = LogicalCanvas(
+                color_row,
+                dpi=master.dpi,
+                width=30,
+                height=26,
+                bg=CARD,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
             swatch.pack(side="left", padx=(0, 7))
             swatch.bind("<Button-1>", lambda _event, value=color: self._choose_color(value))
             self.color_canvases.append((swatch, color))
@@ -1071,10 +1112,7 @@ class RoutineEditor(tk.Toplevel):
         self.bind("<Control-Return>", lambda _event: self.save())
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - self.WIDTH) // 2
-        y = master.winfo_rooty() + 48
-        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
-        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=48)
         self.after_idle(self._present)
 
     def _present(self) -> None:
@@ -1149,7 +1187,7 @@ class RoutineManager(tk.Toplevel):
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
         self.reminder_enabled = tk.BooleanVar(value=bool(master.store.settings.get("routine_reminder_enabled", True)))
         self.reminder_time = tk.StringVar(value=str(master.store.settings.get("routine_reminder_time", "09:00")))
 
@@ -1218,10 +1256,7 @@ class RoutineManager(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.refresh()
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - self.WIDTH) // 2
-        y = master.winfo_rooty() + 24
-        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
-        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=24)
         self.after_idle(lambda: master.present_overlay(self))
 
     def _save_reminder(self, show_error: bool = False) -> None:
@@ -1296,7 +1331,7 @@ class DayDetailDialog(tk.Toplevel):
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
         self.status_var = tk.StringVar(value=master.store.date_status(day))
 
         shell = tk.Frame(self, bg=CARD)
@@ -1380,10 +1415,7 @@ class DayDetailDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.refresh()
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - self.WIDTH) // 2
-        y = master.winfo_rooty() + 12
-        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
-        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=12)
         self.after_idle(lambda: master.present_overlay(self))
 
     def set_day(self, day: date) -> None:
@@ -1569,7 +1601,7 @@ class UpcomingDialog(tk.Toplevel):
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry("360x450")
+        self.geometry(f"{scale_px(360)}x{scale_px(450)}")
 
         shell = tk.Frame(self, bg=CARD)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
@@ -1580,7 +1612,7 @@ class UpcomingDialog(tk.Toplevel):
         close.pack(side="right")
         tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
 
-        canvas = tk.Canvas(shell, bg=CARD, bd=0, highlightthickness=0, width=336)
+        canvas = tk.Canvas(shell, bg=CARD, bd=0, highlightthickness=0, width=scale_px(336))
         scrollbar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
         inner = tk.Frame(canvas, bg=CARD, padx=14, pady=10)
         window = canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -1620,10 +1652,7 @@ class UpcomingDialog(tk.Toplevel):
 
         self.bind("<Escape>", lambda _event: self.close())
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - 360) // 2
-        y = master.winfo_rooty() + 40
-        x, y = clamp_to_work_area(x, y, 360, 450)
-        self.geometry(geometry_at(360, 450, x, y))
+        center_toplevel(self, master, 360, 450, y_offset=40)
         self.after_idle(lambda: self.master_app.present_overlay(self))
 
     def _edit(self, event: Event) -> None:
@@ -1642,7 +1671,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry("340x138")
+        self.geometry(f"{scale_px(340)}x{scale_px(138)}")
         shell = tk.Frame(self, bg=CARD, padx=18, pady=14)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Label(shell, text="桌面月历更新", bg=CARD, fg=INK, font=(FONT, 11, "bold"), anchor="w").pack(fill="x")
@@ -1652,10 +1681,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.pack(fill="x")
         self.progress.start(12)
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - 340) // 2
-        y = master.winfo_rooty() + 90
-        x, y = clamp_to_work_area(x, y, 340, 138)
-        self.geometry(geometry_at(340, 138, x, y))
+        center_toplevel(self, master, 340, 138, y_offset=90)
         self.after_idle(lambda: master.present_overlay(self))
 
     def set_status(self, status: str) -> None:
@@ -1674,6 +1700,7 @@ class UpdateProgressDialog(tk.Toplevel):
 class CalendarApp(tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
+        self.dpi = DpiManager(self)
         self.store = store or Store()
         self.instance_guard = instance
         self.theme_name = normalize_theme_name(self.store.settings.get("theme"))
@@ -1699,6 +1726,8 @@ class CalendarApp(tk.Tk):
         self.day_detail_window: Optional[DayDetailDialog] = None
         self.update_dialog: Optional[UpdateProgressDialog] = None
         self.update_busy = False
+        self._dpi_check_job: Optional[str] = None
+        self._dpi_rebuilding = False
         self.show_holidays = bool(self.store.settings.get("show_holidays", True))
         self.quick_color = COLORS["海盐蓝"]
         self.quick_event_type = "general"
@@ -1739,6 +1768,8 @@ class CalendarApp(tk.Tk):
         self._build_ui()
         self._set_initial_geometry()
         self._bind_shortcuts()
+        self.bind("<Configure>", self._schedule_dpi_check, add="+")
+        self.bind("<FocusIn>", self._schedule_dpi_check, add="+")
         self.render()
         self.after(80, self._finish_window_setup)
         self.after(220, self._start_tray_icon)
@@ -1765,7 +1796,7 @@ class CalendarApp(tk.Tk):
             pass
         style.configure(
             "TCombobox",
-            padding=4,
+            padding=self.dpi.px(4),
             font=(FONT, 9),
             fieldbackground=self.theme.input_background,
             background=self.theme.control_background,
@@ -1800,24 +1831,26 @@ class CalendarApp(tk.Tk):
 
     def _build_ui(self) -> None:
         theme = self.theme
+        dp = self.dpi.px
         header_height = 55 if theme.style == "aero" else 56
         weekday_pady = 1 if theme.style == "aero" else 2
         self.day_cells = []
         self.configure(bg=theme.window_shadow)
         self.window_frame = tk.Frame(self, bg=theme.window_border_outer)
-        self.window_frame.pack(fill="both", expand=True, padx=theme.metrics.shadow_depth, pady=theme.metrics.shadow_depth)
+        self.window_frame.pack(fill="both", expand=True, padx=dp(theme.metrics.shadow_depth), pady=dp(theme.metrics.shadow_depth))
         self.inner_frame = tk.Frame(self.window_frame, bg=theme.window_border_inner)
-        self.inner_frame.pack(fill="both", expand=True, padx=theme.metrics.outer_border_width, pady=theme.metrics.outer_border_width)
+        self.inner_frame.pack(fill="both", expand=True, padx=dp(theme.metrics.outer_border_width), pady=dp(theme.metrics.outer_border_width))
         self.shell = tk.Frame(
             self.inner_frame,
             bg=theme.panel_background,
-            highlightthickness=1 if theme.style == "aero" else 0,
+            highlightthickness=dp(1) if theme.style == "aero" else 0,
             highlightbackground=theme.window_background,
         )
-        self.shell.pack(fill="both", expand=True, padx=theme.metrics.inner_border_width, pady=theme.metrics.inner_border_width)
+        self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
 
-        self.header = tk.Canvas(
+        self.header = LogicalCanvas(
             self.shell,
+            dpi=self.dpi,
             height=header_height,
             bg=theme.header_background,
             bd=0,
@@ -1859,7 +1892,7 @@ class CalendarApp(tk.Tk):
         controls = (previous, today, following, self.mode_button, self.menu_button, minimize)
         x = WINDOW_WIDTH - 13 - sum(widths) - 5 * 2
         for control, control_width in zip(controls, widths):
-            control.place(x=x, y=control_y, width=control_width, height=control_height)
+            control.place(x=dp(x), y=dp(control_y), width=dp(control_width), height=dp(control_height))
             x += control_width + 2
         Tooltip(previous, "上个月（滚轮向上 / PgUp）")
         Tooltip(today, "回到今天（Ctrl+T）")
@@ -1871,7 +1904,7 @@ class CalendarApp(tk.Tk):
         self.header.bind("<B1-Motion>", self._drag_window)
         self.header.bind("<ButtonRelease-1>", self._end_drag)
 
-        weekdays = tk.Frame(self.shell, bg=theme.calendar_background, padx=12)
+        weekdays = tk.Frame(self.shell, bg=theme.calendar_background, padx=dp(12))
         weekdays.pack(fill="x")
         for column, name in enumerate(("一", "二", "三", "四", "五", "六", "日")):
             weekdays.grid_columnconfigure(column, weight=1, uniform="weekday")
@@ -1881,10 +1914,10 @@ class CalendarApp(tk.Tk):
                 bg=theme.calendar_background,
                 fg=theme.date_weekend_text if column >= 5 else theme.weekday_text,
                 font=(FONT, 8),
-                pady=weekday_pady,
+                pady=dp(weekday_pady),
             ).grid(row=0, column=column, sticky="ew")
 
-        self.calendar_frame = tk.Frame(self.shell, bg=theme.calendar_background, padx=12, pady=2)
+        self.calendar_frame = tk.Frame(self.shell, bg=theme.calendar_background, padx=dp(12), pady=dp(2))
         self.calendar_frame.pack(fill="x")
         for column in range(7):
             self.calendar_frame.grid_columnconfigure(column, weight=1, uniform="day")
@@ -1898,19 +1931,19 @@ class CalendarApp(tk.Tk):
         for cell in self.day_cells:
             cell.bind("<MouseWheel>", self._calendar_wheel, add="+")
 
-        tk.Frame(self.shell, bg=theme.divider, height=1).pack(fill="x", padx=12, pady=(3, 0))
+        tk.Frame(self.shell, bg=theme.divider, height=dp(1)).pack(fill="x", padx=dp(12), pady=(dp(3), 0))
 
         self.schedule_section = tk.Frame(self.shell, bg=theme.schedule_background)
         self.schedule_section.pack(fill="both", expand=True)
 
-        self.agenda_bar = tk.Frame(self.schedule_section, bg=theme.schedule_background, height=39, padx=12, cursor="hand2")
+        self.agenda_bar = tk.Frame(self.schedule_section, bg=theme.schedule_background, height=dp(39), padx=dp(12), cursor="hand2")
         self.agenda_bar.pack_propagate(False)
         self.agenda_toggle = tk.Label(self.agenda_bar, text="⌃", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 10), cursor="hand2")
-        self.agenda_toggle.pack(side="left", padx=(0, 6))
+        self.agenda_toggle.pack(side="left", padx=(0, dp(6)))
         self.agenda_title = tk.Label(self.agenda_bar, text="", bg=theme.schedule_background, fg=theme.text_primary, font=(FONT, 10, "bold"), cursor="hand2")
         self.agenda_title.pack(side="left")
         self.agenda_count = tk.Label(self.agenda_bar, text="", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 8), cursor="hand2")
-        self.agenda_count.pack(side="left", padx=(7, 0))
+        self.agenda_count.pack(side="left", padx=(dp(7), 0))
         add = ThemeButton(
             self.agenda_bar,
             self,
@@ -1922,7 +1955,7 @@ class CalendarApp(tk.Tk):
             foreground=theme.accent if theme.style == "flat" else theme.control_text,
             surface_background=theme.schedule_background,
         )
-        add.pack(side="right", pady=4)
+        add.pack(side="right", pady=dp(4))
         routines = ThemeButton(
             self.agenda_bar,
             self,
@@ -1934,7 +1967,7 @@ class CalendarApp(tk.Tk):
             foreground=theme.accent if theme.style == "flat" else theme.control_text,
             surface_background=theme.schedule_background,
         )
-        routines.pack(side="right", pady=4, padx=(0, 3))
+        routines.pack(side="right", pady=dp(4), padx=(0, dp(3)))
         Tooltip(add, "打开当天详情并管理事项")
         Tooltip(routines, "管理习惯清单：工作日习惯与一次性待办")
         for widget in (self.agenda_bar, self.agenda_toggle, self.agenda_title, self.agenda_count):
@@ -1943,8 +1976,8 @@ class CalendarApp(tk.Tk):
         self._build_agenda_body()
 
     def _draw_header(self, _event=None) -> None:
-        width = max(1, self.header.winfo_width())
-        height = max(1, self.header.winfo_height())
+        width = max(1, self.header.logical_width())
+        height = max(1, self.header.logical_height())
         self.header.delete("header_art")
         if self.theme.style == "aero":
             vertical_multi_gradient(
@@ -1983,15 +2016,16 @@ class CalendarApp(tk.Tk):
 
     def _build_ddl_area(self, parent: tk.Widget, title: str, *, pinned: bool):
         theme = self.theme
+        dp = self.dpi.px
         background = theme.ddl_pinned_background if pinned else theme.ddl_regular_background
         border = theme.ddl_pinned_border if pinned else theme.ddl_regular_border
         frame = tk.Frame(
             parent,
             bg=background,
-            highlightthickness=1,
+            highlightthickness=dp(1),
             highlightbackground=border,
         )
-        ddl_header = tk.Frame(frame, bg=background, padx=8, pady=3)
+        ddl_header = tk.Frame(frame, bg=background, padx=dp(8), pady=dp(3))
         ddl_header.pack(fill="x")
         tk.Label(
             ddl_header,
@@ -2015,7 +2049,7 @@ class CalendarApp(tk.Tk):
             bg=background,
             bd=0,
             highlightthickness=0,
-            height=DDL_ROW_HEIGHT,
+            height=dp(DDL_ROW_HEIGHT),
         )
         scrollbar = ttk.Scrollbar(ddl_body, orient="vertical", command=canvas.yview)
         inner = tk.Frame(canvas, bg=background)
@@ -2029,6 +2063,7 @@ class CalendarApp(tk.Tk):
 
     def _build_agenda_body(self) -> None:
         theme = self.theme
+        dp = self.dpi.px
         (
             self.pinned_ddl_frame,
             self.pinned_ddl_count_label,
@@ -2037,7 +2072,7 @@ class CalendarApp(tk.Tk):
             self.pinned_ddl_inner,
         ) = self._build_ddl_area(self.schedule_section, "紧急 DDL", pinned=True)
 
-        self.quick_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=12, pady=5)
+        self.quick_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=dp(12), pady=dp(5))
         self.quick_frame.pack(fill="x")
         self.quick_var = tk.StringVar(value="")
         self.quick_entry = tk.Entry(
@@ -2047,12 +2082,12 @@ class CalendarApp(tk.Tk):
             fg=theme.text_muted,
             insertbackground=theme.text_primary,
             relief="flat",
-            highlightthickness=1,
+            highlightthickness=dp(1),
             highlightbackground=theme.input_border,
             highlightcolor=theme.input_focus,
             font=(FONT, 9),
         )
-        self.quick_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        self.quick_entry.pack(side="left", fill="x", expand=True, ipady=dp(6))
         self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
         self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
         self.quick_entry.bind("<Return>", self.quick_add)
@@ -2067,12 +2102,12 @@ class CalendarApp(tk.Tk):
             foreground=theme.text_secondary if theme.style == "flat" else theme.control_text,
             surface_background=theme.schedule_background,
         )
-        self.quick_options_button.pack(side="right", padx=(6, 0))
+        self.quick_options_button.pack(side="right", padx=(dp(6), 0))
         self._refresh_quick_options_button()
 
         self.agenda_bar.pack(fill="x")
 
-        self.footer_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=13, height=21)
+        self.footer_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=dp(13), height=dp(21))
         self.footer_frame.pack(side="bottom", fill="x")
         self.footer_frame.pack_propagate(False)
         self.upcoming_label = tk.Label(self.footer_frame, text="", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 8), cursor="hand2")
@@ -2090,9 +2125,9 @@ class CalendarApp(tk.Tk):
             self.regular_ddl_inner,
         ) = self._build_ddl_area(self.collapsible_frame, "DDL 事项 / 临近截止", pinned=False)
 
-        self.daily_list_shell = tk.Frame(self.collapsible_frame, bg=theme.schedule_background, padx=10)
+        self.daily_list_shell = tk.Frame(self.collapsible_frame, bg=theme.schedule_background, padx=dp(10))
         self.daily_list_shell.pack(fill="both", expand=True)
-        self.agenda_canvas = tk.Canvas(self.daily_list_shell, bg=theme.schedule_background, bd=0, highlightthickness=0, width=340, height=126)
+        self.agenda_canvas = tk.Canvas(self.daily_list_shell, bg=theme.schedule_background, bd=0, highlightthickness=0, width=dp(340), height=dp(126))
         self.agenda_scrollbar = ttk.Scrollbar(self.daily_list_shell, orient="vertical", command=self.agenda_canvas.yview)
         self.agenda_inner = tk.Frame(self.agenda_canvas, bg=theme.schedule_background)
         self.agenda_window = self.agenda_canvas.create_window((0, 0), window=self.agenda_inner, anchor="nw")
@@ -2109,15 +2144,17 @@ class CalendarApp(tk.Tk):
         pinned_items, regular_items = self.store.grouped_ddl_events()
         height = self._desired_window_height(len(pinned_items), len(regular_items))
         self.update_idletasks()
-        screen_w = self.winfo_screenwidth()
+        area = self.dpi.work_area()
+        window_width = self.dpi.px(WINDOW_WIDTH)
+        window_height = self.dpi.px(height)
         saved_x = self.store.settings.get("x")
         saved_y = self.store.settings.get("y")
         try:
-            x = int(saved_x) if saved_x is not None else screen_w - WINDOW_WIDTH - 26
-            y = int(saved_y) if saved_y is not None else 44
+            x = int(saved_x) if saved_x is not None else area.right - window_width - self.dpi.px(26)
+            y = int(saved_y) if saved_y is not None else area.top + self.dpi.px(44)
         except (TypeError, ValueError):
-            x, y = screen_w - WINDOW_WIDTH - 26, 44
-        x, y = clamp_to_work_area(x, y, WINDOW_WIDTH, height)
+            x, y = area.right - window_width - self.dpi.px(26), area.top + self.dpi.px(44)
+        x, y = clamp_to_work_area(x, y, window_width, window_height)
         self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
 
     def _ddl_canvas_height(self, item_count: int) -> int:
@@ -2135,20 +2172,31 @@ class CalendarApp(tk.Tk):
         base_height += self._ddl_region_height(pinned_ddl_count)
         if self.agenda_open:
             base_height += self._ddl_region_height(regular_ddl_count)
-        return min(base_height, max(CLOSED_HEIGHT, self.winfo_screenheight() - 48))
+        work_height = self.dpi.logical(self.dpi.work_area().height) if hasattr(self, "dpi") else self.winfo_screenheight()
+        return min(base_height, max(CLOSED_HEIGHT, work_height - 48))
 
     def _apply_window_height(self, pinned_ddl_count: int, regular_ddl_count: int) -> None:
         height = self._desired_window_height(pinned_ddl_count, regular_ddl_count)
-        x, y = clamp_to_work_area(self.winfo_x(), self.winfo_y(), WINDOW_WIDTH, height)
+        x, y = clamp_to_work_area(
+            self.winfo_x(),
+            self.winfo_y(),
+            self.dpi.px(WINDOW_WIDTH),
+            self.dpi.px(height),
+        )
         self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
 
     def _apply_main_layout(self, pinned_ddl_count: int, regular_ddl_count: int) -> None:
         visible = main_region_visibility(self.agenda_open, pinned_ddl_count, regular_ddl_count)
 
         if visible.pinned_ddl:
-            self.pinned_ddl_canvas.configure(height=self._ddl_canvas_height(pinned_ddl_count))
+            self.pinned_ddl_canvas.configure(height=self.dpi.px(self._ddl_canvas_height(pinned_ddl_count)))
             if not self.pinned_ddl_frame.winfo_manager():
-                self.pinned_ddl_frame.pack(fill="x", padx=10, pady=(4, 3), before=self.quick_frame)
+                self.pinned_ddl_frame.pack(
+                    fill="x",
+                    padx=self.dpi.px(10),
+                    pady=(self.dpi.px(4), self.dpi.px(3)),
+                    before=self.quick_frame,
+                )
         elif self.pinned_ddl_frame.winfo_manager():
             self.pinned_ddl_frame.pack_forget()
 
@@ -2159,13 +2207,13 @@ class CalendarApp(tk.Tk):
             self.collapsible_frame.pack_forget()
 
         if visible.regular_ddl:
-            self.regular_ddl_canvas.configure(height=self._ddl_canvas_height(regular_ddl_count))
+            self.regular_ddl_canvas.configure(height=self.dpi.px(self._ddl_canvas_height(regular_ddl_count)))
             if not self.regular_ddl_frame.winfo_manager():
                 self.regular_ddl_frame.pack(
                     side="bottom",
                     fill="x",
-                    padx=10,
-                    pady=(3, 4),
+                    padx=self.dpi.px(10),
+                    pady=(self.dpi.px(3), self.dpi.px(4)),
                     before=self.daily_list_shell,
                 )
         elif self.regular_ddl_frame.winfo_manager():
@@ -2177,6 +2225,82 @@ class CalendarApp(tk.Tk):
         make_tool_window(self)
         self._window_ready = True
         self.apply_window_mode(force_desktop=True)
+
+    def _schedule_dpi_check(self, _event=None) -> None:
+        if self._dpi_rebuilding:
+            return
+        if self._dpi_check_job:
+            try:
+                self.after_cancel(self._dpi_check_job)
+            except tk.TclError:
+                pass
+        self._dpi_check_job = self.after(140, self._check_dpi_change)
+
+    def _check_dpi_change(self) -> None:
+        self._dpi_check_job = None
+        if self._dpi_rebuilding or not self.winfo_exists():
+            return
+        new_dpi = self.dpi.current_window_dpi()
+        if new_dpi == self.dpi.dpi:
+            return
+        self._apply_dpi_change(new_dpi)
+
+    def _rebuild_main_ui(self, quick_value: str, quick_was_placeholder: bool) -> None:
+        self.window_frame.destroy()
+        self._configure_style()
+        self._build_ui()
+        self.render()
+        if quick_value and not quick_was_placeholder:
+            self.quick_var.set(quick_value)
+            self.quick_placeholder_active = False
+            self.quick_entry.configure(fg=self.theme.text_primary)
+        self.after_idle(self._draw_header)
+
+    def _apply_dpi_change(self, new_dpi: int) -> None:
+        quick_value = self.quick_var.get() if hasattr(self, "quick_var") else ""
+        quick_was_placeholder = self.quick_placeholder_active
+        x, y = self.winfo_x(), self.winfo_y()
+        old_dpi = self.dpi.dpi
+        popup_geometries: list[tuple[tk.Toplevel, int, int, int, int]] = []
+        for child in self.winfo_children():
+            if not isinstance(child, tk.Toplevel) or not child.winfo_exists():
+                continue
+            child.update_idletasks()
+            popup_geometries.append(
+                (
+                    child,
+                    unscale_px(child.winfo_width(), old_dpi),
+                    unscale_px(child.winfo_height(), old_dpi),
+                    child.winfo_x(),
+                    child.winfo_y(),
+                )
+            )
+        self._dpi_rebuilding = True
+        try:
+            self.dpi.apply(new_dpi)
+            self._rebuild_main_ui(quick_value, quick_was_placeholder)
+            for popup, logical_width, logical_height, popup_x, popup_y in popup_geometries:
+                if not popup.winfo_exists():
+                    continue
+                device_width = scale_px(logical_width, new_dpi)
+                device_height = scale_px(logical_height, new_dpi)
+                popup_x, popup_y = clamp_to_work_area(
+                    popup_x,
+                    popup_y,
+                    device_width,
+                    device_height,
+                )
+                popup.geometry(
+                    scaled_geometry(logical_width, logical_height, popup_x, popup_y, new_dpi)
+                )
+            pinned, regular = self.store.grouped_ddl_events()
+            height = self._desired_window_height(len(pinned), len(regular))
+            x, y = clamp_to_work_area(x, y, self.dpi.px(WINDOW_WIDTH), self.dpi.px(height))
+            self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
+            make_tool_window(self)
+        finally:
+            self._dpi_rebuilding = False
+        self.after(80, self.apply_window_mode)
 
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-n>", lambda _event: self.open_day_detail())
@@ -2840,6 +2964,9 @@ class CalendarApp(tk.Tk):
 
     def _end_drag(self, _event=None) -> None:
         self._drag_origin = None
+        new_dpi = self.dpi.current_window_dpi()
+        if new_dpi != self.dpi.dpi:
+            self._apply_dpi_change(new_dpi)
         width, height = self.winfo_width(), self.winfo_height()
         x, y = clamp_to_work_area(self.winfo_x(), self.winfo_y(), width, height)
         self.geometry(position_at(x, y))
@@ -2945,15 +3072,7 @@ class CalendarApp(tk.Tk):
         self._apply_theme_opacity()
         self.store.settings["theme"] = normalized
         self.store.save()
-        self.window_frame.destroy()
-        self._configure_style()
-        self._build_ui()
-        self.render()
-        if quick_value and not quick_was_placeholder:
-            self.quick_var.set(quick_value)
-            self.quick_placeholder_active = False
-            self.quick_entry.configure(fg=self.theme.text_primary)
-        self.after_idle(self._draw_header)
+        self._rebuild_main_ui(quick_value, quick_was_placeholder)
         self.after(80, self.apply_window_mode)
 
     def set_opacity(self, value: float) -> None:
@@ -3209,7 +3328,7 @@ class CalendarApp(tk.Tk):
         popup.configure(bg=BORDER)
         popup.overrideredirect(True)
         popup.attributes("-topmost", True)
-        popup.geometry("350x190")
+        popup.geometry(f"{self.dpi.px(350)}x{self.dpi.px(190)}")
         shell = tk.Frame(popup, bg=CARD)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Frame(shell, bg=ACCENT, height=5).pack(fill="x")
@@ -3224,10 +3343,12 @@ class CalendarApp(tk.Tk):
         tk.Button(actions, text="打开习惯清单", command=lambda: self._open_from_routine_notification(popup), bg=ACCENT, fg=current_theme().text_on_accent, relief="flat", bd=0, padx=14, pady=6, font=(FONT, 9, "bold"), cursor="hand2").pack(side="right")
         tk.Button(actions, text="知道了", command=popup.destroy, bg=CONTROL_BACKGROUND, fg=SUBTLE, relief="flat", bd=0, padx=12, pady=6, cursor="hand2").pack(side="right", padx=(0, 7))
         popup.update_idletasks()
-        offset = min(len(self.notification_windows), 3) * 198
-        x = popup.winfo_screenwidth() - 368
-        y = popup.winfo_screenheight() - 247 - offset
-        popup.geometry(geometry_at(350, 190, x, max(8, y)))
+        area = self.dpi.work_area()
+        offset = self.dpi.px(min(len(self.notification_windows), 3) * 198)
+        x = area.right - self.dpi.px(368)
+        y = area.bottom - self.dpi.px(247) - offset
+        x, y = clamp_to_work_area(x, y, self.dpi.px(350), self.dpi.px(190))
+        popup.geometry(geometry_at(350, 190, x, y))
         self.present_overlay(popup)
         self.notification_windows.append(popup)
         popup.bind("<Destroy>", lambda _event, window=popup: self._forget_notification(window), add="+")
@@ -3253,7 +3374,7 @@ class CalendarApp(tk.Tk):
         popup.configure(bg=BORDER)
         popup.overrideredirect(True)
         popup.attributes("-topmost", True)
-        popup.geometry("340x168")
+        popup.geometry(f"{self.dpi.px(340)}x{self.dpi.px(168)}")
         shell = tk.Frame(popup, bg=CARD)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Frame(shell, bg=event.color, height=5).pack(fill="x")
@@ -3275,10 +3396,12 @@ class CalendarApp(tk.Tk):
         tk.Button(actions, text="完成", command=lambda: self.complete_from_notification(event, popup), bg=ACCENT, fg=current_theme().text_on_accent, relief="flat", bd=0, padx=12, pady=5, cursor="hand2").pack(side="right")
         tk.Button(actions, text="知道了", command=popup.destroy, bg=CONTROL_BACKGROUND, fg=SUBTLE, relief="flat", bd=0, padx=10, pady=5, cursor="hand2").pack(side="right", padx=(0, 6))
         popup.update_idletasks()
-        offset = min(len(self.notification_windows), 3) * 178
-        x = popup.winfo_screenwidth() - 358
-        y = popup.winfo_screenheight() - 225 - offset
-        popup.geometry(geometry_at(340, 168, x, max(8, y)))
+        area = self.dpi.work_area()
+        offset = self.dpi.px(min(len(self.notification_windows), 3) * 178)
+        x = area.right - self.dpi.px(358)
+        y = area.bottom - self.dpi.px(225) - offset
+        x, y = clamp_to_work_area(x, y, self.dpi.px(340), self.dpi.px(168))
+        popup.geometry(geometry_at(340, 168, x, y))
         self.present_overlay(popup)
         self.notification_windows.append(popup)
         popup.bind("<Destroy>", lambda _event, window=popup: self._forget_notification(window), add="+")
@@ -3333,6 +3456,7 @@ class CalendarApp(tk.Tk):
 
 
 def main() -> None:
+    enable_dpi_awareness()
     sys.excepthook = log_exception
     instance = SingleInstance()
     if instance.already_running:
