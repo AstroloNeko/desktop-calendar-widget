@@ -6,36 +6,61 @@ $buildDir = Join-Path $projectDir "build"
 $releaseDir = Join-Path $projectDir "release"
 $appDir = Join-Path $distDir "DesktopCalendar"
 $manifestPath = Join-Path $projectDir "windows_per_monitor_v2.manifest"
-$pythonCommand = if ($env:CALENDAR_BUILD_PYTHON) { $env:CALENDAR_BUILD_PYTHON } else { "py" }
-$pythonPrefix = if ($env:CALENDAR_BUILD_PYTHON) { @() } else { @("-3") }
+$pythonSelector = if ($env:CALENDAR_BUILD_PYTHON) { $env:CALENDAR_BUILD_PYTHON } else { "py" }
+$pythonSelectorArguments = if ($env:CALENDAR_BUILD_PYTHON) { @() } else { @("-3") }
+$resolveArguments = @($pythonSelectorArguments) + @("-c", "import sys; print(sys.executable)")
+$pythonOutput = @(& $pythonSelector @resolveArguments)
+if ($LASTEXITCODE -ne 0 -or $pythonOutput.Count -eq 0) {
+    throw "Unable to resolve the selected Python interpreter"
+}
+$pythonExe = $pythonOutput[-1].Trim()
+if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+    throw "Resolved Python interpreter does not exist: $pythonExe"
+}
+
+function Invoke-PythonBuild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments,
+        [Parameter(Mandatory = $true)]
+        [string] $FailureMessage
+    )
+
+    & $pythonExe @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "$FailureMessage with exit code $exitCode"
+    }
+}
 
 Set-Location $projectDir
 New-Item -ItemType Directory -Path (Join-Path $buildDir "spec") -Force | Out-Null
 
-& $pythonCommand @pythonPrefix -m PyInstaller --noconfirm --clean --windowed --onedir `
-    --name DesktopCalendar `
-    --icon (Join-Path $projectDir "assets\calendar.ico") `
-    --manifest $manifestPath `
-    --add-data "$projectDir\assets;assets" `
-    --distpath $distDir `
-    --workpath (Join-Path $buildDir "app") `
-    --specpath (Join-Path $buildDir "spec") `
-    app.py
-if ($LASTEXITCODE -ne 0) {
-    throw "DesktopCalendar build failed with exit code $LASTEXITCODE"
-}
+Write-Host "Python interpreter: $pythonExe"
+$appBuildArguments = @(
+    "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--onedir",
+    "--name", "DesktopCalendar",
+    "--icon", (Join-Path $projectDir "assets\calendar.ico"),
+    "--manifest", $manifestPath,
+    "--add-data", "$projectDir\assets;assets",
+    "--distpath", $distDir,
+    "--workpath", (Join-Path $buildDir "app"),
+    "--specpath", (Join-Path $buildDir "spec"),
+    "app.py"
+)
+Invoke-PythonBuild -Arguments $appBuildArguments -FailureMessage "DesktopCalendar build failed"
 
-& $pythonCommand @pythonPrefix -m PyInstaller --noconfirm --clean --windowed --onefile `
-    --name DesktopCalendarUpdater `
-    --icon (Join-Path $projectDir "assets\calendar.ico") `
-    --manifest $manifestPath `
-    --distpath (Join-Path $buildDir "updater-dist") `
-    --workpath (Join-Path $buildDir "updater") `
-    --specpath (Join-Path $buildDir "spec") `
-    updater.py
-if ($LASTEXITCODE -ne 0) {
-    throw "DesktopCalendarUpdater build failed with exit code $LASTEXITCODE"
-}
+$updaterBuildArguments = @(
+    "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--onefile",
+    "--name", "DesktopCalendarUpdater",
+    "--icon", (Join-Path $projectDir "assets\calendar.ico"),
+    "--manifest", $manifestPath,
+    "--distpath", (Join-Path $buildDir "updater-dist"),
+    "--workpath", (Join-Path $buildDir "updater"),
+    "--specpath", (Join-Path $buildDir "spec"),
+    "updater.py"
+)
+Invoke-PythonBuild -Arguments $updaterBuildArguments -FailureMessage "DesktopCalendarUpdater build failed"
 
 Copy-Item (Join-Path $buildDir "updater-dist\DesktopCalendarUpdater.exe") $appDir -Force
 Copy-Item (Join-Path $projectDir "README.md") $appDir -Force
