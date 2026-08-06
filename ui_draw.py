@@ -169,19 +169,18 @@ def _calendar_rounded_rectangle(
     radius: int,
     **kwargs,
 ) -> int:
-    """Bounded rounded polygon without Tk's smoothing overshoot."""
+    """Draw a bounded, pixel-symmetric rounded polygon for date states."""
     radius = max(1, min(int(radius), (right - left) // 2, (bottom - top) // 2))
-    points: list[int] = []
-    arcs = (
-        (right - radius, top + radius, -90, 0),
-        (right - radius, bottom - radius, 0, 90),
-        (left + radius, bottom - radius, 90, 180),
-        (left + radius, top + radius, 180, 270),
+    offsets = [round(math.sqrt(max(0, radius * radius - (radius - step) ** 2))) for step in range(radius + 1)]
+    corners = (
+        ((right - radius + offsets[step], top + step) for step in range(radius + 1)),
+        ((right - radius + offsets[radius - step], bottom - radius + step) for step in range(radius + 1)),
+        ((left + radius - offsets[step], bottom - step) for step in range(radius + 1)),
+        ((left + radius - offsets[radius - step], top + radius - step) for step in range(radius + 1)),
     )
-    for center_x, center_y, start, end in arcs:
-        for angle in range(start, end + 1, 15):
-            radians = math.radians(angle)
-            point = (round(center_x + radius * math.cos(radians)), round(center_y + radius * math.sin(radians)))
+    points: list[int] = []
+    for corner in corners:
+        for point in corner:
             if points[-2:] != list(point):
                 points.extend(point)
     return canvas.create_polygon(points, smooth=False, **kwargs)
@@ -303,3 +302,51 @@ def draw_calendar_date_state(
         width=1,
         tags=tags,
     )
+
+
+def draw_calendar_date_ring(
+    canvas: tk.Canvas,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    color: str,
+    radius: int,
+    inner_highlight: str | None = None,
+    tags: str | Iterable[str] = "date_marker",
+) -> None:
+    """Draw a thin status ring around, never over, the date-state body."""
+    left, right = sorted((round(x1), round(x2)))
+    top, bottom = sorted((round(y1), round(y2)))
+    if right <= left or bottom <= top:
+        return
+
+    # Keep Tk's outline reservation within the public box.  The optional
+    # highlight is inset as well, so DDL + selected/today never grows a tail.
+    edge_inset = 2
+    _calendar_rounded_rectangle(
+        canvas,
+        left + edge_inset,
+        top + edge_inset,
+        right - edge_inset,
+        bottom - edge_inset,
+        max(2, radius - edge_inset),
+        fill="",
+        outline=color,
+        width=1,
+        tags=tags,
+    )
+    if inner_highlight and right - left > 8 and bottom - top > 8:
+        _calendar_rounded_rectangle(
+            canvas,
+            left + edge_inset + 1,
+            top + edge_inset + 1,
+            right - edge_inset - 1,
+            bottom - edge_inset - 1,
+            max(1, radius - edge_inset - 1),
+            fill="",
+            outline=inner_highlight,
+            width=1,
+            tags=tags,
+        )

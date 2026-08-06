@@ -10,6 +10,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+from dpi_utils import DpiManager, LogicalCanvas, enable_dpi_awareness, scale_px, scaled_geometry, unscale_px
+
+
+DPI_AWARENESS_MODE = enable_dpi_awareness()
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
@@ -20,8 +26,8 @@ from calendar_core import (
     COLORS,
     DATA_DIR,
     DATE_STATUS_LABELS,
-    PRIORITY_LABELS,
-    PRIORITY_OPTIONS,
+    EVENT_TYPE_LABELS,
+    EVENT_TYPE_OPTIONS,
     REMINDERS,
     WEEKDAYS,
     Event,
@@ -51,16 +57,31 @@ from update_manager import (
     running_as_packaged_app,
 )
 from version import __version__
-from ui_draw import bevel_control, blend, draw_calendar_date_state, rounded_rectangle, vertical_gradient, vertical_multi_gradient
+from ui_draw import (
+    bevel_control,
+    blend,
+    draw_calendar_date_ring,
+    draw_calendar_date_state,
+    rounded_rectangle,
+    vertical_gradient,
+    vertical_multi_gradient,
+)
 from ui_theme import Theme, get_theme, normalize_theme_name
 
 
 WINDOW_WIDTH = 372
 OPEN_HEIGHT = 548
 CLOSED_HEIGHT = 405
-URGENT_VISIBLE_ROWS = 2
-URGENT_ROW_HEIGHT = 30
-URGENT_REGION_CHROME_HEIGHT = 58
+DDL_VISIBLE_ROWS = 2
+DDL_ROW_HEIGHT = 30
+DDL_REGION_CHROME_HEIGHT = 58
+EVENT_STRIPE_WIDTH = 4
+DATE_STATE_HALF_WIDTH = 14
+DATE_STATE_TOP = 1
+DATE_STATE_BOTTOM = 23
+DATE_RING_HALF_WIDTH = 17
+DATE_RING_TOP = 0
+DATE_RING_BOTTOM = 26
 
 FONT = "Microsoft YaHei UI"
 
@@ -70,26 +91,26 @@ _ACTIVE_THEME = get_theme("modern")
 
 @dataclass(frozen=True)
 class MainRegionVisibility:
-    pinned_urgent: bool
+    pinned_ddl: bool
     quick_add: bool
     agenda_header: bool
     daily_content: bool
-    regular_urgent: bool
+    regular_ddl: bool
     footer: bool
 
 
 def main_region_visibility(
     agenda_open: bool,
-    pinned_urgent_count: int,
-    regular_urgent_count: int,
+    pinned_ddl_count: int,
+    regular_ddl_count: int,
 ) -> MainRegionVisibility:
     """Describe which semantic areas belong in the current main-window state."""
     return MainRegionVisibility(
-        pinned_urgent=pinned_urgent_count > 0,
+        pinned_ddl=pinned_ddl_count > 0,
         quick_add=True,
         agenda_header=True,
         daily_content=agenda_open,
-        regular_urgent=agenda_open and regular_urgent_count > 0,
+        regular_ddl=agenda_open and regular_ddl_count > 0,
         footer=True,
     )
 
@@ -128,22 +149,53 @@ def activate_theme(theme: Theme) -> None:
 activate_theme(_ACTIVE_THEME)
 
 
-def priority_color(theme: Theme, priority: str, *, done: bool = False) -> str:
-    """Return the theme's restrained, semantic priority accent."""
+def event_type_color(theme: Theme, event_type: str, *, done: bool = False) -> str:
+    """Return the semantic type accent without replacing an event's own color."""
     if done:
         return theme.event_done
     return {
-        "low": theme.priority_low,
-        "urgent": theme.priority_urgent,
-    }.get(priority, theme.priority_normal)
+        "urgent": theme.event_type_urgent,
+        "ddl": theme.event_type_ddl,
+    }.get(event_type, theme.event_type_general)
+
+
+def event_stripe_color(theme: Theme, event: Event) -> str:
+    """Keep the card color channel independent from the event's type."""
+    return theme.event_done if event.done else event.color
+
+
+def event_type_badge_style(theme: Theme, event_type: str) -> tuple[str, str, str] | None:
+    """Return the compact badge palette for exceptional event types."""
+    if event_type == "urgent":
+        return theme.event_type_urgent, theme.event_type_urgent_background, theme.event_type_urgent_border
+    if event_type == "ddl":
+        return theme.event_type_ddl, theme.event_type_ddl_background, theme.event_type_ddl_border
+    return None
 
 
 def geometry_at(width: int, height: int, x: int, y: int) -> str:
-    return f"{width}x{height}{x:+d}{y:+d}"
+    return scaled_geometry(width, height, x, y)
 
 
 def position_at(x: int, y: int) -> str:
     return f"{x:+d}{y:+d}"
+
+
+def center_toplevel(
+    window: tk.Toplevel,
+    master: tk.Misc,
+    width: int,
+    height: int,
+    *,
+    y_offset: int = 0,
+) -> None:
+    """Center a logical-size popup using device pixels on the master's monitor."""
+    device_width = scale_px(width)
+    device_height = scale_px(height)
+    x = master.winfo_rootx() + (master.winfo_width() - device_width) // 2
+    y = master.winfo_rooty() + scale_px(y_offset)
+    x, y = clamp_to_work_area(x, y, device_width, device_height)
+    window.geometry(geometry_at(width, height, x, y))
 
 
 def truncate(text: str, limit: int) -> str:
@@ -206,7 +258,7 @@ def button_label(
     return label
 
 
-class ThemeButton(tk.Canvas):
+class ThemeButton(LogicalCanvas):
     """Compact flat/Aero control used by the main gadget chrome."""
 
     def __init__(
@@ -233,6 +285,7 @@ class ThemeButton(tk.Canvas):
         self.state = "normal"
         super().__init__(
             parent,
+            dpi=app.dpi,
             width=width,
             height=height,
             bd=0,
@@ -265,8 +318,8 @@ class ThemeButton(tk.Canvas):
 
     def draw(self) -> None:
         theme = self.app.theme
-        width = max(2, int(self.cget("width")))
-        height = max(2, int(self.cget("height")))
+        width = max(2, self.logical_width())
+        height = max(2, self.logical_height())
         self.delete("all")
         if theme.style == "aero":
             background = (
@@ -326,7 +379,7 @@ class ThemeButton(tk.Canvas):
         )
 
 
-class TaskCheck(tk.Canvas):
+class TaskCheck(LogicalCanvas):
     """Compact themed checkbox with a generous, fixed click target."""
 
     def __init__(
@@ -341,6 +394,7 @@ class TaskCheck(tk.Canvas):
     ) -> None:
         super().__init__(
             parent,
+            dpi=app.dpi,
             width=34,
             height=height,
             bg=background,
@@ -358,7 +412,7 @@ class TaskCheck(tk.Canvas):
     def draw(self) -> None:
         self.delete("all")
         theme = self.app.theme
-        center_y = max(12, int(self.winfo_height() / 2))
+        center_y = max(12, int(self.logical_height() / 2))
         box_fill = theme.checkbox_checked if self.done else str(self.cget("bg"))
         rounded_rectangle(
             self,
@@ -420,11 +474,12 @@ class Tooltip:
             self.window = None
 
 
-class DayCell(tk.Canvas):
+class DayCell(LogicalCanvas):
     def __init__(self, parent: tk.Widget, app: "CalendarApp", column: int) -> None:
         cell_height = 35 if app.theme.style == "aero" else 36
         super().__init__(
             parent,
+            dpi=app.dpi,
             width=46,
             height=cell_height,
             bg=app.theme.calendar_background,
@@ -442,7 +497,7 @@ class DayCell(tk.Canvas):
         self.event_colors: list[str] = []
         self.holiday: Optional[HolidayInfo] = None
         self.date_status = "normal"
-        self.urgent = False
+        self.ddl = False
         self.bind("<Configure>", lambda _event: self.draw())
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
@@ -458,7 +513,7 @@ class DayCell(tk.Canvas):
         today: bool,
         colors: list[str],
         holiday: Optional[HolidayInfo] = None,
-        urgent: bool = False,
+        ddl: bool = False,
         date_status: str = "normal",
     ) -> None:
         self.day = day
@@ -467,7 +522,7 @@ class DayCell(tk.Canvas):
         self.today = today
         self.event_colors = colors[:3]
         self.holiday = holiday
-        self.urgent = urgent
+        self.ddl = ddl
         self.date_status = date_status
         self.draw()
 
@@ -498,21 +553,18 @@ class DayCell(tk.Canvas):
         self.delete("all")
         theme = self.app.theme
         self.configure(bg=theme.calendar_background)
-        width = max(self.winfo_width(), 38)
-        center_x = width / 2
-        has_holiday = bool(self.holiday and self.in_month)
-        state_half_width = 17 if has_holiday else 13
-        state_bottom = 30 if has_holiday else 26
-        date_y = 11 if has_holiday else 13
-        if has_holiday and (theme.style == "flat" or self.selected):
-            date_y = 10
+        width = max(self.logical_width(), 38)
+        center_x = width // 2
+        # Date states always frame the number only. Holiday text has its own
+        # baseline below, so selecting a festival never changes the box size.
+        date_y = 11
         if self.hovered and not self.selected:
             draw_calendar_date_state(
                 self,
-                center_x - state_half_width,
-                1,
-                center_x + state_half_width,
-                state_bottom,
+                center_x - DATE_STATE_HALF_WIDTH,
+                DATE_STATE_TOP,
+                center_x + DATE_STATE_HALF_WIDTH,
+                DATE_STATE_BOTTOM,
                 fill=theme.date_hover_background,
                 border=theme.date_hover_border,
                 radius=theme.metrics.date_radius,
@@ -522,10 +574,10 @@ class DayCell(tk.Canvas):
             selected_glass = theme.style == "aero"
             draw_calendar_date_state(
                 self,
-                center_x - state_half_width,
-                1,
-                center_x + state_half_width,
-                state_bottom,
+                center_x - DATE_STATE_HALF_WIDTH,
+                DATE_STATE_TOP,
+                center_x + DATE_STATE_HALF_WIDTH,
+                DATE_STATE_BOTTOM,
                 fill=theme.date_selected_background,
                 border=theme.date_selected_border,
                 radius=max(4, theme.metrics.date_radius - 1) if selected_glass else theme.metrics.date_radius,
@@ -542,38 +594,36 @@ class DayCell(tk.Canvas):
         elif self.today:
             draw_calendar_date_state(
                 self,
-                center_x - state_half_width,
-                1,
-                center_x + state_half_width,
-                state_bottom,
+                center_x - DATE_STATE_HALF_WIDTH,
+                DATE_STATE_TOP,
+                center_x + DATE_STATE_HALF_WIDTH,
+                DATE_STATE_BOTTOM,
                 fill=theme.date_today_background,
                 border=theme.date_today_border,
                 radius=theme.metrics.date_radius,
                 top_highlight=blend(theme.date_today_background, theme.control_highlight, 0.34) if theme.style == "aero" else None,
             )
 
-        if self.urgent:
-            # A local status bead stays legible beside hover/today/selected
-            # without turning their existing outlines into a heavy red frame.
-            marker_x = center_x + state_half_width + 2
-            marker_y = 4
-            self.create_oval(
-                marker_x - 2,
-                marker_y - 2,
-                marker_x + 2,
-                marker_y + 2,
-                fill=theme.urgent_indicator,
-                outline=theme.calendar_background,
-                width=1,
-                tags="date_marker",
+        if self.ddl:
+            # DDL owns an outer ring, leaving selected/today layers and the
+            # holiday baseline untouched. Aero gets one restrained inner glint.
+            draw_calendar_date_ring(
+                self,
+                center_x - DATE_RING_HALF_WIDTH,
+                DATE_RING_TOP,
+                center_x + DATE_RING_HALF_WIDTH,
+                DATE_RING_BOTTOM,
+                color=theme.ddl_indicator,
+                radius=theme.metrics.date_radius + 2,
+                inner_highlight=theme.ddl_indicator_highlight if theme.style == "aero" else None,
             )
 
         if self.date_status in ("leave", "holiday"):
             status_color = theme.date_leave_indicator if self.date_status == "leave" else theme.date_holiday_indicator
             self.create_line(
-                center_x - state_half_width + 2,
+                center_x - DATE_STATE_HALF_WIDTH + 2,
                 3,
-                center_x - state_half_width + 7,
+                center_x - DATE_STATE_HALF_WIDTH + 7,
                 3,
                 fill=status_color,
                 width=2,
@@ -592,24 +642,24 @@ class DayCell(tk.Canvas):
         self.create_text(center_x, date_y, text=str(self.day.day), fill=color, font=(FONT, 9, weight), tags="date_text")
 
         if self.holiday and self.in_month:
-            holiday_color = (
-                blend(theme.header_text, theme.date_selected_gradient_end, 0.46)
-                if self.selected and theme.style == "aero"
-                else blend(theme.text_on_accent, theme.date_selected_background, 0.24)
-                if self.selected and theme.style == "flat"
-                else theme.text_on_accent
-            ) if self.selected else {
-                "day_off": theme.date_leave_indicator if self.holiday.short_name == "请假" else theme.date_holiday_indicator,
+            holiday_color = {
+                "day_off": theme.date_leave_indicator if self.holiday.name == "请假" else theme.date_holiday_indicator,
                 "workday": theme.holiday_workday,
             }.get(self.holiday.kind, theme.holiday_festival)
+            if self.selected:
+                holiday_color = blend(
+                    holiday_color,
+                    theme.date_selected_border,
+                    0.22 if theme.style == "flat" else 0.15,
+                )
             self.create_text(
                 center_x,
-                24,
-                text=truncate(self.holiday.short_name, 3),
+                27,
+                text=self.holiday.short_name,
                 fill=holiday_color,
                 font=(
                     FONT,
-                    7,
+                    7 if len(self.holiday.short_name) <= 4 else 6,
                     "normal" if theme.style == "flat" else "bold" if self.holiday.kind != "festival" else "normal",
                 ),
                 tags="date_text",
@@ -618,7 +668,7 @@ class DayCell(tk.Canvas):
         if self.event_colors:
             gap = 7
             start = center_x - (len(self.event_colors) - 1) * gap / 2
-            indicator_bottom = int(self.cget("height")) - 1
+            indicator_bottom = self.logical_height() - 1
             for index, event_color in enumerate(self.event_colors):
                 x = start + index * gap
                 self.create_rectangle(
@@ -644,7 +694,7 @@ class EventEditor(tk.Toplevel):
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
 
         due = event.due_at if event else datetime.combine(selected, datetime.min.time()).replace(hour=23, minute=59)
         self.title_var = tk.StringVar(value=event.title if event else "")
@@ -652,14 +702,14 @@ class EventEditor(tk.Toplevel):
         self.time_var = tk.StringVar(value=due.strftime("%H:%M") if event and event.has_time else "")
         self.duration_var = tk.StringVar(value=str(event.duration_days if event else 1))
         self.skip_non_working_var = tk.BooleanVar(value=event.skip_non_working_days if event else False)
-        self.priority_var = tk.StringVar(value=event.priority if event else "normal")
+        self.event_type_var = tk.StringVar(value=event.event_type if event else "general")
         self.color_var = tk.StringVar(value=event.color if event else COLORS["海盐蓝"])
         reminder_value = event.reminder if event else None
         reminder_label = next((label for label, value in REMINDERS.items() if value == reminder_value), "不提醒")
         self.reminder_var = tk.StringVar(value=reminder_label)
         self._drag_origin: Optional[tuple[int, int, int, int]] = None
         self.color_canvases: list[tuple[tk.Canvas, str]] = []
-        self.priority_radios: list[tuple[tk.Radiobutton, str]] = []
+        self.event_type_radios: list[tuple[tk.Radiobutton, str]] = []
 
         shell = tk.Frame(self, bg=CARD, padx=20, pady=0)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
@@ -693,7 +743,7 @@ class EventEditor(tk.Toplevel):
         date_row.pack(fill="x")
         date_col = tk.Frame(date_row, bg=CARD)
         date_col.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        time_col = tk.Frame(date_row, bg=CARD, width=115)
+        time_col = tk.Frame(date_row, bg=CARD, width=scale_px(115))
         time_col.pack(side="right", padx=(6, 0))
         self._field_label(date_col, "日期与持续时间")
         self._flat_entry(date_col, self.date_var).pack(fill="x", ipady=6)
@@ -740,15 +790,15 @@ class EventEditor(tk.Toplevel):
             highlightthickness=0,
         ).pack(anchor="w", pady=(0, 9))
 
-        self._field_label(shell, "优先级")
-        priority_row = tk.Frame(shell, bg=CARD)
-        priority_row.pack(fill="x", pady=(4, 10))
-        for priority, priority_text in PRIORITY_OPTIONS:
+        self._field_label(shell, "事项类型")
+        event_type_row = tk.Frame(shell, bg=CARD)
+        event_type_row.pack(fill="x", pady=(4, 10))
+        for event_type, event_type_text in EVENT_TYPE_OPTIONS:
             radio = tk.Radiobutton(
-                priority_row,
-                text=priority_text,
-                variable=self.priority_var,
-                value=priority,
+                event_type_row,
+                text=event_type_text,
+                variable=self.event_type_var,
+                value=event_type,
                 indicatoron=False,
                 bg=CONTROL_BACKGROUND,
                 fg=SUBTLE,
@@ -761,11 +811,11 @@ class EventEditor(tk.Toplevel):
                 padx=11,
                 pady=4,
                 cursor="hand2",
-                command=self._draw_priority_controls,
+                command=self._draw_event_type_controls,
             )
             radio.pack(side="left", padx=(0, 6))
-            self.priority_radios.append((radio, priority))
-        self._draw_priority_controls()
+            self.event_type_radios.append((radio, event_type))
+        self._draw_event_type_controls()
 
         reminder_row = tk.Frame(shell, bg=CARD)
         reminder_row.pack(fill="x", pady=(0, 10))
@@ -788,7 +838,16 @@ class EventEditor(tk.Toplevel):
         if self.color_var.get() not in color_values:
             color_values.append(self.color_var.get())
         for color in color_values:
-            swatch = tk.Canvas(color_row, width=28, height=28, bg=CARD, bd=0, highlightthickness=0, cursor="hand2")
+            swatch = LogicalCanvas(
+                color_row,
+                dpi=master.dpi,
+                width=28,
+                height=28,
+                bg=CARD,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
             swatch.pack(side="left", padx=(0, 8))
             swatch.bind("<Button-1>", lambda _event, value=color: self._choose_color(value))
             self.color_canvases.append((swatch, color))
@@ -863,12 +922,12 @@ class EventEditor(tk.Toplevel):
         self.color_var.set(color)
         self._draw_colors()
 
-    def _draw_priority_controls(self) -> None:
-        selected = self.priority_var.get()
+    def _draw_event_type_controls(self) -> None:
+        selected = self.event_type_var.get()
         theme = self.master_app.theme
-        for radio, priority in self.priority_radios:
-            accent = priority_color(theme, priority)
-            is_selected = priority == selected
+        for radio, event_type in self.event_type_radios:
+            accent = event_type_color(theme, event_type)
+            is_selected = event_type == selected
             background = blend(accent, theme.panel_secondary, 0.80) if is_selected else theme.control_background
             radio.configure(
                 bg=background,
@@ -891,10 +950,7 @@ class EventEditor(tk.Toplevel):
                 canvas.create_oval(5, 5, 23, 23, fill=color, outline="")
 
     def _center_near_master(self) -> None:
-        x = self.master_app.winfo_rootx() + (self.master_app.winfo_width() - self.WIDTH) // 2
-        y = self.master_app.winfo_rooty() + 10
-        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
-        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        center_toplevel(self, self.master_app, self.WIDTH, self.HEIGHT, y_offset=10)
 
     def _start_drag(self, event: tk.Event) -> None:
         self._drag_origin = (event.x_root, event.y_root, self.winfo_x(), self.winfo_y())
@@ -932,7 +988,7 @@ class EventEditor(tk.Toplevel):
             duration_days=duration_days,
             skip_non_working_days=self.skip_non_working_var.get(),
             color=self.color_var.get(),
-            priority=self.priority_var.get(),
+            event_type=self.event_type_var.get(),
             reminder=REMINDERS[self.reminder_var.get()] if has_time else None,
             notes=self.notes.get("1.0", "end").strip(),
             done=self.event.done if self.event else False,
@@ -970,7 +1026,7 @@ class RoutineEditor(tk.Toplevel):
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
         self.title_var = tk.StringVar(value=item.title if item else "")
         self.kind_var = tk.StringVar(value=item.kind if item else "habit")
         self.color_var = tk.StringVar(value=item.color if item else COLORS["薄荷绿"])
@@ -1030,7 +1086,16 @@ class RoutineEditor(tk.Toplevel):
         if self.color_var.get() not in color_values:
             color_values.append(self.color_var.get())
         for color in color_values:
-            swatch = tk.Canvas(color_row, width=30, height=26, bg=CARD, bd=0, highlightthickness=0, cursor="hand2")
+            swatch = LogicalCanvas(
+                color_row,
+                dpi=master.dpi,
+                width=30,
+                height=26,
+                bg=CARD,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
             swatch.pack(side="left", padx=(0, 7))
             swatch.bind("<Button-1>", lambda _event, value=color: self._choose_color(value))
             self.color_canvases.append((swatch, color))
@@ -1047,10 +1112,7 @@ class RoutineEditor(tk.Toplevel):
         self.bind("<Control-Return>", lambda _event: self.save())
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - self.WIDTH) // 2
-        y = master.winfo_rooty() + 48
-        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
-        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=48)
         self.after_idle(self._present)
 
     def _present(self) -> None:
@@ -1125,7 +1187,7 @@ class RoutineManager(tk.Toplevel):
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
         self.reminder_enabled = tk.BooleanVar(value=bool(master.store.settings.get("routine_reminder_enabled", True)))
         self.reminder_time = tk.StringVar(value=str(master.store.settings.get("routine_reminder_time", "09:00")))
 
@@ -1194,10 +1256,7 @@ class RoutineManager(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.refresh()
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - self.WIDTH) // 2
-        y = master.winfo_rooty() + 24
-        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
-        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=24)
         self.after_idle(lambda: master.present_overlay(self))
 
     def _save_reminder(self, show_error: bool = False) -> None:
@@ -1272,7 +1331,7 @@ class DayDetailDialog(tk.Toplevel):
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
         self.status_var = tk.StringVar(value=master.store.date_status(day))
 
         shell = tk.Frame(self, bg=CARD)
@@ -1356,10 +1415,7 @@ class DayDetailDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.refresh()
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - self.WIDTH) // 2
-        y = master.winfo_rooty() + 12
-        x, y = clamp_to_work_area(x, y, self.WIDTH, self.HEIGHT)
-        self.geometry(geometry_at(self.WIDTH, self.HEIGHT, x, y))
+        center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=12)
         self.after_idle(lambda: master.present_overlay(self))
 
     def set_day(self, day: date) -> None:
@@ -1414,7 +1470,9 @@ class DayDetailDialog(tk.Toplevel):
         background = current_theme().card_done_background if done else current_theme().schedule_card_background
         row = tk.Frame(self.list_inner, bg=background, highlightthickness=1, highlightbackground=current_theme().schedule_card_border)
         row.pack(fill="x", pady=(0, 7), padx=1)
-        tk.Frame(row, bg=current_theme().event_done if done else color, width=4).pack(side="left", fill="y")
+        stripe = tk.Frame(row, bg=current_theme().event_done if done else color, width=EVENT_STRIPE_WIDTH)
+        stripe.pack(side="left", fill="y")
+        stripe.pack_propagate(False)
         check = TaskCheck(
             row,
             self.master_app,
@@ -1430,15 +1488,13 @@ class DayDetailDialog(tk.Toplevel):
 
     def _build_event_row(self, item: Event) -> None:
         row, content, check = self._base_row(
-            priority_color(current_theme(), item.priority, done=item.done),
+            event_stripe_color(current_theme(), item),
             item.done,
             lambda: self.master_app.toggle_done(item),
         )
         background = str(row.cget("bg"))
         title_row = tk.Frame(content, bg=background)
         title_row.pack(fill="x")
-        color_dot = tk.Label(title_row, text="•", bg=background, fg=item.color, font=(FONT, 9), width=1)
-        color_dot.pack(side="left")
         title = tk.Label(
             title_row,
             text=truncate(item.title, 28),
@@ -1448,9 +1504,26 @@ class DayDetailDialog(tk.Toplevel):
             anchor="w",
         )
         title.pack(side="left", fill="x", expand=True)
+        badge_style = None if item.done else event_type_badge_style(current_theme(), item.event_type)
+        badge = None
+        if badge_style:
+            badge_text, badge_background, badge_border = badge_style
+            badge = tk.Label(
+                title_row,
+                text=EVENT_TYPE_LABELS[item.event_type],
+                bg=badge_background,
+                fg=badge_text,
+                font=(FONT, 7),
+                padx=4,
+                pady=0,
+                highlightthickness=1,
+                highlightbackground=badge_border,
+                cursor="hand2",
+            )
+            badge.pack(side="right", padx=(4, 0))
         end_date = self.master_app.store.event_end_date(item)
         overdue = self.master_app.store.is_event_overdue(item)
-        meta_text = f"截止 {end_date.month}月{end_date.day}日 · {PRIORITY_LABELS[item.priority]}优先度"
+        meta_text = f"截止 {end_date.month}月{end_date.day}日 · {EVENT_TYPE_LABELS[item.event_type]}"
         if overdue:
             meta_text += " · 已逾期"
         tk.Label(
@@ -1467,7 +1540,10 @@ class DayDetailDialog(tk.Toplevel):
         edit.pack(side="left", padx=4)
         delete = tk.Label(actions, text="删除", bg=background, fg=current_theme().danger, font=(FONT, 8), cursor="hand2")
         delete.pack(side="left", padx=4)
-        for widget in (row, content, title_row, color_dot, title, edit):
+        interactive_widgets = [row, content, title_row, title, edit]
+        if badge:
+            interactive_widgets.append(badge)
+        for widget in interactive_widgets:
             widget.bind("<Button-1>", lambda _event: self.master_app.open_editor(item))
         delete.bind("<Button-1>", lambda _event: self.master_app._confirm_delete(item, parent=self))
 
@@ -1525,7 +1601,7 @@ class UpcomingDialog(tk.Toplevel):
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry("360x450")
+        self.geometry(f"{scale_px(360)}x{scale_px(450)}")
 
         shell = tk.Frame(self, bg=CARD)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
@@ -1536,7 +1612,7 @@ class UpcomingDialog(tk.Toplevel):
         close.pack(side="right")
         tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
 
-        canvas = tk.Canvas(shell, bg=CARD, bd=0, highlightthickness=0, width=336)
+        canvas = tk.Canvas(shell, bg=CARD, bd=0, highlightthickness=0, width=scale_px(336))
         scrollbar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
         inner = tk.Frame(canvas, bg=CARD, padx=14, pady=10)
         window = canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -1576,10 +1652,7 @@ class UpcomingDialog(tk.Toplevel):
 
         self.bind("<Escape>", lambda _event: self.close())
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - 360) // 2
-        y = master.winfo_rooty() + 40
-        x, y = clamp_to_work_area(x, y, 360, 450)
-        self.geometry(geometry_at(360, 450, x, y))
+        center_toplevel(self, master, 360, 450, y_offset=40)
         self.after_idle(lambda: self.master_app.present_overlay(self))
 
     def _edit(self, event: Event) -> None:
@@ -1598,7 +1671,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.configure(bg=BORDER)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry("340x138")
+        self.geometry(f"{scale_px(340)}x{scale_px(138)}")
         shell = tk.Frame(self, bg=CARD, padx=18, pady=14)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Label(shell, text="桌面月历更新", bg=CARD, fg=INK, font=(FONT, 11, "bold"), anchor="w").pack(fill="x")
@@ -1608,10 +1681,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.pack(fill="x")
         self.progress.start(12)
         self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - 340) // 2
-        y = master.winfo_rooty() + 90
-        x, y = clamp_to_work_area(x, y, 340, 138)
-        self.geometry(geometry_at(340, 138, x, y))
+        center_toplevel(self, master, 340, 138, y_offset=90)
         self.after_idle(lambda: master.present_overlay(self))
 
     def set_status(self, status: str) -> None:
@@ -1630,6 +1700,7 @@ class UpdateProgressDialog(tk.Toplevel):
 class CalendarApp(tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
+        self.dpi = DpiManager(self)
         self.store = store or Store()
         self.instance_guard = instance
         self.theme_name = normalize_theme_name(self.store.settings.get("theme"))
@@ -1655,9 +1726,11 @@ class CalendarApp(tk.Tk):
         self.day_detail_window: Optional[DayDetailDialog] = None
         self.update_dialog: Optional[UpdateProgressDialog] = None
         self.update_busy = False
+        self._dpi_check_job: Optional[str] = None
+        self._dpi_rebuilding = False
         self.show_holidays = bool(self.store.settings.get("show_holidays", True))
         self.quick_color = COLORS["海盐蓝"]
-        self.quick_priority = "normal"
+        self.quick_event_type = "general"
         self.desktop_session_active = False
         self._window_ready = False
         self.tray_icon: Optional[TrayIcon] = None
@@ -1695,6 +1768,8 @@ class CalendarApp(tk.Tk):
         self._build_ui()
         self._set_initial_geometry()
         self._bind_shortcuts()
+        self.bind("<Configure>", self._schedule_dpi_check, add="+")
+        self.bind("<FocusIn>", self._schedule_dpi_check, add="+")
         self.render()
         self.after(80, self._finish_window_setup)
         self.after(220, self._start_tray_icon)
@@ -1721,7 +1796,7 @@ class CalendarApp(tk.Tk):
             pass
         style.configure(
             "TCombobox",
-            padding=4,
+            padding=self.dpi.px(4),
             font=(FONT, 9),
             fieldbackground=self.theme.input_background,
             background=self.theme.control_background,
@@ -1756,24 +1831,26 @@ class CalendarApp(tk.Tk):
 
     def _build_ui(self) -> None:
         theme = self.theme
+        dp = self.dpi.px
         header_height = 55 if theme.style == "aero" else 56
         weekday_pady = 1 if theme.style == "aero" else 2
         self.day_cells = []
         self.configure(bg=theme.window_shadow)
         self.window_frame = tk.Frame(self, bg=theme.window_border_outer)
-        self.window_frame.pack(fill="both", expand=True, padx=theme.metrics.shadow_depth, pady=theme.metrics.shadow_depth)
+        self.window_frame.pack(fill="both", expand=True, padx=dp(theme.metrics.shadow_depth), pady=dp(theme.metrics.shadow_depth))
         self.inner_frame = tk.Frame(self.window_frame, bg=theme.window_border_inner)
-        self.inner_frame.pack(fill="both", expand=True, padx=theme.metrics.outer_border_width, pady=theme.metrics.outer_border_width)
+        self.inner_frame.pack(fill="both", expand=True, padx=dp(theme.metrics.outer_border_width), pady=dp(theme.metrics.outer_border_width))
         self.shell = tk.Frame(
             self.inner_frame,
             bg=theme.panel_background,
-            highlightthickness=1 if theme.style == "aero" else 0,
+            highlightthickness=dp(1) if theme.style == "aero" else 0,
             highlightbackground=theme.window_background,
         )
-        self.shell.pack(fill="both", expand=True, padx=theme.metrics.inner_border_width, pady=theme.metrics.inner_border_width)
+        self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
 
-        self.header = tk.Canvas(
+        self.header = LogicalCanvas(
             self.shell,
+            dpi=self.dpi,
             height=header_height,
             bg=theme.header_background,
             bd=0,
@@ -1815,7 +1892,7 @@ class CalendarApp(tk.Tk):
         controls = (previous, today, following, self.mode_button, self.menu_button, minimize)
         x = WINDOW_WIDTH - 13 - sum(widths) - 5 * 2
         for control, control_width in zip(controls, widths):
-            control.place(x=x, y=control_y, width=control_width, height=control_height)
+            control.place(x=dp(x), y=dp(control_y), width=dp(control_width), height=dp(control_height))
             x += control_width + 2
         Tooltip(previous, "上个月（滚轮向上 / PgUp）")
         Tooltip(today, "回到今天（Ctrl+T）")
@@ -1827,7 +1904,7 @@ class CalendarApp(tk.Tk):
         self.header.bind("<B1-Motion>", self._drag_window)
         self.header.bind("<ButtonRelease-1>", self._end_drag)
 
-        weekdays = tk.Frame(self.shell, bg=theme.calendar_background, padx=12)
+        weekdays = tk.Frame(self.shell, bg=theme.calendar_background, padx=dp(12))
         weekdays.pack(fill="x")
         for column, name in enumerate(("一", "二", "三", "四", "五", "六", "日")):
             weekdays.grid_columnconfigure(column, weight=1, uniform="weekday")
@@ -1837,10 +1914,10 @@ class CalendarApp(tk.Tk):
                 bg=theme.calendar_background,
                 fg=theme.date_weekend_text if column >= 5 else theme.weekday_text,
                 font=(FONT, 8),
-                pady=weekday_pady,
+                pady=dp(weekday_pady),
             ).grid(row=0, column=column, sticky="ew")
 
-        self.calendar_frame = tk.Frame(self.shell, bg=theme.calendar_background, padx=12, pady=2)
+        self.calendar_frame = tk.Frame(self.shell, bg=theme.calendar_background, padx=dp(12), pady=dp(2))
         self.calendar_frame.pack(fill="x")
         for column in range(7):
             self.calendar_frame.grid_columnconfigure(column, weight=1, uniform="day")
@@ -1854,19 +1931,19 @@ class CalendarApp(tk.Tk):
         for cell in self.day_cells:
             cell.bind("<MouseWheel>", self._calendar_wheel, add="+")
 
-        tk.Frame(self.shell, bg=theme.divider, height=1).pack(fill="x", padx=12, pady=(3, 0))
+        tk.Frame(self.shell, bg=theme.divider, height=dp(1)).pack(fill="x", padx=dp(12), pady=(dp(3), 0))
 
         self.schedule_section = tk.Frame(self.shell, bg=theme.schedule_background)
         self.schedule_section.pack(fill="both", expand=True)
 
-        self.agenda_bar = tk.Frame(self.schedule_section, bg=theme.schedule_background, height=39, padx=12, cursor="hand2")
+        self.agenda_bar = tk.Frame(self.schedule_section, bg=theme.schedule_background, height=dp(39), padx=dp(12), cursor="hand2")
         self.agenda_bar.pack_propagate(False)
         self.agenda_toggle = tk.Label(self.agenda_bar, text="⌃", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 10), cursor="hand2")
-        self.agenda_toggle.pack(side="left", padx=(0, 6))
+        self.agenda_toggle.pack(side="left", padx=(0, dp(6)))
         self.agenda_title = tk.Label(self.agenda_bar, text="", bg=theme.schedule_background, fg=theme.text_primary, font=(FONT, 10, "bold"), cursor="hand2")
         self.agenda_title.pack(side="left")
         self.agenda_count = tk.Label(self.agenda_bar, text="", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 8), cursor="hand2")
-        self.agenda_count.pack(side="left", padx=(7, 0))
+        self.agenda_count.pack(side="left", padx=(dp(7), 0))
         add = ThemeButton(
             self.agenda_bar,
             self,
@@ -1878,7 +1955,7 @@ class CalendarApp(tk.Tk):
             foreground=theme.accent if theme.style == "flat" else theme.control_text,
             surface_background=theme.schedule_background,
         )
-        add.pack(side="right", pady=4)
+        add.pack(side="right", pady=dp(4))
         routines = ThemeButton(
             self.agenda_bar,
             self,
@@ -1890,7 +1967,7 @@ class CalendarApp(tk.Tk):
             foreground=theme.accent if theme.style == "flat" else theme.control_text,
             surface_background=theme.schedule_background,
         )
-        routines.pack(side="right", pady=4, padx=(0, 3))
+        routines.pack(side="right", pady=dp(4), padx=(0, dp(3)))
         Tooltip(add, "打开当天详情并管理事项")
         Tooltip(routines, "管理习惯清单：工作日习惯与一次性待办")
         for widget in (self.agenda_bar, self.agenda_toggle, self.agenda_title, self.agenda_count):
@@ -1899,8 +1976,8 @@ class CalendarApp(tk.Tk):
         self._build_agenda_body()
 
     def _draw_header(self, _event=None) -> None:
-        width = max(1, self.header.winfo_width())
-        height = max(1, self.header.winfo_height())
+        width = max(1, self.header.logical_width())
+        height = max(1, self.header.logical_height())
         self.header.delete("header_art")
         if self.theme.style == "aero":
             vertical_multi_gradient(
@@ -1937,43 +2014,44 @@ class CalendarApp(tk.Tk):
         self.header.create_line(0, height - 1, width, height - 1, fill=self.theme.header_border, tags="header_art")
         self.header.tag_lower("header_art")
 
-    def _build_urgent_area(self, parent: tk.Widget, title: str, *, pinned: bool):
+    def _build_ddl_area(self, parent: tk.Widget, title: str, *, pinned: bool):
         theme = self.theme
-        background = theme.urgent_pinned_background if pinned else theme.urgent_regular_background
-        border = theme.urgent_pinned_border if pinned else theme.urgent_regular_border
+        dp = self.dpi.px
+        background = theme.ddl_pinned_background if pinned else theme.ddl_regular_background
+        border = theme.ddl_pinned_border if pinned else theme.ddl_regular_border
         frame = tk.Frame(
             parent,
             bg=background,
-            highlightthickness=1,
+            highlightthickness=dp(1),
             highlightbackground=border,
         )
-        urgent_header = tk.Frame(frame, bg=background, padx=8, pady=3)
-        urgent_header.pack(fill="x")
+        ddl_header = tk.Frame(frame, bg=background, padx=dp(8), pady=dp(3))
+        ddl_header.pack(fill="x")
         tk.Label(
-            urgent_header,
+            ddl_header,
             text=title,
             bg=background,
-            fg=theme.priority_urgent if pinned else theme.text_secondary,
+            fg=theme.event_type_ddl if pinned else theme.text_secondary,
             font=(FONT, 8, "bold"),
         ).pack(side="left")
         count_label = tk.Label(
-            urgent_header,
+            ddl_header,
             text="",
             bg=background,
             fg=theme.text_secondary,
             font=(FONT, 8),
         )
         count_label.pack(side="right")
-        urgent_body = tk.Frame(frame, bg=background)
-        urgent_body.pack(fill="x")
+        ddl_body = tk.Frame(frame, bg=background)
+        ddl_body.pack(fill="x")
         canvas = tk.Canvas(
-            urgent_body,
+            ddl_body,
             bg=background,
             bd=0,
             highlightthickness=0,
-            height=URGENT_ROW_HEIGHT,
+            height=dp(DDL_ROW_HEIGHT),
         )
-        scrollbar = ttk.Scrollbar(urgent_body, orient="vertical", command=canvas.yview)
+        scrollbar = ttk.Scrollbar(ddl_body, orient="vertical", command=canvas.yview)
         inner = tk.Frame(canvas, bg=background)
         canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
@@ -1985,15 +2063,16 @@ class CalendarApp(tk.Tk):
 
     def _build_agenda_body(self) -> None:
         theme = self.theme
+        dp = self.dpi.px
         (
-            self.pinned_urgent_frame,
-            self.pinned_urgent_count_label,
-            self.pinned_urgent_canvas,
-            self.pinned_urgent_scrollbar,
-            self.pinned_urgent_inner,
-        ) = self._build_urgent_area(self.schedule_section, "紧急 DDL", pinned=True)
+            self.pinned_ddl_frame,
+            self.pinned_ddl_count_label,
+            self.pinned_ddl_canvas,
+            self.pinned_ddl_scrollbar,
+            self.pinned_ddl_inner,
+        ) = self._build_ddl_area(self.schedule_section, "紧急 DDL", pinned=True)
 
-        self.quick_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=12, pady=5)
+        self.quick_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=dp(12), pady=dp(5))
         self.quick_frame.pack(fill="x")
         self.quick_var = tk.StringVar(value="")
         self.quick_entry = tk.Entry(
@@ -2003,12 +2082,12 @@ class CalendarApp(tk.Tk):
             fg=theme.text_muted,
             insertbackground=theme.text_primary,
             relief="flat",
-            highlightthickness=1,
+            highlightthickness=dp(1),
             highlightbackground=theme.input_border,
             highlightcolor=theme.input_focus,
             font=(FONT, 9),
         )
-        self.quick_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        self.quick_entry.pack(side="left", fill="x", expand=True, ipady=dp(6))
         self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
         self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
         self.quick_entry.bind("<Return>", self.quick_add)
@@ -2023,12 +2102,12 @@ class CalendarApp(tk.Tk):
             foreground=theme.text_secondary if theme.style == "flat" else theme.control_text,
             surface_background=theme.schedule_background,
         )
-        self.quick_options_button.pack(side="right", padx=(6, 0))
+        self.quick_options_button.pack(side="right", padx=(dp(6), 0))
         self._refresh_quick_options_button()
 
         self.agenda_bar.pack(fill="x")
 
-        self.footer_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=13, height=21)
+        self.footer_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=dp(13), height=dp(21))
         self.footer_frame.pack(side="bottom", fill="x")
         self.footer_frame.pack_propagate(False)
         self.upcoming_label = tk.Label(self.footer_frame, text="", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 8), cursor="hand2")
@@ -2039,16 +2118,16 @@ class CalendarApp(tk.Tk):
 
         self.collapsible_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background)
         (
-            self.regular_urgent_frame,
-            self.regular_urgent_count_label,
-            self.regular_urgent_canvas,
-            self.regular_urgent_scrollbar,
-            self.regular_urgent_inner,
-        ) = self._build_urgent_area(self.collapsible_frame, "紧急事项 / 临近截止", pinned=False)
+            self.regular_ddl_frame,
+            self.regular_ddl_count_label,
+            self.regular_ddl_canvas,
+            self.regular_ddl_scrollbar,
+            self.regular_ddl_inner,
+        ) = self._build_ddl_area(self.collapsible_frame, "DDL 事项 / 临近截止", pinned=False)
 
-        self.daily_list_shell = tk.Frame(self.collapsible_frame, bg=theme.schedule_background, padx=10)
+        self.daily_list_shell = tk.Frame(self.collapsible_frame, bg=theme.schedule_background, padx=dp(10))
         self.daily_list_shell.pack(fill="both", expand=True)
-        self.agenda_canvas = tk.Canvas(self.daily_list_shell, bg=theme.schedule_background, bd=0, highlightthickness=0, width=340, height=126)
+        self.agenda_canvas = tk.Canvas(self.daily_list_shell, bg=theme.schedule_background, bd=0, highlightthickness=0, width=dp(340), height=dp(126))
         self.agenda_scrollbar = ttk.Scrollbar(self.daily_list_shell, orient="vertical", command=self.agenda_canvas.yview)
         self.agenda_inner = tk.Frame(self.agenda_canvas, bg=theme.schedule_background)
         self.agenda_window = self.agenda_canvas.create_window((0, 0), window=self.agenda_inner, anchor="nw")
@@ -2062,51 +2141,64 @@ class CalendarApp(tk.Tk):
             self.collapsible_frame.pack(fill="both", expand=True)
 
     def _set_initial_geometry(self) -> None:
-        pinned_items, regular_items = self.store.grouped_urgent_events()
+        pinned_items, regular_items = self.store.grouped_ddl_events()
         height = self._desired_window_height(len(pinned_items), len(regular_items))
         self.update_idletasks()
-        screen_w = self.winfo_screenwidth()
+        area = self.dpi.work_area()
+        window_width = self.dpi.px(WINDOW_WIDTH)
+        window_height = self.dpi.px(height)
         saved_x = self.store.settings.get("x")
         saved_y = self.store.settings.get("y")
         try:
-            x = int(saved_x) if saved_x is not None else screen_w - WINDOW_WIDTH - 26
-            y = int(saved_y) if saved_y is not None else 44
+            x = int(saved_x) if saved_x is not None else area.right - window_width - self.dpi.px(26)
+            y = int(saved_y) if saved_y is not None else area.top + self.dpi.px(44)
         except (TypeError, ValueError):
-            x, y = screen_w - WINDOW_WIDTH - 26, 44
-        x, y = clamp_to_work_area(x, y, WINDOW_WIDTH, height)
+            x, y = area.right - window_width - self.dpi.px(26), area.top + self.dpi.px(44)
+        x, y = clamp_to_work_area(x, y, window_width, window_height)
         self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
 
-    def _urgent_canvas_height(self, item_count: int) -> int:
-        return URGENT_ROW_HEIGHT * min(max(0, item_count), URGENT_VISIBLE_ROWS)
+    def _ddl_canvas_height(self, item_count: int) -> int:
+        return DDL_ROW_HEIGHT * min(max(0, item_count), DDL_VISIBLE_ROWS)
 
-    def _urgent_region_height(self, item_count: int) -> int:
+    def _ddl_region_height(self, item_count: int) -> int:
         if item_count <= 0:
             return 0
         # Header, borders, and the region's outer pack spacing are fixed;
-        # rows are the only variable part of the bounded urgent viewport.
-        return URGENT_REGION_CHROME_HEIGHT + self._urgent_canvas_height(item_count)
+        # Rows are the only variable part of the bounded DDL viewport.
+        return DDL_REGION_CHROME_HEIGHT + self._ddl_canvas_height(item_count)
 
-    def _desired_window_height(self, pinned_urgent_count: int, regular_urgent_count: int) -> int:
+    def _desired_window_height(self, pinned_ddl_count: int, regular_ddl_count: int) -> int:
         base_height = OPEN_HEIGHT if self.agenda_open else CLOSED_HEIGHT
-        base_height += self._urgent_region_height(pinned_urgent_count)
+        base_height += self._ddl_region_height(pinned_ddl_count)
         if self.agenda_open:
-            base_height += self._urgent_region_height(regular_urgent_count)
-        return min(base_height, max(CLOSED_HEIGHT, self.winfo_screenheight() - 48))
+            base_height += self._ddl_region_height(regular_ddl_count)
+        work_height = self.dpi.logical(self.dpi.work_area().height) if hasattr(self, "dpi") else self.winfo_screenheight()
+        return min(base_height, max(CLOSED_HEIGHT, work_height - 48))
 
-    def _apply_window_height(self, pinned_urgent_count: int, regular_urgent_count: int) -> None:
-        height = self._desired_window_height(pinned_urgent_count, regular_urgent_count)
-        x, y = clamp_to_work_area(self.winfo_x(), self.winfo_y(), WINDOW_WIDTH, height)
+    def _apply_window_height(self, pinned_ddl_count: int, regular_ddl_count: int) -> None:
+        height = self._desired_window_height(pinned_ddl_count, regular_ddl_count)
+        x, y = clamp_to_work_area(
+            self.winfo_x(),
+            self.winfo_y(),
+            self.dpi.px(WINDOW_WIDTH),
+            self.dpi.px(height),
+        )
         self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
 
-    def _apply_main_layout(self, pinned_urgent_count: int, regular_urgent_count: int) -> None:
-        visible = main_region_visibility(self.agenda_open, pinned_urgent_count, regular_urgent_count)
+    def _apply_main_layout(self, pinned_ddl_count: int, regular_ddl_count: int) -> None:
+        visible = main_region_visibility(self.agenda_open, pinned_ddl_count, regular_ddl_count)
 
-        if visible.pinned_urgent:
-            self.pinned_urgent_canvas.configure(height=self._urgent_canvas_height(pinned_urgent_count))
-            if not self.pinned_urgent_frame.winfo_manager():
-                self.pinned_urgent_frame.pack(fill="x", padx=10, pady=(4, 3), before=self.quick_frame)
-        elif self.pinned_urgent_frame.winfo_manager():
-            self.pinned_urgent_frame.pack_forget()
+        if visible.pinned_ddl:
+            self.pinned_ddl_canvas.configure(height=self.dpi.px(self._ddl_canvas_height(pinned_ddl_count)))
+            if not self.pinned_ddl_frame.winfo_manager():
+                self.pinned_ddl_frame.pack(
+                    fill="x",
+                    padx=self.dpi.px(10),
+                    pady=(self.dpi.px(4), self.dpi.px(3)),
+                    before=self.quick_frame,
+                )
+        elif self.pinned_ddl_frame.winfo_manager():
+            self.pinned_ddl_frame.pack_forget()
 
         if visible.daily_content:
             if not self.collapsible_frame.winfo_manager():
@@ -2114,25 +2206,101 @@ class CalendarApp(tk.Tk):
         elif self.collapsible_frame.winfo_manager():
             self.collapsible_frame.pack_forget()
 
-        if visible.regular_urgent:
-            self.regular_urgent_canvas.configure(height=self._urgent_canvas_height(regular_urgent_count))
-            if not self.regular_urgent_frame.winfo_manager():
-                self.regular_urgent_frame.pack(
+        if visible.regular_ddl:
+            self.regular_ddl_canvas.configure(height=self.dpi.px(self._ddl_canvas_height(regular_ddl_count)))
+            if not self.regular_ddl_frame.winfo_manager():
+                self.regular_ddl_frame.pack(
                     side="bottom",
                     fill="x",
-                    padx=10,
-                    pady=(3, 4),
+                    padx=self.dpi.px(10),
+                    pady=(self.dpi.px(3), self.dpi.px(4)),
                     before=self.daily_list_shell,
                 )
-        elif self.regular_urgent_frame.winfo_manager():
-            self.regular_urgent_frame.pack_forget()
+        elif self.regular_ddl_frame.winfo_manager():
+            self.regular_ddl_frame.pack_forget()
 
-        self._apply_window_height(pinned_urgent_count, regular_urgent_count)
+        self._apply_window_height(pinned_ddl_count, regular_ddl_count)
 
     def _finish_window_setup(self) -> None:
         make_tool_window(self)
         self._window_ready = True
         self.apply_window_mode(force_desktop=True)
+
+    def _schedule_dpi_check(self, _event=None) -> None:
+        if self._dpi_rebuilding:
+            return
+        if self._dpi_check_job:
+            try:
+                self.after_cancel(self._dpi_check_job)
+            except tk.TclError:
+                pass
+        self._dpi_check_job = self.after(140, self._check_dpi_change)
+
+    def _check_dpi_change(self) -> None:
+        self._dpi_check_job = None
+        if self._dpi_rebuilding or not self.winfo_exists():
+            return
+        new_dpi = self.dpi.current_window_dpi()
+        if new_dpi == self.dpi.dpi:
+            return
+        self._apply_dpi_change(new_dpi)
+
+    def _rebuild_main_ui(self, quick_value: str, quick_was_placeholder: bool) -> None:
+        self.window_frame.destroy()
+        self._configure_style()
+        self._build_ui()
+        self.render()
+        if quick_value and not quick_was_placeholder:
+            self.quick_var.set(quick_value)
+            self.quick_placeholder_active = False
+            self.quick_entry.configure(fg=self.theme.text_primary)
+        self.after_idle(self._draw_header)
+
+    def _apply_dpi_change(self, new_dpi: int) -> None:
+        quick_value = self.quick_var.get() if hasattr(self, "quick_var") else ""
+        quick_was_placeholder = self.quick_placeholder_active
+        x, y = self.winfo_x(), self.winfo_y()
+        old_dpi = self.dpi.dpi
+        popup_geometries: list[tuple[tk.Toplevel, int, int, int, int]] = []
+        for child in self.winfo_children():
+            if not isinstance(child, tk.Toplevel) or not child.winfo_exists():
+                continue
+            child.update_idletasks()
+            popup_geometries.append(
+                (
+                    child,
+                    unscale_px(child.winfo_width(), old_dpi),
+                    unscale_px(child.winfo_height(), old_dpi),
+                    child.winfo_x(),
+                    child.winfo_y(),
+                )
+            )
+        self._dpi_rebuilding = True
+        try:
+            self.dpi.apply(new_dpi)
+            self._rebuild_main_ui(quick_value, quick_was_placeholder)
+            for popup, logical_width, logical_height, popup_x, popup_y in popup_geometries:
+                if not popup.winfo_exists():
+                    continue
+                device_width = scale_px(logical_width, new_dpi)
+                device_height = scale_px(logical_height, new_dpi)
+                popup_x, popup_y = clamp_to_work_area(
+                    popup_x,
+                    popup_y,
+                    device_width,
+                    device_height,
+                )
+                popup.geometry(
+                    scaled_geometry(logical_width, logical_height, popup_x, popup_y, new_dpi)
+                )
+            pinned, regular = self.store.grouped_ddl_events()
+            height = self._desired_window_height(len(pinned), len(regular))
+            x, y = clamp_to_work_area(x, y, self.dpi.px(WINDOW_WIDTH), self.dpi.px(height))
+            self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
+            make_tool_window(self)
+        finally:
+            self._dpi_rebuilding = False
+        self.after(80, self.apply_window_mode)
 
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-n>", lambda _event: self.open_day_detail())
@@ -2182,7 +2350,7 @@ class CalendarApp(tk.Tk):
                 today=day == today,
                 colors=colors,
                 holiday=system_holiday or status_holiday,
-                urgent=self.store.has_urgent_on(day),
+                ddl=self.store.has_ddl_on(day),
                 date_status=custom_status,
             )
         self.render_agenda()
@@ -2227,30 +2395,30 @@ class CalendarApp(tk.Tk):
 
         upcoming_count = len(self.store.upcoming(7, include_overdue=True))
         self.upcoming_label.configure(text=f"未来 7 天 · {upcoming_count} 项  ›")
-        pinned_urgent, regular_urgent = self.store.grouped_urgent_events()
-        self._render_urgent_area(
-            pinned_urgent,
-            self.pinned_urgent_inner,
-            self.pinned_urgent_canvas,
-            self.pinned_urgent_count_label,
-            self.pinned_urgent_scrollbar,
+        pinned_ddl, regular_ddl = self.store.grouped_ddl_events()
+        self._render_ddl_area(
+            pinned_ddl,
+            self.pinned_ddl_inner,
+            self.pinned_ddl_canvas,
+            self.pinned_ddl_count_label,
+            self.pinned_ddl_scrollbar,
             pinned=True,
         )
-        self._render_urgent_area(
-            regular_urgent,
-            self.regular_urgent_inner,
-            self.regular_urgent_canvas,
-            self.regular_urgent_count_label,
-            self.regular_urgent_scrollbar,
+        self._render_ddl_area(
+            regular_ddl,
+            self.regular_ddl_inner,
+            self.regular_ddl_canvas,
+            self.regular_ddl_count_label,
+            self.regular_ddl_scrollbar,
             pinned=False,
         )
-        self._apply_main_layout(len(pinned_urgent), len(regular_urgent))
+        self._apply_main_layout(len(pinned_ddl), len(regular_ddl))
         self._set_quick_placeholder()
         self.after_idle(self._update_scrollbar)
 
-    def _render_urgent_area(
+    def _render_ddl_area(
         self,
-        urgent_items: list[Event],
+        ddl_items: list[Event],
         inner: tk.Frame,
         canvas: tk.Canvas,
         count_label: tk.Label,
@@ -2260,33 +2428,29 @@ class CalendarApp(tk.Tk):
     ) -> None:
         for child in inner.winfo_children():
             child.destroy()
-        if not urgent_items:
+        if not ddl_items:
             count_label.configure(text="")
             canvas.yview_moveto(0)
             canvas.configure(scrollregion=())
             if scrollbar.winfo_manager():
                 scrollbar.pack_forget()
             return
-        count_label.configure(text=f"{len(urgent_items)} 项")
+        count_label.configure(text=f"{len(ddl_items)} 项")
         theme = self.theme
-        region_background = theme.urgent_pinned_background if pinned else theme.urgent_regular_background
-        for item in urgent_items:
+        region_background = theme.ddl_pinned_background if pinned else theme.ddl_regular_background
+        for item in ddl_items:
             overdue = self.store.is_event_overdue(item)
             deadline = self.store.event_end_date(item)
             row_background = (
-                theme.urgent_overdue_background
+                theme.ddl_overdue_background
                 if overdue
-                else theme.urgent_due_background
+                else theme.ddl_due_background
                 if pinned
                 else theme.schedule_card_background
             )
             row = tk.Frame(inner, bg=row_background, cursor="hand2", padx=7, pady=4)
             row.pack(fill="x", pady=(0, 2))
-            tk.Frame(
-                row,
-                bg=theme.priority_urgent if pinned else theme.priority_normal,
-                width=2,
-            ).pack(side="left", fill="y", padx=(0, 7))
+            tk.Frame(row, bg=item.color, width=3).pack(side="left", fill="y", padx=(0, 7))
             title = tk.Label(
                 row,
                 text=truncate(item.title, 20),
@@ -2311,12 +2475,12 @@ class CalendarApp(tk.Tk):
             )
             meta.pack(side="right")
             for widget in (row, title, meta):
-                widget.bind("<Button-1>", lambda _event, event=item: self._open_urgent_detail(event))
+                widget.bind("<Button-1>", lambda _event, event=item: self._open_ddl_detail(event))
                 widget.bind("<MouseWheel>", lambda event, target=canvas: target.yview_scroll(int(-event.delta / 120), "units"))
         inner.configure(bg=region_background)
-        self.after_idle(lambda: self._update_urgent_scrollbar(canvas, inner, scrollbar))
+        self.after_idle(lambda: self._update_ddl_scrollbar(canvas, inner, scrollbar))
 
-    def _update_urgent_scrollbar(self, canvas: tk.Canvas, inner: tk.Frame, scrollbar: ttk.Scrollbar) -> None:
+    def _update_ddl_scrollbar(self, canvas: tk.Canvas, inner: tk.Frame, scrollbar: ttk.Scrollbar) -> None:
         if not canvas.winfo_exists():
             return
         inner.update_idletasks()
@@ -2327,7 +2491,7 @@ class CalendarApp(tk.Tk):
         elif not needs_scroll and scrollbar.winfo_manager():
             scrollbar.pack_forget()
 
-    def _open_urgent_detail(self, event: Event) -> None:
+    def _open_ddl_detail(self, event: Event) -> None:
         self.open_day_detail(self.store.event_end_date(event))
 
     def _build_event_card(self, item: Event) -> None:
@@ -2335,7 +2499,7 @@ class CalendarApp(tk.Tk):
         card_bg = theme.card_done_background if item.done else theme.schedule_card_background
         card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground=theme.schedule_card_border, cursor="hand2")
         card.pack(fill="x", pady=(0, 5), padx=1)
-        stripe = tk.Frame(card, bg=priority_color(theme, item.priority, done=item.done), width=3)
+        stripe = tk.Frame(card, bg=event_stripe_color(theme, item), width=EVENT_STRIPE_WIDTH)
         stripe.pack(side="left", fill="y")
         stripe.pack_propagate(False)
         check = TaskCheck(
@@ -2350,8 +2514,6 @@ class CalendarApp(tk.Tk):
         content.pack(side="left", fill="both", expand=True)
         title_row = tk.Frame(content, bg=card_bg)
         title_row.pack(fill="x")
-        color_dot = tk.Label(title_row, text="•", bg=card_bg, fg=item.color, font=(FONT, 9), width=1)
-        color_dot.pack(side="left")
         title = tk.Label(
             title_row,
             text=truncate(item.title, 24),
@@ -2361,23 +2523,44 @@ class CalendarApp(tk.Tk):
             anchor="w",
         )
         title.pack(side="left", fill="x", expand=True)
+        badge_style = None if item.done else event_type_badge_style(theme, item.event_type)
+        badge = None
+        if badge_style:
+            badge_text, badge_background, badge_border = badge_style
+            badge = tk.Label(
+                title_row,
+                text=EVENT_TYPE_LABELS[item.event_type],
+                bg=badge_background,
+                fg=badge_text,
+                font=(FONT, 7),
+                padx=4,
+                pady=0,
+                highlightthickness=1,
+                highlightbackground=badge_border,
+                cursor="hand2",
+            )
+            badge.pack(side="right", padx=(4, 0))
         if self.store.is_event_overdue(item):
             timing = "已逾期" + (" · " + item.due_at.strftime("%H:%M") if item.has_time else "")
             timing_color = theme.danger
         else:
-            timing = (item.due_at.strftime("%H:%M") if item.has_time else "无具体时间") + f" · {PRIORITY_LABELS[item.priority]}优先度"
-            timing_color = theme.schedule_time_text
+            timing = (item.due_at.strftime("%H:%M") if item.has_time else "无具体时间") + f" · {EVENT_TYPE_LABELS[item.event_type]}"
+            timing_color = event_type_color(theme, item.event_type)
         if item.duration_days > 1:
             timing += f" · 第{self.store.event_day_number(item, self.selected)}/{item.duration_days}天"
         meta = tk.Label(content, text=timing, bg=card_bg, fg=timing_color, font=(FONT, 8), anchor="w")
         meta.pack(fill="x", pady=(1, 0))
         more = tk.Label(card, text="›", bg=card_bg, fg=theme.text_muted, font=(FONT, 12), width=2, cursor="hand2")
         more.pack(side="right", fill="y")
-        for widget in (card, content, title_row, color_dot, title, meta, more, stripe):
+        for widget in (card, content, title_row, title, meta, more, stripe):
             widget.bind("<Button-1>", lambda _event, event=item: self.open_editor(event))
             widget.bind("<Button-3>", lambda event, item=item: self.show_event_menu(item, event.x_root, event.y_root))
             widget.bind("<MouseWheel>", self._agenda_wheel)
-        self._bind_card_hover((card, content, title_row, color_dot, title, meta, more), card_bg)
+        if badge:
+            badge.bind("<Button-1>", lambda _event, event=item: self.open_editor(event))
+            badge.bind("<Button-3>", lambda event, item=item: self.show_event_menu(item, event.x_root, event.y_root))
+            badge.bind("<MouseWheel>", self._agenda_wheel)
+        self._bind_card_hover((card, content, title_row, title, meta, more), card_bg)
 
     def _build_routine_card(self, item: RoutineItem) -> None:
         theme = self.theme
@@ -2385,7 +2568,7 @@ class CalendarApp(tk.Tk):
         card_bg = theme.card_done_background if done else theme.schedule_card_background
         card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground=theme.schedule_card_border, cursor="hand2")
         card.pack(fill="x", pady=(0, 5), padx=1)
-        stripe = tk.Frame(card, bg=theme.event_done if done else item.color, width=4)
+        stripe = tk.Frame(card, bg=theme.event_done if done else item.color, width=EVENT_STRIPE_WIDTH)
         stripe.pack(side="left", fill="y")
         stripe.pack_propagate(False)
         check = TaskCheck(
@@ -2597,7 +2780,7 @@ class CalendarApp(tk.Tk):
             title,
             self.selected,
             color=self.quick_color,
-            priority=self.quick_priority,
+            event_type=self.quick_event_type,
         )
         self.quick_var.set("")
         self.quick_placeholder_active = False
@@ -2624,17 +2807,17 @@ class CalendarApp(tk.Tk):
         self.quick_color = value
         self._refresh_quick_options_button()
 
-    def _set_quick_priority(self, value: str) -> None:
-        self.quick_priority = value
+    def _set_quick_event_type(self, value: str) -> None:
+        self.quick_event_type = value
         self._refresh_quick_options_button()
 
     def _refresh_quick_options_button(self) -> None:
         if not hasattr(self, "quick_options_button"):
             return
-        label = PRIORITY_LABELS.get(self.quick_priority, PRIORITY_LABELS["normal"])
+        label = EVENT_TYPE_LABELS.get(self.quick_event_type, EVENT_TYPE_LABELS["general"])
         self.quick_options_button.set_text(
             f"{label} · 选项",
-            priority_color(self.theme, self.quick_priority),
+            event_type_color(self.theme, self.quick_event_type),
         )
 
     def show_quick_options(self) -> None:
@@ -2650,16 +2833,16 @@ class CalendarApp(tk.Tk):
             )
         menu.add_cascade(label="颜色", menu=color_menu)
 
-        priority_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
-        self.quick_priority_var = tk.StringVar(value=self.quick_priority)
-        for priority, label in PRIORITY_OPTIONS:
-            priority_menu.add_radiobutton(
+        event_type_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        self.quick_event_type_var = tk.StringVar(value=self.quick_event_type)
+        for event_type, label in EVENT_TYPE_OPTIONS:
+            event_type_menu.add_radiobutton(
                 label=label,
-                variable=self.quick_priority_var,
-                value=priority,
-                command=lambda value=priority: self._set_quick_priority(value),
+                variable=self.quick_event_type_var,
+                value=event_type,
+                command=lambda value=event_type: self._set_quick_event_type(value),
             )
-        menu.add_cascade(label=f"优先度 · {PRIORITY_LABELS[self.quick_priority]}", menu=priority_menu)
+        menu.add_cascade(label=f"事项类型 · {EVENT_TYPE_LABELS[self.quick_event_type]}", menu=event_type_menu)
         x = self.quick_options_button.winfo_rootx()
         y = self.quick_options_button.winfo_rooty() + self.quick_options_button.winfo_height()
         menu.tk_popup(x, y)
@@ -2686,8 +2869,8 @@ class CalendarApp(tk.Tk):
     def toggle_agenda(self) -> None:
         self.agenda_open = not self.agenda_open
         self.agenda_toggle.configure(text="⌃" if self.agenda_open else "⌄")
-        pinned_urgent, regular_urgent = self.store.grouped_urgent_events()
-        self._apply_main_layout(len(pinned_urgent), len(regular_urgent))
+        pinned_ddl, regular_ddl = self.store.grouped_ddl_events()
+        self._apply_main_layout(len(pinned_ddl), len(regular_ddl))
         self.store.settings["agenda_open"] = self.agenda_open
         self._save_window_settings()
         self.after(80, self.apply_window_mode)
@@ -2781,6 +2964,9 @@ class CalendarApp(tk.Tk):
 
     def _end_drag(self, _event=None) -> None:
         self._drag_origin = None
+        new_dpi = self.dpi.current_window_dpi()
+        if new_dpi != self.dpi.dpi:
+            self._apply_dpi_change(new_dpi)
         width, height = self.winfo_width(), self.winfo_height()
         x, y = clamp_to_work_area(self.winfo_x(), self.winfo_y(), width, height)
         self.geometry(position_at(x, y))
@@ -2886,15 +3072,7 @@ class CalendarApp(tk.Tk):
         self._apply_theme_opacity()
         self.store.settings["theme"] = normalized
         self.store.save()
-        self.window_frame.destroy()
-        self._configure_style()
-        self._build_ui()
-        self.render()
-        if quick_value and not quick_was_placeholder:
-            self.quick_var.set(quick_value)
-            self.quick_placeholder_active = False
-            self.quick_entry.configure(fg=self.theme.text_primary)
-        self.after_idle(self._draw_header)
+        self._rebuild_main_ui(quick_value, quick_was_placeholder)
         self.after(80, self.apply_window_mode)
 
     def set_opacity(self, value: float) -> None:
@@ -3150,7 +3328,7 @@ class CalendarApp(tk.Tk):
         popup.configure(bg=BORDER)
         popup.overrideredirect(True)
         popup.attributes("-topmost", True)
-        popup.geometry("350x190")
+        popup.geometry(f"{self.dpi.px(350)}x{self.dpi.px(190)}")
         shell = tk.Frame(popup, bg=CARD)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Frame(shell, bg=ACCENT, height=5).pack(fill="x")
@@ -3165,10 +3343,12 @@ class CalendarApp(tk.Tk):
         tk.Button(actions, text="打开习惯清单", command=lambda: self._open_from_routine_notification(popup), bg=ACCENT, fg=current_theme().text_on_accent, relief="flat", bd=0, padx=14, pady=6, font=(FONT, 9, "bold"), cursor="hand2").pack(side="right")
         tk.Button(actions, text="知道了", command=popup.destroy, bg=CONTROL_BACKGROUND, fg=SUBTLE, relief="flat", bd=0, padx=12, pady=6, cursor="hand2").pack(side="right", padx=(0, 7))
         popup.update_idletasks()
-        offset = min(len(self.notification_windows), 3) * 198
-        x = popup.winfo_screenwidth() - 368
-        y = popup.winfo_screenheight() - 247 - offset
-        popup.geometry(geometry_at(350, 190, x, max(8, y)))
+        area = self.dpi.work_area()
+        offset = self.dpi.px(min(len(self.notification_windows), 3) * 198)
+        x = area.right - self.dpi.px(368)
+        y = area.bottom - self.dpi.px(247) - offset
+        x, y = clamp_to_work_area(x, y, self.dpi.px(350), self.dpi.px(190))
+        popup.geometry(geometry_at(350, 190, x, y))
         self.present_overlay(popup)
         self.notification_windows.append(popup)
         popup.bind("<Destroy>", lambda _event, window=popup: self._forget_notification(window), add="+")
@@ -3194,7 +3374,7 @@ class CalendarApp(tk.Tk):
         popup.configure(bg=BORDER)
         popup.overrideredirect(True)
         popup.attributes("-topmost", True)
-        popup.geometry("340x168")
+        popup.geometry(f"{self.dpi.px(340)}x{self.dpi.px(168)}")
         shell = tk.Frame(popup, bg=CARD)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Frame(shell, bg=event.color, height=5).pack(fill="x")
@@ -3216,10 +3396,12 @@ class CalendarApp(tk.Tk):
         tk.Button(actions, text="完成", command=lambda: self.complete_from_notification(event, popup), bg=ACCENT, fg=current_theme().text_on_accent, relief="flat", bd=0, padx=12, pady=5, cursor="hand2").pack(side="right")
         tk.Button(actions, text="知道了", command=popup.destroy, bg=CONTROL_BACKGROUND, fg=SUBTLE, relief="flat", bd=0, padx=10, pady=5, cursor="hand2").pack(side="right", padx=(0, 6))
         popup.update_idletasks()
-        offset = min(len(self.notification_windows), 3) * 178
-        x = popup.winfo_screenwidth() - 358
-        y = popup.winfo_screenheight() - 225 - offset
-        popup.geometry(geometry_at(340, 168, x, max(8, y)))
+        area = self.dpi.work_area()
+        offset = self.dpi.px(min(len(self.notification_windows), 3) * 178)
+        x = area.right - self.dpi.px(358)
+        y = area.bottom - self.dpi.px(225) - offset
+        x, y = clamp_to_work_area(x, y, self.dpi.px(340), self.dpi.px(168))
+        popup.geometry(geometry_at(340, 168, x, y))
         self.present_overlay(popup)
         self.notification_windows.append(popup)
         popup.bind("<Destroy>", lambda _event, window=popup: self._forget_notification(window), add="+")
@@ -3274,6 +3456,7 @@ class CalendarApp(tk.Tk):
 
 
 def main() -> None:
+    enable_dpi_awareness()
     sys.excepthook = log_exception
     instance = SingleInstance()
     if instance.already_running:

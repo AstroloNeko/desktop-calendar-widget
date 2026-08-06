@@ -26,25 +26,33 @@ COLORS = {
     "珊瑚红": "#E65D67",
     "鸢尾紫": "#8B70D6",
 }
-PRIORITIES = ("low", "normal", "urgent")
-PRIORITY_LABELS = {
-    "low": "低",
-    "normal": "一般",
+EVENT_TYPES = ("general", "urgent", "ddl")
+EVENT_TYPE_LABELS = {
+    "general": "一般",
     "urgent": "紧急",
+    "ddl": "DDL",
 }
-PRIORITY_OPTIONS = tuple((value, PRIORITY_LABELS[value]) for value in PRIORITIES)
-PRIORITY_RANK = {"urgent": 0, "normal": 1, "low": 2}
-LEGACY_PRIORITY_MAP = {
-    "低": "low",
-    "低优先级": "low",
-    "普通": "normal",
-    "一般": "normal",
-    "普通优先级": "normal",
-    "一般优先级": "normal",
+EVENT_TYPE_OPTIONS = tuple((value, EVENT_TYPE_LABELS[value]) for value in EVENT_TYPES)
+EVENT_TYPE_RANK = {"ddl": 0, "urgent": 1, "general": 2}
+LEGACY_EVENT_TYPE_MAP = {
+    "low": "general",
+    "normal": "general",
+    "general": "general",
+    "urgent": "urgent",
+    "ddl": "ddl",
+    "低": "general",
+    "低优先级": "general",
+    "普通": "general",
+    "一般": "general",
+    "普通优先级": "general",
+    "一般优先级": "general",
     "高": "urgent",
     "高优先级": "urgent",
     "紧急": "urgent",
     "紧急优先级": "urgent",
+    "DDL": "ddl",
+    "deadline": "ddl",
+    "截止": "ddl",
 }
 DATE_STATUSES = ("normal", "leave", "holiday")
 DATE_STATUS_LABELS = {
@@ -66,13 +74,13 @@ WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日"
 ROUTINE_KINDS = ("habit", "todo")
 
 
-def normalize_priority(value: object) -> str:
+def normalize_event_type(value: object) -> str:
     if isinstance(value, str):
         cleaned = value.strip()
-        if cleaned in PRIORITIES:
+        if cleaned in EVENT_TYPES:
             return cleaned
-        return LEGACY_PRIORITY_MAP.get(cleaned, "normal")
-    return "normal"
+        return LEGACY_EVENT_TYPE_MAP.get(cleaned, "general")
+    return "general"
 
 
 def normalize_date_status(value: object) -> str:
@@ -85,7 +93,7 @@ class Event:
     title: str
     due: str
     color: str = "#6687F2"
-    priority: str = "normal"
+    event_type: str = "general"
     reminder: Optional[int] = 60
     notes: str = ""
     done: bool = False
@@ -98,7 +106,7 @@ class Event:
     def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = datetime.now().isoformat(timespec="seconds")
-        self.priority = normalize_priority(self.priority)
+        self.event_type = normalize_event_type(self.event_type)
         if not isinstance(self.color, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", self.color):
             self.color = COLORS["海盐蓝"]
         self.has_time = bool(self.has_time)
@@ -163,6 +171,14 @@ class Event:
     def from_dict(cls, raw: dict[str, Any]) -> "Event":
         allowed = {item.name for item in fields(cls)}
         data = {key: value for key, value in raw.items() if key in allowed}
+        raw_type = raw.get("event_type")
+        if raw_type is None:
+            raw_type = raw.get("type")
+        if raw_type is None:
+            raw_type = raw.get("priority")
+        if raw.get("is_ddl") is True:
+            raw_type = "ddl"
+        data["event_type"] = normalize_event_type(raw_type)
         if not isinstance(data.get("id"), str) or not data["id"]:
             raise ValueError("invalid event id")
         if not isinstance(data.get("title"), str) or not data["title"].strip():
@@ -323,7 +339,7 @@ class Store:
         notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
         self.notified = set(notification_history)
         payload = {
-            "version": 4,
+            "version": 5,
             "events": [asdict(event) for event in self.events],
             "routines": [asdict(item) for item in self.routines],
             "date_states": self.date_states,
@@ -362,7 +378,7 @@ class Store:
 
     def events_on(self, day: date, include_done: bool = True) -> list[Event]:
         events = [item for item in self.events if self.event_covers(item, day) and (include_done or not item.done)]
-        return sorted(events, key=lambda item: (item.done, PRIORITY_RANK[item.priority]))
+        return sorted(events, key=lambda item: (item.done, EVENT_TYPE_RANK[item.event_type]))
 
     def upcoming(self, days: int = 7, include_overdue: bool = True) -> list[Event]:
         now = datetime.now()
@@ -382,7 +398,7 @@ class Store:
         day: date,
         *,
         color: Optional[str] = None,
-        priority: str = "normal",
+        event_type: str = "general",
     ) -> Event:
         due = datetime.combine(day, datetime.min.time()).replace(hour=23, minute=59)
         event = Event(
@@ -391,7 +407,7 @@ class Store:
             due=due.isoformat(timespec="minutes"),
             has_time=False,
             color=color or COLORS["海盐蓝"],
-            priority=priority,
+            event_type=event_type,
             reminder=None,
         )
         self.upsert(event)
@@ -425,8 +441,8 @@ class Store:
 
         def sort_key(item: Event | RoutineItem) -> tuple[bool, int]:
             if isinstance(item, Event):
-                return item.done, PRIORITY_RANK[item.priority]
-            return item.is_done_on(day), PRIORITY_RANK["normal"]
+                return item.done, EVENT_TYPE_RANK[item.event_type]
+            return item.is_done_on(day), EVENT_TYPE_RANK["general"]
 
         return sorted(items, key=sort_key)
 
@@ -474,21 +490,21 @@ class Store:
     def is_event_overdue(self, event: Event, now: Optional[datetime] = None) -> bool:
         return not event.done and self.event_ends_at(event) < (now or datetime.now())
 
-    def has_urgent_on(self, day: date) -> bool:
-        return any(item.priority == "urgent" for item in self.events_on(day, include_done=False))
+    def has_ddl_on(self, day: date) -> bool:
+        return any(item.event_type == "ddl" for item in self.events_on(day, include_done=False))
 
-    def urgent_events(self, now: Optional[datetime] = None) -> list[Event]:
+    def ddl_events(self, now: Optional[datetime] = None) -> list[Event]:
         reference = now or datetime.now()
-        urgent = [item for item in self.events if not item.done and item.priority == "urgent"]
+        ddl_items = [item for item in self.events if not item.done and item.event_type == "ddl"]
         return sorted(
-            urgent,
+            ddl_items,
             key=lambda item: (
                 not self.is_event_overdue(item, reference),
                 self.event_ends_at(item),
             ),
         )
 
-    def grouped_urgent_events(
+    def grouped_ddl_events(
         self,
         now: Optional[datetime] = None,
         pinned_hours: int = 24,
@@ -497,7 +513,7 @@ class Store:
         pinned_deadline = reference + timedelta(hours=max(0, pinned_hours))
         pinned: list[Event] = []
         regular: list[Event] = []
-        for item in self.urgent_events(reference):
+        for item in self.ddl_events(reference):
             if self.event_ends_at(item) <= pinned_deadline:
                 pinned.append(item)
             else:

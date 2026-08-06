@@ -1,6 +1,6 @@
 import unittest
 
-from ui_draw import draw_calendar_date_state
+from ui_draw import draw_calendar_date_ring, draw_calendar_date_state
 
 
 class _RecordingCanvas:
@@ -58,6 +58,55 @@ class CalendarDateDrawingTests(unittest.TestCase):
             self.assertTrue(all(1 <= coordinate <= 30 for coordinate in coords[1::2]))
             self.assertEqual(kwargs.get("tags"), "date_state")
         self.assertTrue(all(kwargs.get("smooth") is False for kind, _coords, kwargs in canvas.calls if kind == "polygon"))
+
+    def test_ddl_ring_stays_inside_its_box_and_uses_marker_tag(self) -> None:
+        canvas = _RecordingCanvas()
+        draw_calendar_date_ring(
+            canvas,
+            8.4,
+            0.2,
+            42.4,
+            26.2,
+            color="#B84D58",
+            radius=8,
+            inner_highlight="#E8C7C8",
+        )
+
+        polygons = [call for call in canvas.calls if call[0] == "polygon"]
+        self.assertEqual(len(polygons), 2)
+        for _kind, coords, kwargs in polygons:
+            self.assertTrue(all(8 <= coordinate <= 42 for coordinate in coords[::2]))
+            self.assertTrue(all(0 <= coordinate <= 26 for coordinate in coords[1::2]))
+            self.assertEqual(kwargs.get("tags"), "date_marker")
+            self.assertEqual(kwargs.get("fill"), "")
+
+    def test_date_state_corners_are_integer_and_mirrored(self) -> None:
+        canvas = _RecordingCanvas()
+        draw_calendar_date_state(
+            canvas,
+            9,
+            1,
+            37,
+            23,
+            fill="#C3CFD1",
+            border="#AAC4C7",
+            radius=6,
+            gradient_start="#EAF0F0",
+            gradient_end="#B9C7C9",
+            inner_border="#D9E2E3",
+            today_ring="#9FCED1",
+        )
+
+        for _kind, coords, _kwargs in (call for call in canvas.calls if call[0] == "polygon"):
+            self.assertTrue(all(isinstance(coordinate, int) for coordinate in coords))
+            points = set(zip(coords[::2], coords[1::2]))
+            left = min(point[0] for point in points)
+            right = max(point[0] for point in points)
+            top = min(point[1] for point in points)
+            bottom = max(point[1] for point in points)
+            for x, y in points:
+                self.assertIn((left + right - x, y), points)
+                self.assertIn((x, top + bottom - y), points)
 
 
 if __name__ == "__main__":

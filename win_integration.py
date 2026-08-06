@@ -5,26 +5,11 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from dpi_utils import enable_dpi_awareness
+
 
 IS_WINDOWS = os.name == "nt"
 ERROR_ALREADY_EXISTS = 183
-
-
-def enable_dpi_awareness() -> None:
-    if not IS_WINDOWS:
-        return
-    try:
-        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
-            return
-    except (AttributeError, OSError):
-        pass
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except (AttributeError, OSError):
-            pass
 
 
 class SingleInstance:

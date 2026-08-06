@@ -92,16 +92,21 @@ class Theme:
     accent_soft: str
     danger: str
     danger_soft: str
-    urgent_indicator: str
-    priority_low: str
-    priority_normal: str
-    priority_urgent: str
-    urgent_pinned_background: str
-    urgent_pinned_border: str
-    urgent_regular_background: str
-    urgent_regular_border: str
-    urgent_overdue_background: str
-    urgent_due_background: str
+    ddl_indicator: str
+    ddl_indicator_highlight: str
+    event_type_general: str
+    event_type_urgent: str
+    event_type_ddl: str
+    event_type_urgent_background: str
+    event_type_urgent_border: str
+    event_type_ddl_background: str
+    event_type_ddl_border: str
+    ddl_pinned_background: str
+    ddl_pinned_border: str
+    ddl_regular_background: str
+    ddl_regular_border: str
+    ddl_overdue_background: str
+    ddl_due_background: str
     checkbox_border: str
     checkbox_checked: str
     date_leave_indicator: str
@@ -181,16 +186,21 @@ MODERN = Theme(
     accent_soft="#E8EAF8",
     danger="#D9515D",
     danger_soft="#FCEDEF",
-    urgent_indicator="#D9515D",
-    priority_low="#79A99A",
-    priority_normal="#8C8F99",
-    priority_urgent="#D9515D",
-    urgent_pinned_background="#FBF3F2",
-    urgent_pinned_border="#EBC9C7",
-    urgent_regular_background="#F7F5F2",
-    urgent_regular_border="#E3DED7",
-    urgent_overdue_background="#FCE9E9",
-    urgent_due_background="#FBF2E7",
+    ddl_indicator="#D9515D",
+    ddl_indicator_highlight="#F2B8BC",
+    event_type_general="#8C8F99",
+    event_type_urgent="#C47A32",
+    event_type_ddl="#D9515D",
+    event_type_urgent_background="#FBF1E4",
+    event_type_urgent_border="#E8C99F",
+    event_type_ddl_background="#FCEDEF",
+    event_type_ddl_border="#E9BDC1",
+    ddl_pinned_background="#FBF3F2",
+    ddl_pinned_border="#EBC9C7",
+    ddl_regular_background="#F7F5F2",
+    ddl_regular_border="#E3DED7",
+    ddl_overdue_background="#FCE9E9",
+    ddl_due_background="#FBF2E7",
     checkbox_border="#B9BBC2",
     checkbox_checked="#9A9DA5",
     date_leave_indicator="#C78363",
@@ -278,16 +288,21 @@ WIN7_AERO = Theme(
     accent_soft="#E4F0F2",
     danger="#B84D58",
     danger_soft="#F6E3E5",
-    urgent_indicator="#B84D58",
-    priority_low="#7EA89C",
-    priority_normal="#849397",
-    priority_urgent="#B84D58",
-    urgent_pinned_background="#F8F1EE",
-    urgent_pinned_border="#D8C0BA",
-    urgent_regular_background="#F3F4F1",
-    urgent_regular_border="#D7DDDA",
-    urgent_overdue_background="#F5E5E3",
-    urgent_due_background="#F5EEE2",
+    ddl_indicator="#B84D58",
+    ddl_indicator_highlight="#E8C7C8",
+    event_type_general="#849397",
+    event_type_urgent="#9C7445",
+    event_type_ddl="#B84D58",
+    event_type_urgent_background="#F4EBDD",
+    event_type_urgent_border="#D8C29E",
+    event_type_ddl_background="#F5E6E6",
+    event_type_ddl_border="#D9B9BB",
+    ddl_pinned_background="#F8F1EE",
+    ddl_pinned_border="#D8C0BA",
+    ddl_regular_background="#F3F4F1",
+    ddl_regular_border="#D7DDDA",
+    ddl_overdue_background="#F5E5E3",
+    ddl_due_background="#F5EEE2",
     checkbox_border="#AAB6B8",
     checkbox_checked="#8F9CA0",
     date_leave_indicator="#AA765F",

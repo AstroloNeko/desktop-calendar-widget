@@ -5,6 +5,7 @@ $distDir = Join-Path $projectDir "dist"
 $buildDir = Join-Path $projectDir "build"
 $releaseDir = Join-Path $projectDir "release"
 $appDir = Join-Path $distDir "DesktopCalendar"
+$manifestPath = Join-Path $projectDir "windows_per_monitor_v2.manifest"
 $pythonCommand = if ($env:CALENDAR_BUILD_PYTHON) { $env:CALENDAR_BUILD_PYTHON } else { "py" }
 $pythonPrefix = if ($env:CALENDAR_BUILD_PYTHON) { @() } else { @("-3") }
 
@@ -14,6 +15,7 @@ New-Item -ItemType Directory -Path (Join-Path $buildDir "spec") -Force | Out-Nul
 & $pythonCommand @pythonPrefix -m PyInstaller --noconfirm --clean --windowed --onedir `
     --name DesktopCalendar `
     --icon (Join-Path $projectDir "assets\calendar.ico") `
+    --manifest $manifestPath `
     --add-data "$projectDir\assets;assets" `
     --distpath $distDir `
     --workpath (Join-Path $buildDir "app") `
@@ -26,6 +28,7 @@ if ($LASTEXITCODE -ne 0) {
 & $pythonCommand @pythonPrefix -m PyInstaller --noconfirm --clean --windowed --onefile `
     --name DesktopCalendarUpdater `
     --icon (Join-Path $projectDir "assets\calendar.ico") `
+    --manifest $manifestPath `
     --distpath (Join-Path $buildDir "updater-dist") `
     --workpath (Join-Path $buildDir "updater") `
     --specpath (Join-Path $buildDir "spec") `
