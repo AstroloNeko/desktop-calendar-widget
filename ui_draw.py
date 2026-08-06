@@ -99,6 +99,8 @@ def rounded_vertical_gradient(
     radius: float,
     start: str,
     end: str,
+    *,
+    tags: str | Iterable[str] = (),
 ) -> None:
     top = math.ceil(y1)
     bottom = math.floor(y2)
@@ -117,6 +119,7 @@ def rounded_vertical_gradient(
             round(x2 - inset),
             y,
             fill=blend(start, end, position),
+            tags=tags,
         )
 
 
@@ -157,7 +160,34 @@ def bevel_control(
         canvas.create_line(3, height - 3, width - 4, height - 3, fill=blend(background, border, 0.28))
 
 
-def glass_date_state(
+def _calendar_rounded_rectangle(
+    canvas: tk.Canvas,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    radius: int,
+    **kwargs,
+) -> int:
+    """Bounded rounded polygon without Tk's smoothing overshoot."""
+    radius = max(1, min(int(radius), (right - left) // 2, (bottom - top) // 2))
+    points: list[int] = []
+    arcs = (
+        (right - radius, top + radius, -90, 0),
+        (right - radius, bottom - radius, 0, 90),
+        (left + radius, bottom - radius, 90, 180),
+        (left + radius, top + radius, 180, 270),
+    )
+    for center_x, center_y, start, end in arcs:
+        for angle in range(start, end + 1, 15):
+            radians = math.radians(angle)
+            point = (round(center_x + radius * math.cos(radians)), round(center_y + radius * math.sin(radians)))
+            if points[-2:] != list(point):
+                points.extend(point)
+    return canvas.create_polygon(points, smooth=False, **kwargs)
+
+
+def draw_calendar_date_state(
     canvas: tk.Canvas,
     x1: float,
     y1: float,
@@ -166,62 +196,110 @@ def glass_date_state(
     *,
     fill: str,
     border: str,
-    highlight: str,
     radius: int,
-    outer_ring: str | None = None,
     gradient_start: str | None = None,
     gradient_end: str | None = None,
     inner_border: str | None = None,
+    top_highlight: str | None = None,
+    today_ring: str | None = None,
+    tags: str | Iterable[str] = "date_state",
 ) -> None:
-    if outer_ring:
-        rounded_rectangle(canvas, x1 - 1, y1 - 1, x2 + 1, y2 + 1, radius + 1, fill="", outline=outer_ring, width=1)
-    if gradient_start or gradient_end or inner_border:
+    """Draw a calendar state inside one stable, integer bounding box.
+
+    Every optional layer is inset from the supplied bounds.  In particular,
+    the today ring never expands the selected body toward the lower-right,
+    which keeps the helper suitable for compact date cells at any DPI scale.
+    """
+    left, right = sorted((round(x1), round(x2)))
+    top, bottom = sorted((round(y1), round(y2)))
+    if right <= left or bottom <= top:
+        return
+
+    # Canvas outlines are centred on their path. Tk reserves roughly two
+    # pixels around polygon outlines in its item bbox,
+    # even at width=1.  A two-pixel path inset keeps that reservation inside
+    # the public date-state bounds at scaled and unscaled DPI settings.
+    edge_inset = 2
+    body_inset = edge_inset + (1 if today_ring else 0)
+    if today_ring:
+        _calendar_rounded_rectangle(
+            canvas,
+            left + edge_inset,
+            top + edge_inset,
+            right - edge_inset,
+            bottom - edge_inset,
+            max(2, radius - edge_inset),
+            fill="",
+            outline=today_ring,
+            width=1,
+            tags=tags,
+        )
+
+    body_left = left + body_inset
+    body_top = top + body_inset
+    body_right = right - body_inset
+    body_bottom = bottom - body_inset
+    body_radius = max(2, radius - body_inset)
+    _calendar_rounded_rectangle(
+        canvas,
+        body_left,
+        body_top,
+        body_right,
+        body_bottom,
+        body_radius,
+        fill=fill,
+        outline="",
+        tags=tags,
+    )
+
+    if gradient_start or gradient_end:
         rounded_vertical_gradient(
             canvas,
-            x1 + 1,
-            y1 + 1,
-            x2 - 1,
-            y2 - 1,
-            max(1, radius - 1),
+            body_left + 1,
+            body_top + 1,
+            body_right - 1,
+            body_bottom - 1,
+            max(1, body_radius - 1),
             gradient_start or fill,
             gradient_end or fill,
+            tags=tags,
         )
-        rounded_rectangle(canvas, x1, y1, x2, y2, radius, fill="", outline=border, width=1)
-        canvas.create_line(
-            x1 + radius + 2,
-            y1 + 2,
-            x2 - radius - 2,
-            y1 + 2,
-            fill=blend(inner_border or fill, highlight, 0.46),
-            width=1,
-        )
-        return
-    rounded_rectangle(canvas, x1, y1, x2, y2, radius, fill=fill, outline=border, width=1)
-    canvas.create_line(x1 + radius, y1 + 2, x2 - radius, y1 + 2, fill=highlight, width=1)
 
-
-def flat_date_state(
-    canvas: tk.Canvas,
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    *,
-    fill: str,
-    border: str,
-    radius: int,
-    outer_ring: str | None = None,
-) -> None:
-    if outer_ring:
-        rounded_rectangle(
+    if inner_border and body_right - body_left > 4 and body_bottom - body_top > 4:
+        _calendar_rounded_rectangle(
             canvas,
-            x1 - 1,
-            y1 - 1,
-            x2 + 1,
-            y2 + 1,
-            radius + 1,
+            body_left + 1,
+            body_top + 1,
+            body_right - 1,
+            body_bottom - 1,
+            max(1, body_radius - 1),
             fill="",
-            outline=outer_ring,
+            outline=inner_border,
             width=1,
+            tags=tags,
         )
-    rounded_rectangle(canvas, x1, y1, x2, y2, radius, fill=fill, outline=border, width=1)
+
+    if top_highlight:
+        highlight_y = body_top + 2
+        canvas.create_line(
+            body_left + body_radius,
+            highlight_y,
+            body_right - body_radius,
+            highlight_y,
+            fill=top_highlight,
+            width=1,
+            tags=tags,
+        )
+
+    _calendar_rounded_rectangle(
+        canvas,
+        body_left,
+        body_top,
+        body_right,
+        body_bottom,
+        body_radius,
+        fill="",
+        outline=border,
+        width=1,
+        tags=tags,
+    )

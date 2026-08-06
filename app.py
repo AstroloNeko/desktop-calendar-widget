@@ -51,7 +51,7 @@ from update_manager import (
     running_as_packaged_app,
 )
 from version import __version__
-from ui_draw import bevel_control, blend, flat_date_state, glass_date_state, rounded_rectangle, vertical_gradient, vertical_multi_gradient
+from ui_draw import bevel_control, blend, draw_calendar_date_state, rounded_rectangle, vertical_gradient, vertical_multi_gradient
 from ui_theme import Theme, get_theme, normalize_theme_name
 
 
@@ -493,6 +493,8 @@ class DayCell(tk.Canvas):
         self.app.show_day_menu(self.day, event.x_root, event.y_root)
 
     def draw(self) -> None:
+        # Date cells are rebuilt from a clean tagged canvas on every state
+        # transition, so hover/selected/today layers cannot accumulate.
         self.delete("all")
         theme = self.app.theme
         self.configure(bg=theme.calendar_background)
@@ -505,87 +507,50 @@ class DayCell(tk.Canvas):
         if has_holiday and (theme.style == "flat" or self.selected):
             date_y = 10
         if self.hovered and not self.selected:
-            if theme.style == "flat":
-                flat_date_state(
-                    self,
-                    center_x - state_half_width,
-                    1,
-                    center_x + state_half_width,
-                    state_bottom,
-                    fill=theme.date_hover_background,
-                    border=theme.date_hover_border,
-                    radius=theme.metrics.date_radius,
-                )
-            else:
-                glass_date_state(
-                    self,
-                    center_x - state_half_width - 1,
-                    1,
-                    center_x + state_half_width + 1,
-                    state_bottom,
-                    fill=theme.date_hover_background,
-                    border=theme.date_hover_border,
-                    highlight=blend(theme.date_hover_background, theme.control_highlight, 0.38),
-                    radius=theme.metrics.date_radius,
-                )
+            draw_calendar_date_state(
+                self,
+                center_x - state_half_width,
+                1,
+                center_x + state_half_width,
+                state_bottom,
+                fill=theme.date_hover_background,
+                border=theme.date_hover_border,
+                radius=theme.metrics.date_radius,
+                top_highlight=blend(theme.date_hover_background, theme.control_highlight, 0.30) if theme.style == "aero" else None,
+            )
         if self.selected:
-            if theme.style == "flat":
-                flat_date_state(
-                    self,
-                    center_x - state_half_width,
-                    1,
-                    center_x + state_half_width,
-                    state_bottom,
-                    fill=theme.date_selected_background,
-                    border=theme.date_selected_border,
-                    radius=theme.metrics.date_radius,
-                    outer_ring=theme.date_selected_today if self.today else None,
-                )
-            else:
-                selected_glass = theme.style == "aero"
-                glass_date_state(
-                    self,
-                    center_x - state_half_width,
-                    1,
-                    center_x + state_half_width,
-                    state_bottom,
-                    fill=theme.date_selected_background,
-                    border=theme.date_selected_border,
-                    highlight=blend(
-                        theme.date_selected_gradient_start if selected_glass else theme.date_selected_background,
-                        theme.control_highlight,
-                        0.18 if selected_glass else 0.58,
-                    ),
-                    radius=max(4, theme.metrics.date_radius - 1) if selected_glass else theme.metrics.date_radius,
-                    outer_ring=theme.date_selected_today if self.today else None,
-                    gradient_start=theme.date_selected_gradient_start if selected_glass else None,
-                    gradient_end=theme.date_selected_gradient_end if selected_glass else None,
-                    inner_border=theme.date_selected_inner_border if selected_glass else None,
-                )
+            selected_glass = theme.style == "aero"
+            draw_calendar_date_state(
+                self,
+                center_x - state_half_width,
+                1,
+                center_x + state_half_width,
+                state_bottom,
+                fill=theme.date_selected_background,
+                border=theme.date_selected_border,
+                radius=max(4, theme.metrics.date_radius - 1) if selected_glass else theme.metrics.date_radius,
+                gradient_start=theme.date_selected_gradient_start if selected_glass else None,
+                gradient_end=theme.date_selected_gradient_end if selected_glass else None,
+                inner_border=theme.date_selected_inner_border if selected_glass else None,
+                top_highlight=blend(
+                    theme.date_selected_gradient_start,
+                    theme.control_highlight,
+                    0.18,
+                ) if selected_glass else None,
+                today_ring=theme.date_selected_today if self.today else None,
+            )
         elif self.today:
-            if theme.style == "flat":
-                flat_date_state(
-                    self,
-                    center_x - state_half_width,
-                    1,
-                    center_x + state_half_width,
-                    state_bottom,
-                    fill=theme.date_today_background,
-                    border=theme.date_today_border,
-                    radius=theme.metrics.date_radius,
-                )
-            else:
-                glass_date_state(
-                    self,
-                    center_x - state_half_width,
-                    1,
-                    center_x + state_half_width,
-                    state_bottom,
-                    fill=theme.date_today_background,
-                    border=theme.date_today_border,
-                    highlight=blend(theme.date_today_background, theme.control_highlight, 0.45),
-                    radius=theme.metrics.date_radius,
-                )
+            draw_calendar_date_state(
+                self,
+                center_x - state_half_width,
+                1,
+                center_x + state_half_width,
+                state_bottom,
+                fill=theme.date_today_background,
+                border=theme.date_today_border,
+                radius=theme.metrics.date_radius,
+                top_highlight=blend(theme.date_today_background, theme.control_highlight, 0.34) if theme.style == "aero" else None,
+            )
 
         if self.urgent:
             # A local status bead stays legible beside hover/today/selected
@@ -600,6 +565,7 @@ class DayCell(tk.Canvas):
                 fill=theme.urgent_indicator,
                 outline=theme.calendar_background,
                 width=1,
+                tags="date_marker",
             )
 
         if self.date_status in ("leave", "holiday"):
@@ -611,6 +577,7 @@ class DayCell(tk.Canvas):
                 3,
                 fill=status_color,
                 width=2,
+                tags="date_marker",
             )
 
         if self.selected:
@@ -622,7 +589,7 @@ class DayCell(tk.Canvas):
         else:
             color = theme.date_text
         weight = "bold" if self.today or self.selected else "normal"
-        self.create_text(center_x, date_y, text=str(self.day.day), fill=color, font=(FONT, 9, weight))
+        self.create_text(center_x, date_y, text=str(self.day.day), fill=color, font=(FONT, 9, weight), tags="date_text")
 
         if self.holiday and self.in_month:
             holiday_color = (
@@ -645,6 +612,7 @@ class DayCell(tk.Canvas):
                     7,
                     "normal" if theme.style == "flat" else "bold" if self.holiday.kind != "festival" else "normal",
                 ),
+                tags="date_text",
             )
 
         if self.event_colors:
@@ -660,6 +628,7 @@ class DayCell(tk.Canvas):
                     indicator_bottom,
                     fill=event_color,
                     outline="",
+                    tags="date_event",
                 )
 
 
