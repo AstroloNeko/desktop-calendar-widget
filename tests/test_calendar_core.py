@@ -88,8 +88,22 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(event.due_date, date.today())
         self.assertFalse(event.has_time)
         self.assertIsNone(event.reminder)
+        self.assertEqual(event.priority, "normal")
         loaded = Store(self.data_file)
         self.assertFalse(loaded.events[0].has_time)
+
+    def test_quick_event_saves_selected_color_and_priority(self):
+        store = Store(self.data_file)
+        event = store.create_quick(
+            "紧急快速事项",
+            date(2026, 8, 5),
+            color=COLORS["珊瑚红"],
+            priority="urgent",
+        )
+        self.assertEqual(event.color, COLORS["珊瑚红"])
+        self.assertEqual(event.priority, "urgent")
+        loaded = Store(self.data_file)
+        self.assertEqual(loaded.events[0].priority, "urgent")
 
     def test_legacy_event_defaults_to_having_a_time(self):
         self.data_file.write_text(
@@ -99,6 +113,8 @@ class StoreTests(unittest.TestCase):
         store = Store(self.data_file)
         self.assertTrue(store.events[0].has_time)
         self.assertEqual(store.events[0].duration_days, 1)
+        self.assertFalse(store.events[0].skip_non_working_days)
+        self.assertEqual(store.events[0].priority, "normal")
 
     def test_untimed_event_cannot_keep_a_relative_reminder(self):
         event = Event("untimed", "无具体时间", "2026-08-05T23:59", has_time=False, reminder=60)
@@ -127,6 +143,141 @@ class StoreTests(unittest.TestCase):
         loaded = Store(self.data_file)
         self.assertEqual(loaded.events[0].duration_days, 3)
 
+    def test_workday_duration_skips_weekend(self):
+        store = Store(self.data_file)
+        event = Event(
+            "workdays",
+            "两个工作日",
+            "2026-08-07T23:59",
+            has_time=False,
+            duration_days=2,
+            skip_non_working_days=True,
+        )
+        store.events = [event]
+        self.assertEqual(store.event_dates(event), (date(2026, 8, 7), date(2026, 8, 10)))
+        self.assertEqual(store.events_on(date(2026, 8, 8)), [])
+
+    def test_workday_duration_skips_official_holiday(self):
+        store = Store(self.data_file)
+        event = Event(
+            "holiday",
+            "跨中秋",
+            "2026-09-24T18:00",
+            duration_days=2,
+            skip_non_working_days=True,
+        )
+        self.assertEqual(store.event_dates(event), (date(2026, 9, 24), date(2026, 9, 28)))
+
+    def test_adjusted_weekend_workday_counts(self):
+        store = Store(self.data_file)
+        event = Event(
+            "makeup",
+            "调休工作日",
+            "2026-09-20T18:00",
+            duration_days=2,
+            skip_non_working_days=True,
+        )
+        self.assertEqual(store.event_dates(event), (date(2026, 9, 20), date(2026, 9, 21)))
+
+    def test_non_working_start_moves_to_next_workday(self):
+        store = Store(self.data_file)
+        event = Event(
+            "weekend-start",
+            "周末开始",
+            "2026-08-08T18:00",
+            duration_days=1,
+            skip_non_working_days=True,
+        )
+        self.assertEqual(store.event_dates(event), (date(2026, 8, 10),))
+
+    def test_manual_leave_and_holiday_are_skipped(self):
+        store = Store(self.data_file)
+        store.set_date_status(date(2026, 8, 10), "leave")
+        store.set_date_status(date(2026, 8, 11), "holiday")
+        event = Event(
+            "manual-days-off",
+            "自定义休息日",
+            "2026-08-10T18:00",
+            duration_days=2,
+            skip_non_working_days=True,
+        )
+        self.assertEqual(store.event_dates(event), (date(2026, 8, 12), date(2026, 8, 13)))
+
+    def test_restoring_normal_uses_official_calendar_again(self):
+        store = Store(self.data_file)
+        adjusted_sunday = date(2026, 9, 20)
+        store.set_date_status(adjusted_sunday, "leave")
+        self.assertFalse(store.is_workday(adjusted_sunday))
+        store.set_date_status(adjusted_sunday, "normal")
+        self.assertTrue(store.is_workday(adjusted_sunday))
+        self.assertEqual(store.date_status(adjusted_sunday), "normal")
+        official_holiday = date(2026, 9, 25)
+        store.set_date_status(official_holiday, "leave")
+        store.set_date_status(official_holiday, "normal")
+        self.assertFalse(store.is_workday(official_holiday))
+
+    def test_date_status_round_trips_and_invalid_values_are_ignored(self):
+        self.data_file.write_text(
+            json.dumps(
+                {
+                    "date_states": {
+                        "2026-08-10": "leave",
+                        "2026-08-11": "holiday",
+                        "2026-08-12": "vacation",
+                        "not-a-date": "leave",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        store = Store(self.data_file)
+        self.assertEqual(store.date_status(date(2026, 8, 10)), "leave")
+        self.assertEqual(store.date_status(date(2026, 8, 11)), "holiday")
+        self.assertEqual(store.date_status(date(2026, 8, 12)), "normal")
+        store.save()
+        loaded = Store(self.data_file)
+        self.assertEqual(loaded.date_states, {"2026-08-10": "leave", "2026-08-11": "holiday"})
+
+    def test_legacy_priorities_are_mapped_to_three_levels(self):
+        self.data_file.write_text(
+            json.dumps(
+                {
+                    "events": [
+                        {"id": "low", "title": "低", "due": "2026-08-05T10:00", "priority": "低"},
+                        {"id": "normal", "title": "普通", "due": "2026-08-05T10:00", "priority": "普通"},
+                        {"id": "high", "title": "高", "due": "2026-08-05T10:00", "priority": "高"},
+                        {"id": "urgent", "title": "紧急", "due": "2026-08-05T10:00", "priority": "紧急"},
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        store = Store(self.data_file)
+        self.assertEqual([item.priority for item in store.events], ["low", "normal", "urgent", "urgent"])
+
+    def test_invalid_priority_falls_back_to_normal(self):
+        self.assertEqual(Event("invalid", "未知", "2026-08-05T10:00", priority="critical").priority, "normal")
+        self.assertEqual(Event("missing", "缺省", "2026-08-05T10:00", priority=None).priority, "normal")
+
+    def test_invalid_skip_non_working_days_falls_back_to_false(self):
+        self.data_file.write_text(
+            json.dumps(
+                {
+                    "events": [
+                        {
+                            "id": "invalid-skip",
+                            "title": "错误跳过值",
+                            "due": "2026-08-05T10:00",
+                            "skip_non_working_days": "yes",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertFalse(Store(self.data_file).events[0].skip_non_working_days)
+
     def test_events_on_places_unfinished_before_finished(self):
         store = Store(self.data_file)
         day = date(2026, 8, 4)
@@ -134,6 +285,66 @@ class StoreTests(unittest.TestCase):
         open_event = Event("open", "未完成", "2026-08-04T18:00")
         store.events = [finished, open_event]
         self.assertEqual([event.id for event in store.events_on(day)], ["open", "done"])
+
+    def test_events_on_sorts_urgent_normal_low_stably_and_done_last(self):
+        store = Store(self.data_file)
+        day = date(2026, 8, 5)
+        store.events = [
+            Event("low", "低", "2026-08-05T10:00", priority="low"),
+            Event("urgent-one", "紧急一", "2026-08-05T12:00", priority="urgent"),
+            Event("normal", "一般", "2026-08-05T08:00", priority="normal"),
+            Event("urgent-two", "紧急二", "2026-08-05T09:00", priority="urgent"),
+            Event("done", "完成", "2026-08-05T07:00", priority="urgent", done=True),
+        ]
+        self.assertEqual(
+            [event.id for event in store.events_on(day)],
+            ["urgent-one", "urgent-two", "normal", "low", "done"],
+        )
+
+    def test_urgent_date_ignores_completed_events(self):
+        store = Store(self.data_file)
+        day = date(2026, 8, 5)
+        urgent = Event("urgent", "紧急", "2026-08-05T10:00", priority="urgent")
+        store.events = [urgent]
+        self.assertTrue(store.has_urgent_on(day))
+        urgent.done = True
+        self.assertFalse(store.has_urgent_on(day))
+
+    def test_urgent_events_put_overdue_first_and_exclude_completed(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 5, 12, 0)
+        store.events = [
+            Event("soon", "即将", "2026-08-06T10:00", priority="urgent"),
+            Event("late", "逾期", "2026-08-04T10:00", priority="urgent"),
+            Event("later", "稍后", "2026-08-08T10:00", priority="urgent"),
+            Event("done", "完成", "2026-08-03T10:00", priority="urgent", done=True),
+            Event("normal", "一般", "2026-08-03T10:00", priority="normal"),
+        ]
+        self.assertEqual([item.id for item in store.urgent_events(now)], ["late", "soon", "later"])
+
+    def test_urgent_events_split_into_pinned_24_hours_and_regular_without_duplicates(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 5, 12, 0)
+        store.events = [
+            Event("regular", "超过窗口", "2026-08-06T12:01", priority="urgent"),
+            Event("boundary", "正好二十四小时", "2026-08-06T12:00", priority="urgent"),
+            Event("late", "已经逾期", "2026-08-04T10:00", priority="urgent"),
+            Event("soon", "即将截止", "2026-08-06T11:59", priority="urgent"),
+            Event("done", "已经完成", "2026-08-04T09:00", priority="urgent", done=True),
+            Event("normal", "一般事项", "2026-08-04T08:00", priority="normal"),
+        ]
+        pinned, regular = store.grouped_urgent_events(now)
+        self.assertEqual([item.id for item in pinned], ["late", "soon", "boundary"])
+        self.assertEqual([item.id for item in regular], ["regular"])
+        self.assertFalse({item.id for item in pinned} & {item.id for item in regular})
+
+    def test_untimed_urgent_deadline_uses_end_of_day_boundary(self):
+        store = Store(self.data_file)
+        item = Event("untimed", "无具体时间", "2026-08-06T23:59", priority="urgent", has_time=False)
+        store.events = [item]
+        pinned, regular = store.grouped_urgent_events(datetime(2026, 8, 5, 23, 59))
+        self.assertEqual([event.id for event in pinned], ["untimed"])
+        self.assertEqual(regular, [])
 
     def test_upcoming_includes_overdue_and_next_week(self):
         store = Store(self.data_file)
@@ -153,6 +364,19 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(item.is_done_on(date(2026, 8, 4)))
         self.assertFalse(item.is_done_on(date(2026, 8, 5)))
         self.assertEqual([entry.id for entry in store.routines_on(date(2026, 8, 5))], ["habit"])
+
+    def test_agenda_items_move_completed_routine_to_bottom_and_restore(self):
+        store = Store(self.data_file)
+        day = date(2026, 8, 5)
+        habit = RoutineItem("habit", "读书", kind="habit", created_on="2026-08-03")
+        low = Event("low", "低", "2026-08-05T10:00", priority="low")
+        store.events = [low]
+        store.routines = [habit]
+        self.assertEqual([item.id for item in store.agenda_items_on(day)], ["habit", "low"])
+        store.toggle_routine(habit, day)
+        self.assertEqual([item.id for item in store.agenda_items_on(day)], ["low", "habit"])
+        store.toggle_routine(habit, day)
+        self.assertEqual([item.id for item in store.agenda_items_on(day)], ["habit", "low"])
 
     def test_todo_completion_hides_it_after_completion_day(self):
         store = Store(self.data_file)
