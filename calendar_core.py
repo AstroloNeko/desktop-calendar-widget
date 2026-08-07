@@ -87,6 +87,16 @@ def normalize_date_status(value: object) -> str:
     return value if isinstance(value, str) and value in DATE_STATUSES else "normal"
 
 
+def normalize_reminder_time(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.strptime(value.strip(), "%H:%M").time()
+    except ValueError:
+        return None
+    return parsed.strftime("%H:%M")
+
+
 @dataclass
 class Event:
     id: str
@@ -102,6 +112,7 @@ class Event:
     has_time: bool = True
     duration_days: int = 1
     skip_non_working_days: bool = False
+    end_as_ddl: bool = False
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -115,6 +126,7 @@ class Event:
         except (TypeError, ValueError):
             self.duration_days = 1
         self.skip_non_working_days = self.skip_non_working_days is True
+        self.end_as_ddl = self.end_as_ddl is True and self.duration_days > 1 and self.event_type != "ddl"
         if not self.has_time:
             self.reminder = None
 
@@ -195,6 +207,7 @@ class Event:
         data["done"] = bool(data.get("done", False))
         data["has_time"] = bool(data.get("has_time", True))
         data["skip_non_working_days"] = data.get("skip_non_working_days", False) is True
+        data["end_as_ddl"] = data.get("end_as_ddl", False) is True
         snooze = data.get("snooze_until")
         if snooze:
             try:
@@ -214,6 +227,8 @@ class RoutineItem:
     completed_on: Optional[str] = None
     habit_done: list[str] = field(default_factory=list)
     enabled: bool = True
+    reminder_enabled: bool = False
+    reminder_time: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.created_on:
@@ -240,6 +255,10 @@ class RoutineItem:
             except (TypeError, ValueError):
                 self.completed_on = None
         self.enabled = bool(self.enabled)
+        self.reminder_enabled = self.reminder_enabled is True
+        self.reminder_time = normalize_reminder_time(self.reminder_time)
+        if self.reminder_time is None:
+            self.reminder_enabled = False
 
     @property
     def created_date(self) -> date:
@@ -339,7 +358,7 @@ class Store:
         notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
         self.notified = set(notification_history)
         payload = {
-            "version": 5,
+            "version": 6,
             "events": [asdict(event) for event in self.events],
             "routines": [asdict(item) for item in self.routines],
             "date_states": self.date_states,
@@ -363,6 +382,7 @@ class Store:
             or previous.has_time != event.has_time
             or previous.duration_days != event.duration_days
             or previous.skip_non_working_days != event.skip_non_working_days
+            or previous.end_as_ddl != event.end_as_ddl
         ):
             self.clear_notifications(event.id)
         self.save()
@@ -419,11 +439,24 @@ class Store:
             self.routines.append(item)
         else:
             self.routines[self.routines.index(previous)] = item
+        if previous is not None and (
+            previous.reminder_enabled != item.reminder_enabled
+            or previous.reminder_time != item.reminder_time
+            or previous.enabled != item.enabled
+            or previous.kind != item.kind
+            or previous.created_on != item.created_on
+        ):
+            self.clear_routine_notifications(item.id)
         self.save()
 
     def delete_routine(self, item_id: str) -> None:
         self.routines = [item for item in self.routines if item.id != item_id]
+        self.clear_routine_notifications(item_id)
         self.save()
+
+    def clear_routine_notifications(self, item_id: str) -> None:
+        prefix = f"routine:{item_id}:"
+        self.notified = {key for key in self.notified if not key.startswith(prefix)}
 
     def routines_on(self, day: date) -> list[RoutineItem]:
         visible: list[RoutineItem] = []
@@ -490,12 +523,19 @@ class Store:
     def is_event_overdue(self, event: Event, now: Optional[datetime] = None) -> bool:
         return not event.done and self.event_ends_at(event) < (now or datetime.now())
 
+    @staticmethod
+    def event_has_deadline(event: Event) -> bool:
+        return event.event_type == "ddl" or event.end_as_ddl
+
     def has_ddl_on(self, day: date) -> bool:
-        return any(item.event_type == "ddl" for item in self.events_on(day, include_done=False))
+        return any(
+            not item.done and self.event_has_deadline(item) and self.event_end_date(item) == day
+            for item in self.events
+        )
 
     def ddl_events(self, now: Optional[datetime] = None) -> list[Event]:
         reference = now or datetime.now()
-        ddl_items = [item for item in self.events if not item.done and item.event_type == "ddl"]
+        ddl_items = [item for item in self.events if not item.done and self.event_has_deadline(item)]
         return sorted(
             ddl_items,
             key=lambda item: (
@@ -519,6 +559,26 @@ class Store:
             else:
                 regular.append(item)
         return pinned, regular
+
+    @staticmethod
+    def routine_notification_key(item: RoutineItem, day: date) -> Optional[str]:
+        if not item.reminder_enabled or item.reminder_time is None:
+            return None
+        return f"routine:{item.id}:{day.isoformat()}:{item.reminder_time}"
+
+    def due_routine_reminders(self, now: datetime) -> list[RoutineItem]:
+        day = now.date()
+        if not self.is_workday(day):
+            return []
+        due: list[RoutineItem] = []
+        for item in self.routines_on(day):
+            key = self.routine_notification_key(item, day)
+            if key is None or key in self.notified or item.is_done_on(day):
+                continue
+            reminder_time = datetime.strptime(item.reminder_time, "%H:%M").time()
+            if now.time() >= reminder_time:
+                due.append(item)
+        return due
 
     def toggle_routine(self, item: RoutineItem, day: date) -> None:
         day_key = day.isoformat()

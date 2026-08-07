@@ -33,6 +33,7 @@ from calendar_core import (
     Event,
     RoutineItem,
     Store,
+    normalize_reminder_time,
 )
 from holiday_data import HolidayInfo, holiday_for
 from tray_icon import TrayIcon
@@ -62,11 +63,12 @@ from ui_draw import (
     blend,
     draw_calendar_date_ring,
     draw_calendar_date_state,
+    draw_calendar_today_accent,
     rounded_rectangle,
     vertical_gradient,
     vertical_multi_gradient,
 )
-from ui_theme import Theme, get_theme, normalize_theme_name
+from ui_theme import THEMES, Theme, get_theme, normalize_theme_name
 
 
 WINDOW_WIDTH = 372
@@ -76,6 +78,7 @@ DDL_VISIBLE_ROWS = 2
 DDL_ROW_HEIGHT = 30
 DDL_REGION_CHROME_HEIGHT = 58
 EVENT_STRIPE_WIDTH = 4
+ROUTINE_ENTRY_LABEL = "习惯"
 DATE_STATE_HALF_WIDTH = 14
 DATE_STATE_TOP = 1
 DATE_STATE_BOTTOM = 23
@@ -274,6 +277,7 @@ class ThemeButton(LogicalCanvas):
         foreground: Optional[str] = None,
         surface_background: Optional[str] = None,
         accented: bool = False,
+        outlined: bool = False,
     ) -> None:
         self.app = app
         self.text = text
@@ -282,6 +286,7 @@ class ThemeButton(LogicalCanvas):
         self.foreground = foreground
         self.surface_background = surface_background
         self.accented = accented
+        self.outlined = outlined
         self.state = "normal"
         super().__init__(
             parent,
@@ -355,6 +360,8 @@ class ThemeButton(LogicalCanvas):
         else:
             if self.accented:
                 background = theme.accent_hover if self.state == "hover" else blend(theme.accent, theme.control_pressed, 0.18) if self.state == "pressed" else theme.accent
+            elif not self.outlined and self.state == "normal":
+                background = self.surface_background or theme.header_background
             else:
                 background = theme.control_hover if self.state == "hover" else theme.control_pressed if self.state == "pressed" else theme.control_background
             self.configure(bg=self.surface_background or theme.header_background)
@@ -366,10 +373,11 @@ class ThemeButton(LogicalCanvas):
                 height - 2,
                 theme.metrics.control_radius,
                 fill=background,
-                outline="",
+                outline=theme.control_border if self.outlined else "",
+                width=1,
             )
         y_offset = 1 if self.state == "pressed" else 0
-        text_color = self.foreground or (theme.text_on_accent if self.accented and theme.style == "flat" else theme.control_text)
+        text_color = self.foreground or (theme.text_on_accent if self.accented and theme.style != "aero" else theme.control_text)
         self.create_text(
             width / 2,
             height / 2 + y_offset,
@@ -572,6 +580,7 @@ class DayCell(LogicalCanvas):
             )
         if self.selected:
             selected_glass = theme.style == "aero"
+            selected_paper = theme.style == "paper"
             draw_calendar_date_state(
                 self,
                 center_x - DATE_STATE_HALF_WIDTH,
@@ -581,15 +590,14 @@ class DayCell(LogicalCanvas):
                 fill=theme.date_selected_background,
                 border=theme.date_selected_border,
                 radius=max(4, theme.metrics.date_radius - 1) if selected_glass else theme.metrics.date_radius,
-                gradient_start=theme.date_selected_gradient_start if selected_glass else None,
-                gradient_end=theme.date_selected_gradient_end if selected_glass else None,
-                inner_border=theme.date_selected_inner_border if selected_glass else None,
+                gradient_start=theme.date_selected_gradient_start if selected_glass or selected_paper else None,
+                gradient_end=theme.date_selected_gradient_end if selected_glass or selected_paper else None,
+                inner_border=theme.date_selected_inner_border if selected_glass or selected_paper else None,
                 top_highlight=blend(
                     theme.date_selected_gradient_start,
                     theme.control_highlight,
-                    0.18,
-                ) if selected_glass else None,
-                today_ring=theme.date_selected_today if self.today else None,
+                    0.18 if selected_glass else 0.10,
+                ) if selected_glass or selected_paper else None,
             )
         elif self.today:
             draw_calendar_date_state(
@@ -599,7 +607,7 @@ class DayCell(LogicalCanvas):
                 center_x + DATE_STATE_HALF_WIDTH,
                 DATE_STATE_BOTTOM,
                 fill=theme.date_today_background,
-                border=theme.date_today_border,
+                border=theme.date_today_background if self.ddl else theme.date_today_border,
                 radius=theme.metrics.date_radius,
                 top_highlight=blend(theme.date_today_background, theme.control_highlight, 0.34) if theme.style == "aero" else None,
             )
@@ -616,6 +624,17 @@ class DayCell(LogicalCanvas):
                 color=theme.ddl_indicator,
                 radius=theme.metrics.date_radius + 2,
                 inner_highlight=theme.ddl_indicator_highlight if theme.style == "aero" else None,
+            )
+
+        if self.today and (self.selected or self.ddl):
+            draw_calendar_today_accent(
+                self,
+                center_x - DATE_STATE_HALF_WIDTH,
+                DATE_STATE_TOP,
+                center_x + DATE_STATE_HALF_WIDTH,
+                DATE_STATE_BOTTOM,
+                color=theme.date_selected_today,
+                highlight=blend(theme.date_selected_today, theme.control_highlight, 0.42) if theme.style == "aero" else None,
             )
 
         if self.date_status in ("leave", "holiday"):
@@ -650,7 +669,7 @@ class DayCell(LogicalCanvas):
                 holiday_color = blend(
                     holiday_color,
                     theme.date_selected_border,
-                    0.22 if theme.style == "flat" else 0.15,
+                    0.15 if theme.style == "aero" else 0.22,
                 )
             self.create_text(
                 center_x,
@@ -660,7 +679,7 @@ class DayCell(LogicalCanvas):
                 font=(
                     FONT,
                     7 if len(self.holiday.short_name) <= 4 else 6,
-                    "normal" if theme.style == "flat" else "bold" if self.holiday.kind != "festival" else "normal",
+                    "bold" if theme.style == "aero" and self.holiday.kind != "festival" else "normal",
                 ),
                 tags="date_text",
             )
@@ -702,6 +721,7 @@ class EventEditor(tk.Toplevel):
         self.time_var = tk.StringVar(value=due.strftime("%H:%M") if event and event.has_time else "")
         self.duration_var = tk.StringVar(value=str(event.duration_days if event else 1))
         self.skip_non_working_var = tk.BooleanVar(value=event.skip_non_working_days if event else False)
+        self.end_as_ddl_var = tk.BooleanVar(value=event.end_as_ddl if event else False)
         self.event_type_var = tk.StringVar(value=event.event_type if event else "general")
         self.color_var = tk.StringVar(value=event.color if event else COLORS["海盐蓝"])
         reminder_value = event.reminder if event else None
@@ -776,19 +796,44 @@ class EventEditor(tk.Toplevel):
         duration.pack(side="left", ipady=2)
         tk.Label(shortcuts, text="天", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(side="left", padx=(3, 0))
 
-        tk.Checkbutton(
+        span_options = tk.Frame(
             shell,
+            bg=CONTROL_BACKGROUND,
+            padx=master.dpi.px(8),
+            pady=master.dpi.px(5),
+            highlightthickness=master.dpi.px(1),
+            highlightbackground=master.theme.control_border,
+        )
+        span_options.pack(fill="x", pady=(0, 10))
+        tk.Checkbutton(
+            span_options,
             text="跳过节假日和请假日",
             variable=self.skip_non_working_var,
-            bg=CARD,
-            activebackground=CARD,
+            bg=CONTROL_BACKGROUND,
+            activebackground=CONTROL_BACKGROUND,
             fg=SUBTLE,
             activeforeground=INK,
             selectcolor=FIELD_BACKGROUND,
             font=(FONT, 8),
             cursor="hand2",
             highlightthickness=0,
-        ).pack(anchor="w", pady=(0, 9))
+        ).pack(side="left")
+        self.end_as_ddl_check = tk.Checkbutton(
+            span_options,
+            text="最后一天作为 DDL",
+            variable=self.end_as_ddl_var,
+            bg=CONTROL_BACKGROUND,
+            activebackground=CONTROL_BACKGROUND,
+            fg=SUBTLE,
+            activeforeground=INK,
+            disabledforeground=FAINT,
+            selectcolor=FIELD_BACKGROUND,
+            font=(FONT, 8),
+            cursor="hand2",
+            highlightthickness=0,
+        )
+        self.end_as_ddl_check.pack(side="left", padx=(8, 0))
+        self.duration_var.trace_add("write", lambda *_args: self._update_end_as_ddl_option())
 
         self._field_label(shell, "事项类型")
         event_type_row = tk.Frame(shell, bg=CARD)
@@ -811,11 +856,12 @@ class EventEditor(tk.Toplevel):
                 padx=11,
                 pady=4,
                 cursor="hand2",
-                command=self._draw_event_type_controls,
+                command=self._event_type_changed,
             )
             radio.pack(side="left", padx=(0, 6))
             self.event_type_radios.append((radio, event_type))
         self._draw_event_type_controls()
+        self._update_end_as_ddl_option()
 
         reminder_row = tk.Frame(shell, bg=CARD)
         reminder_row.pack(fill="x", pady=(0, 10))
@@ -939,6 +985,24 @@ class EventEditor(tk.Toplevel):
                 highlightbackground=blend(accent, theme.panel_secondary, 0.55),
             )
 
+    def _event_type_changed(self) -> None:
+        self._draw_event_type_controls()
+        self._update_end_as_ddl_option()
+
+    def _update_end_as_ddl_option(self) -> None:
+        try:
+            duration_days = int(self.duration_var.get())
+        except ValueError:
+            self.end_as_ddl_check.configure(state="disabled", cursor="arrow")
+            return
+        eligible = duration_days > 1 and self.event_type_var.get() != "ddl"
+        self.end_as_ddl_check.configure(
+            state="normal" if eligible else "disabled",
+            cursor="hand2" if eligible else "arrow",
+        )
+        if not eligible:
+            self.end_as_ddl_var.set(False)
+
     def _draw_colors(self) -> None:
         selected = self.color_var.get()
         for canvas, color in self.color_canvases:
@@ -987,6 +1051,7 @@ class EventEditor(tk.Toplevel):
             has_time=has_time,
             duration_days=duration_days,
             skip_non_working_days=self.skip_non_working_var.get(),
+            end_as_ddl=self.end_as_ddl_var.get(),
             color=self.color_var.get(),
             event_type=self.event_type_var.get(),
             reminder=REMINDERS[self.reminder_var.get()] if has_time else None,
@@ -1016,7 +1081,7 @@ class EventEditor(tk.Toplevel):
 
 class RoutineEditor(tk.Toplevel):
     WIDTH = 360
-    HEIGHT = 350
+    HEIGHT = 420
 
     def __init__(self, master: "CalendarApp", item: Optional[RoutineItem] = None) -> None:
         super().__init__(master)
@@ -1030,6 +1095,11 @@ class RoutineEditor(tk.Toplevel):
         self.title_var = tk.StringVar(value=item.title if item else "")
         self.kind_var = tk.StringVar(value=item.kind if item else "habit")
         self.color_var = tk.StringVar(value=item.color if item else COLORS["薄荷绿"])
+        default_reminder_time = normalize_reminder_time(
+            item.reminder_time if item else master.store.settings.get("routine_reminder_time", "09:00")
+        ) or "09:00"
+        self.reminder_enabled_var = tk.BooleanVar(value=item.reminder_enabled if item else False)
+        self.reminder_time_var = tk.StringVar(value=default_reminder_time)
         self.color_canvases: list[tuple[tk.Canvas, str]] = []
 
         shell = tk.Frame(self, bg=CARD, padx=20)
@@ -1079,6 +1149,54 @@ class RoutineEditor(tk.Toplevel):
             ).pack(side="left", padx=(0, 7))
         tk.Label(shell, text="习惯只记录当天完成；待办完成后不会在次日出现。", bg=CARD, fg=FAINT, font=(FONT, 8)).pack(anchor="w", pady=(0, 14))
 
+        tk.Label(shell, text="提醒", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
+        reminder_row = tk.Frame(
+            shell,
+            bg=CONTROL_BACKGROUND,
+            padx=master.dpi.px(9),
+            pady=master.dpi.px(6),
+            highlightthickness=master.dpi.px(1),
+            highlightbackground=master.theme.control_border,
+        )
+        reminder_row.pack(fill="x", pady=(5, 14))
+        tk.Checkbutton(
+            reminder_row,
+            text="开启提醒",
+            variable=self.reminder_enabled_var,
+            command=self._update_reminder_controls,
+            bg=CONTROL_BACKGROUND,
+            activebackground=CONTROL_BACKGROUND,
+            fg=INK,
+            activeforeground=INK,
+            selectcolor=FIELD_BACKGROUND,
+            font=(FONT, 9),
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="left")
+        self.reminder_time_controls = tk.Frame(reminder_row, bg=CONTROL_BACKGROUND)
+        tk.Label(
+            self.reminder_time_controls,
+            text="提醒时间",
+            bg=CONTROL_BACKGROUND,
+            fg=SUBTLE,
+            font=(FONT, 8),
+        ).pack(side="left", padx=(12, 5))
+        reminder_time_entry = tk.Entry(
+            self.reminder_time_controls,
+            textvariable=self.reminder_time_var,
+            width=7,
+            justify="center",
+            bg=FIELD_BACKGROUND,
+            fg=INK,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            font=(FONT, 9),
+        )
+        reminder_time_entry.pack(side="left", ipady=4)
+        self._update_reminder_controls()
+
         tk.Label(shell, text="颜色", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
         color_row = tk.Frame(shell, bg=CARD)
         color_row.pack(fill="x", pady=(5, 20))
@@ -1124,6 +1242,13 @@ class RoutineEditor(tk.Toplevel):
         self.color_var.set(color)
         self._draw_colors()
 
+    def _update_reminder_controls(self) -> None:
+        if self.reminder_enabled_var.get():
+            if not self.reminder_time_controls.winfo_ismapped():
+                self.reminder_time_controls.pack(side="right")
+        else:
+            self.reminder_time_controls.pack_forget()
+
     def _draw_colors(self) -> None:
         selected = self.color_var.get()
         for canvas, color in self.color_canvases:
@@ -1137,6 +1262,10 @@ class RoutineEditor(tk.Toplevel):
             messagebox.showinfo(APP_NAME, "请先填写习惯清单内容。", parent=self)
             self.title_entry.focus_set()
             return
+        reminder_time = normalize_reminder_time(self.reminder_time_var.get())
+        if self.reminder_enabled_var.get() and reminder_time is None:
+            messagebox.showinfo(APP_NAME, "提醒时间请使用 HH:MM，例如 09:00。", parent=self)
+            return
         item = RoutineItem(
             id=self.item.id if self.item else str(uuid.uuid4()),
             title=title,
@@ -1146,6 +1275,8 @@ class RoutineEditor(tk.Toplevel):
             completed_on=self.item.completed_on if self.item else None,
             habit_done=list(self.item.habit_done) if self.item else [],
             enabled=self.item.enabled if self.item else True,
+            reminder_enabled=self.reminder_enabled_var.get(),
+            reminder_time=reminder_time,
         )
         self.master_app.store.upsert_routine(item)
         self.master_app.render()
@@ -1188,8 +1319,6 @@ class RoutineManager(tk.Toplevel):
         self.overrideredirect(True)
         self.attributes("-topmost", True)
         self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
-        self.reminder_enabled = tk.BooleanVar(value=bool(master.store.settings.get("routine_reminder_enabled", True)))
-        self.reminder_time = tk.StringVar(value=str(master.store.settings.get("routine_reminder_time", "09:00")))
 
         shell = tk.Frame(self, bg=CARD)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
@@ -1201,38 +1330,6 @@ class RoutineManager(tk.Toplevel):
         tk.Label(title_box, text="习惯每天回来，待办完成一次即结束", bg=CARD, fg=FAINT, font=(FONT, 8), anchor="w").pack(anchor="w")
         button_label(header, "×", self.close, width=2, bg=CARD, font_size=13).pack(side="right")
         tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
-
-        reminder = tk.Frame(shell, bg=CONTROL_BACKGROUND, padx=16, pady=10)
-        reminder.pack(fill="x")
-        tk.Checkbutton(
-            reminder,
-            text="工作日提醒",
-            variable=self.reminder_enabled,
-            command=self._save_reminder,
-            bg=CONTROL_BACKGROUND,
-            activebackground=CONTROL_BACKGROUND,
-            fg=INK,
-            selectcolor=CARD,
-            font=(FONT, 9),
-        ).pack(side="left")
-        tk.Label(reminder, text="每天", bg=CONTROL_BACKGROUND, fg=SUBTLE, font=(FONT, 8)).pack(side="left", padx=(12, 5))
-        time_entry = tk.Entry(
-            reminder,
-            textvariable=self.reminder_time,
-            width=7,
-            justify="center",
-            bg=CARD,
-            fg=INK,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            highlightcolor=ACCENT,
-            font=(FONT, 9),
-        )
-        time_entry.pack(side="left", ipady=4)
-        time_entry.bind("<Return>", lambda _event: self._save_reminder(show_error=True))
-        time_entry.bind("<FocusOut>", lambda _event: self._save_reminder())
-        tk.Label(reminder, text="节假日和请假日跳过", bg=CONTROL_BACKGROUND, fg=FAINT, font=(FONT, 8)).pack(side="right")
 
         list_shell = tk.Frame(shell, bg=CARD, padx=14, pady=10)
         list_shell.pack(fill="both", expand=True)
@@ -1259,20 +1356,6 @@ class RoutineManager(tk.Toplevel):
         center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=24)
         self.after_idle(lambda: master.present_overlay(self))
 
-    def _save_reminder(self, show_error: bool = False) -> None:
-        value = self.reminder_time.get().strip()
-        try:
-            datetime.strptime(value, "%H:%M")
-        except ValueError:
-            fallback = str(self.master_app.store.settings.get("routine_reminder_time", "09:00"))
-            self.reminder_time.set(fallback)
-            if show_error:
-                messagebox.showinfo(APP_NAME, "提醒时间请使用 HH:MM，例如 09:00。", parent=self)
-            return
-        self.master_app.store.settings["routine_reminder_enabled"] = self.reminder_enabled.get()
-        self.master_app.store.settings["routine_reminder_time"] = value
-        self.master_app.store.save()
-
     def refresh(self) -> None:
         for child in self.list_inner.winfo_children():
             child.destroy()
@@ -1297,6 +1380,8 @@ class RoutineManager(tk.Toplevel):
             )
             title.pack(fill="x")
             type_text = "习惯 · 每个工作日" if item.kind == "habit" else ("待办 · 已完成" if item.completed_on else "待办 · 等待完成")
+            if item.reminder_enabled and item.reminder_time:
+                type_text += f" · 提醒 {item.reminder_time}"
             meta = tk.Label(content, text=type_text, bg=row_background, fg=current_theme().text_done if completed else SUBTLE, font=(FONT, 8), anchor="w")
             meta.pack(fill="x", pady=(2, 0))
             more = tk.Label(row, text="›", bg=row_background, fg=FAINT, font=(FONT, 13), width=3, cursor="hand2")
@@ -1945,7 +2030,7 @@ class CalendarApp(tk.Tk):
         self.agenda_toggle.pack(side="left", padx=(0, dp(6)))
         self.agenda_title = tk.Label(self.agenda_bar, text="", bg=theme.schedule_background, fg=theme.text_primary, font=(FONT, 10, "bold"), cursor="hand2")
         self.agenda_title.pack(side="left")
-        self.agenda_count = tk.Label(self.agenda_bar, text="", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 8), cursor="hand2")
+        self.agenda_count = tk.Label(self.agenda_bar, text="", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8), cursor="hand2")
         self.agenda_count.pack(side="left", padx=(dp(7), 0))
         add = ThemeButton(
             self.agenda_bar,
@@ -1955,20 +2040,22 @@ class CalendarApp(tk.Tk):
             width=28,
             height=25,
             font_size=13,
-            foreground=theme.accent if theme.style == "flat" else theme.control_text,
+            foreground=None if theme.style != "aero" else theme.control_text,
             surface_background=theme.schedule_background,
+            accented=theme.style != "aero",
         )
         add.pack(side="right", pady=dp(4))
         routines = ThemeButton(
             self.agenda_bar,
             self,
-            "打卡",
+            ROUTINE_ENTRY_LABEL,
             self.open_routine_manager,
             width=43,
             height=25,
             font_size=8,
-            foreground=theme.accent if theme.style == "flat" else theme.control_text,
+            foreground=theme.text_secondary if theme.style != "aero" else theme.control_text,
             surface_background=theme.schedule_background,
+            outlined=True,
         )
         routines.pack(side="right", pady=dp(4), padx=(0, dp(3)))
         Tooltip(add, "打开当天详情并管理事项")
@@ -2077,6 +2164,7 @@ class CalendarApp(tk.Tk):
 
         self.quick_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=dp(12), pady=dp(5))
         self.quick_frame.pack(fill="x")
+        self._quick_entry_hovered = False
         self.quick_var = tk.StringVar(value="")
         self.quick_entry = tk.Entry(
             self.quick_frame,
@@ -2093,6 +2181,8 @@ class CalendarApp(tk.Tk):
         self.quick_entry.pack(side="left", fill="x", expand=True, ipady=dp(6))
         self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
         self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
+        self.quick_entry.bind("<Enter>", lambda _event: self._quick_entry_hover(True))
+        self.quick_entry.bind("<Leave>", lambda _event: self._quick_entry_hover(False))
         self.quick_entry.bind("<Return>", self.quick_add)
         self.quick_options_button = ThemeButton(
             self.quick_frame,
@@ -2102,8 +2192,9 @@ class CalendarApp(tk.Tk):
             width=66,
             height=25 if theme.style == "aero" else 29,
             font_size=8,
-            foreground=theme.text_secondary if theme.style == "flat" else theme.control_text,
+            foreground=theme.text_secondary if theme.style != "aero" else theme.control_text,
             surface_background=theme.schedule_background,
+            outlined=True,
         )
         self.quick_options_button.pack(side="right", padx=(dp(6), 0))
         self._refresh_quick_options_button()
@@ -2113,7 +2204,7 @@ class CalendarApp(tk.Tk):
         self.footer_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=dp(13), height=dp(21))
         self.footer_frame.pack(side="bottom", fill="x")
         self.footer_frame.pack_propagate(False)
-        self.upcoming_label = tk.Label(self.footer_frame, text="", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 8), cursor="hand2")
+        self.upcoming_label = tk.Label(self.footer_frame, text="", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8), cursor="hand2")
         self.upcoming_label.pack(side="left")
         self.upcoming_label.bind("<Button-1>", lambda _event: UpcomingDialog(self))
         Tooltip(self.upcoming_label, "查看未来 7 天和已逾期日程")
@@ -2387,8 +2478,8 @@ class CalendarApp(tk.Tk):
             empty.pack(fill="both", expand=True)
             empty.pack_propagate(False)
             empty_title = "休息日不安排习惯清单" if not self.store.is_workday(self.selected) and self.store.routines else "这一天很清静"
-            tk.Label(empty, text=empty_title, bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 9)).pack(pady=(27, 2))
-            tk.Label(empty, text="双击日期查看详情，习惯清单仅在工作日出现", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8)).pack()
+            tk.Label(empty, text=empty_title, bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 9, "bold")).pack(pady=(27, 2))
+            tk.Label(empty, text="双击日期查看详情 · 习惯清单仅在工作日出现", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8)).pack()
         else:
             for item in items:
                 if isinstance(item, RoutineItem):
@@ -2794,7 +2885,11 @@ class CalendarApp(tk.Tk):
         if hasattr(self.quick_entry, "configure") and hasattr(self, "after"):
             self.quick_placeholder_active = True
             self.quick_var.set("已保存 · 可继续输入")
-            self.quick_entry.configure(fg=self.theme.quick_success)
+            self.quick_entry.configure(
+                fg=self.theme.quick_success,
+                highlightbackground=self.theme.quick_success,
+                highlightcolor=self.theme.quick_success,
+            )
             self.after(650, self._finish_quick_feedback)
         self.quick_entry.focus_set()
         return "break"
@@ -2805,7 +2900,11 @@ class CalendarApp(tk.Tk):
         self.quick_var.set("")
         self.quick_placeholder_active = False
         if self.focus_get() == self.quick_entry:
-            self.quick_entry.configure(fg=self.theme.text_primary)
+            self.quick_entry.configure(
+                fg=self.theme.text_primary,
+                highlightbackground=self.theme.input_focus,
+                highlightcolor=self.theme.input_focus,
+            )
         else:
             self._set_quick_placeholder()
 
@@ -2860,17 +2959,35 @@ class CalendarApp(tk.Tk):
             return
         self.quick_placeholder_active = True
         self.quick_var.set(f"快速添加到 {self.selected.month}月{self.selected.day}日，回车保存")
-        self.quick_entry.configure(fg=FAINT)
+        self.quick_entry.configure(fg=self.theme.text_muted)
+
+    def _quick_entry_hover(self, hovered: bool) -> None:
+        self._quick_entry_hovered = hovered
+        if self.focus_get() == self.quick_entry:
+            return
+        self.quick_entry.configure(
+            highlightbackground=self.theme.input_hover_border if hovered else self.theme.input_border,
+        )
 
     def _quick_focus_in(self, _event=None) -> None:
         if self.quick_placeholder_active:
             self.quick_var.set("")
             self.quick_placeholder_active = False
-            self.quick_entry.configure(fg=INK)
+            self.quick_entry.configure(fg=self.theme.text_primary)
+        self.quick_entry.configure(
+            highlightbackground=self.theme.input_focus,
+            highlightcolor=self.theme.input_focus,
+        )
 
     def _quick_focus_out(self, _event=None) -> None:
         if not self.quick_var.get().strip():
             self._set_quick_placeholder()
+        self.quick_entry.configure(
+            highlightbackground=(
+                self.theme.input_hover_border if self._quick_entry_hovered else self.theme.input_border
+            ),
+            highlightcolor=self.theme.input_focus,
+        )
 
     def toggle_agenda(self) -> None:
         self.agenda_open = not self.agenda_open
@@ -2915,11 +3032,11 @@ class CalendarApp(tk.Tk):
 
     def _update_mode_badge(self) -> None:
         if self.window_mode == "pinned":
-            self.mode_button.set_text("置顶", self.theme.accent if self.theme.style == "flat" else self.theme.control_text)
+            self.mode_button.set_text("置顶", self.theme.accent if self.theme.style != "aero" else self.theme.control_text)
         elif self.desktop_session_active:
-            self.mode_button.set_text("前台", self.theme.accent if self.theme.style == "flat" else self.theme.control_text)
+            self.mode_button.set_text("前台", self.theme.accent if self.theme.style != "aero" else self.theme.control_text)
         else:
-            self.mode_button.set_text("桌面", self.theme.text_secondary if self.theme.style == "flat" else self.theme.control_text)
+            self.mode_button.set_text("桌面", self.theme.text_secondary if self.theme.style != "aero" else self.theme.control_text)
 
     def _activate_desktop_session(self, _event=None) -> None:
         if not self._window_ready or self.window_mode != "desktop":
@@ -3034,18 +3151,13 @@ class CalendarApp(tk.Tk):
         menu.add_separator()
         theme_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         self.theme_var = tk.StringVar(value=self.theme_name)
-        theme_menu.add_radiobutton(
-            label="Modern",
-            variable=self.theme_var,
-            value="modern",
-            command=lambda: self.set_theme("modern"),
-        )
-        theme_menu.add_radiobutton(
-            label="Win7 Aero",
-            variable=self.theme_var,
-            value="win7_aero",
-            command=lambda: self.set_theme("win7_aero"),
-        )
+        for theme_name, theme in THEMES.items():
+            theme_menu.add_radiobutton(
+                label=theme.display_name,
+                variable=self.theme_var,
+                value=theme_name,
+                command=lambda name=theme_name: self.set_theme(name),
+            )
         menu.add_cascade(label=f"主题 · {self.theme.display_name}", menu=theme_menu)
         opacity_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         current_opacity = round(float(self.attributes("-alpha")), 2)
@@ -3305,23 +3417,14 @@ class CalendarApp(tk.Tk):
         self.after(15000, self.check_reminders)
 
     def _check_routine_reminder(self, now: datetime) -> bool:
-        if not self.store.settings.get("routine_reminder_enabled", True) or not self.store.is_workday(now.date()):
+        due = self.store.due_routine_reminders(now)
+        if not due:
             return False
-        reminder_value = str(self.store.settings.get("routine_reminder_time", "09:00"))
-        try:
-            reminder_time = datetime.strptime(reminder_value, "%H:%M").time()
-        except ValueError:
-            return False
-        if now.time() < reminder_time:
-            return False
-        key = f"routine:{now.date().isoformat()}:{reminder_value}"
-        if key in self.store.notified:
-            return False
-        incomplete = [item for item in self.store.routines_on(now.date()) if not item.is_done_on(now.date())]
-        if not incomplete:
-            return False
-        self.store.notified.add(key)
-        self.show_routine_notification(incomplete)
+        for item in due:
+            key = self.store.routine_notification_key(item, now.date())
+            if key:
+                self.store.notified.add(key)
+        self.show_routine_notification(due)
         return True
 
     def show_routine_notification(self, items: list[RoutineItem]) -> None:

@@ -27,8 +27,8 @@
 
 ## UI rules
 
-1. The application supports `modern` and `win7_aero`.
-2. New UI must work correctly in both themes.
+1. The application supports `modern`, `win7_aero` and `paper`.
+2. New UI must work correctly in all themes.
 3. Do not hard-code colors, fonts, borders or visual state values in `app.py`.
 4. Reuse semantic tokens from `ui_theme.py`.
 5. Reuse Canvas helpers from `ui_draw.py`.
