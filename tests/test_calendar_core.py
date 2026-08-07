@@ -52,10 +52,16 @@ class StoreTests(unittest.TestCase):
 
     def test_theme_round_trips(self):
         store = Store(self.data_file)
-        store.settings["theme"] = "win7_aero"
-        store.save()
-        loaded = Store(self.data_file)
-        self.assertEqual(loaded.settings["theme"], "win7_aero")
+        for theme_name in ("modern", "win7_aero", "paper"):
+            store.settings["theme"] = theme_name
+            store.save()
+            loaded = Store(self.data_file)
+            self.assertEqual(loaded.settings["theme"], theme_name)
+
+    def test_legacy_aero_theme_name_is_preserved(self):
+        self.data_file.write_text(json.dumps({"settings": {"theme": "aero"}}), encoding="utf-8")
+        store = Store(self.data_file)
+        self.assertEqual(store.settings["theme"], "win7_aero")
 
     def test_invalid_theme_falls_back_to_modern(self):
         self.data_file.write_text(json.dumps({"settings": {"theme": "neon_hud"}}), encoding="utf-8")
