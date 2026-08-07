@@ -3,11 +3,14 @@ from datetime import date, datetime
 
 from app import (
     CalendarApp,
+    DDL_LIST_ENTRY_LABEL,
+    DDLListDialog,
     DayCell,
     DayDetailDialog,
     EVENT_STRIPE_WIDTH,
     EventEditor,
     ROUTINE_ENTRY_LABEL,
+    ddl_relative_label,
     event_stripe_color,
     main_region_visibility,
     parse_event_due,
@@ -39,6 +42,47 @@ class _FakeCalendar:
 
 
 class WindowBehaviorTests(unittest.TestCase):
+    def test_main_ddl_entry_uses_complete_list_label(self) -> None:
+        self.assertEqual(DDL_LIST_ENTRY_LABEL, "DDL列表")
+
+    def test_ddl_relative_labels_cover_overdue_today_tomorrow_and_future(self) -> None:
+        now = datetime(2026, 8, 7, 12, 0)
+        self.assertEqual(ddl_relative_label(datetime(2026, 8, 7, 11, 59), now), "已逾期")
+        self.assertEqual(ddl_relative_label(datetime(2026, 8, 7, 18, 0), now), "今天")
+        self.assertEqual(ddl_relative_label(datetime(2026, 8, 8, 9, 0), now), "明天")
+        self.assertEqual(ddl_relative_label(datetime(2026, 8, 10, 9, 0), now), "3天后")
+
+    def test_ddl_entry_reuses_existing_complete_list_window(self) -> None:
+        presented: list[object] = []
+
+        class FakeDDLList:
+            def winfo_exists(self) -> bool:
+                return True
+
+        ddl_list = FakeDDLList()
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "ddl_list_window": ddl_list,
+                "present_overlay": lambda self, window: presented.append(window),
+            },
+        )()
+
+        CalendarApp.open_ddl_list(fake)
+        self.assertEqual(presented, [ddl_list])
+
+    def test_completed_ddl_section_toggle_refreshes_window(self) -> None:
+        refreshed: list[bool] = []
+        fake = type(
+            "FakeDDLList",
+            (),
+            {"completed_open": False, "refresh": lambda self: refreshed.append(self.completed_open)},
+        )()
+        DDLListDialog._toggle_completed(fake)
+        self.assertTrue(fake.completed_open)
+        self.assertEqual(refreshed, [True])
+
     def test_main_routine_entry_uses_habit_module_label(self) -> None:
         self.assertEqual(ROUTINE_ENTRY_LABEL, "习惯")
 

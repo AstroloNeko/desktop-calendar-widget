@@ -282,6 +282,18 @@ class RoutineItem:
         return cls(**data)
 
 
+@dataclass(frozen=True)
+class DDLListGroups:
+    overdue: tuple[Event, ...] = ()
+    due_soon: tuple[Event, ...] = ()
+    future: tuple[Event, ...] = ()
+    completed: tuple[Event, ...] = ()
+
+    @property
+    def total(self) -> int:
+        return len(self.overdue) + len(self.due_soon) + len(self.future) + len(self.completed)
+
+
 DEFAULT_SETTINGS = {
     "theme": DEFAULT_THEME_NAME,
     "window_mode": "desktop",
@@ -559,6 +571,45 @@ class Store:
             else:
                 regular.append(item)
         return pinned, regular
+
+    def complete_ddl_groups(
+        self,
+        now: Optional[datetime] = None,
+        pinned_hours: int = 24,
+    ) -> DDLListGroups:
+        """Return every logical DDL once, without changing main-window grouping."""
+        reference = now or datetime.now()
+        pinned_deadline = reference + timedelta(hours=max(0, pinned_hours))
+        unique: list[Event] = []
+        seen_ids: set[str] = set()
+        for item in self.events:
+            if item.id in seen_ids or not self.event_has_deadline(item):
+                continue
+            seen_ids.add(item.id)
+            unique.append(item)
+
+        overdue: list[Event] = []
+        due_soon: list[Event] = []
+        future: list[Event] = []
+        completed: list[Event] = []
+        for item in unique:
+            deadline = self.event_ends_at(item)
+            if item.done:
+                completed.append(item)
+            elif deadline < reference:
+                overdue.append(item)
+            elif deadline <= pinned_deadline:
+                due_soon.append(item)
+            else:
+                future.append(item)
+
+        by_deadline = self.event_ends_at
+        return DDLListGroups(
+            overdue=tuple(sorted(overdue, key=by_deadline)),
+            due_soon=tuple(sorted(due_soon, key=by_deadline)),
+            future=tuple(sorted(future, key=by_deadline)),
+            completed=tuple(sorted(completed, key=by_deadline, reverse=True)),
+        )
 
     @staticmethod
     def routine_notification_key(item: RoutineItem, day: date) -> Optional[str]:
