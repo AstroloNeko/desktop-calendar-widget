@@ -361,6 +361,119 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([item.id for item in regular], ["regular"])
         self.assertFalse({item.id for item in pinned} & {item.id for item in regular})
 
+    def test_complete_ddl_groups_collect_native_and_endpoint_deadlines_once(self):
+        store = Store(self.data_file)
+        native = Event("native", "原生 DDL", "2026-08-08T10:00", event_type="ddl")
+        general_end = Event(
+            "general-end",
+            "一般末日 DDL",
+            "2026-08-08T10:00",
+            event_type="general",
+            duration_days=2,
+            end_as_ddl=True,
+        )
+        urgent_end = Event(
+            "urgent-end",
+            "紧急末日 DDL",
+            "2026-08-08T11:00",
+            event_type="urgent",
+            duration_days=2,
+            end_as_ddl=True,
+        )
+        store.events = [
+            Event("general", "一般事项", "2026-08-08T08:00", event_type="general"),
+            Event("urgent", "紧急事项", "2026-08-08T09:00", event_type="urgent"),
+            native,
+            general_end,
+            urgent_end,
+            Event("native", "重复 ID", "2026-08-09T10:00", event_type="ddl"),
+        ]
+        groups = store.complete_ddl_groups(datetime(2026, 8, 7, 0, 0))
+        all_ids = [item.id for item in groups.overdue + groups.due_soon + groups.future + groups.completed]
+        self.assertEqual(all_ids, ["native", "general-end", "urgent-end"])
+        self.assertEqual(all_ids.count("native"), 1)
+        self.assertEqual(general_end.event_type, "general")
+        self.assertEqual(urgent_end.event_type, "urgent")
+
+    def test_complete_ddl_groups_use_actual_last_effective_date(self):
+        store = Store(self.data_file)
+        endpoint = Event(
+            "endpoint",
+            "跨周末末日",
+            "2026-08-07T10:00",
+            duration_days=2,
+            skip_non_working_days=True,
+            end_as_ddl=True,
+        )
+        store.events = [endpoint]
+        groups = store.complete_ddl_groups(datetime(2026, 8, 8, 9, 0))
+        self.assertEqual(store.event_end_date(endpoint), date(2026, 8, 10))
+        self.assertEqual([item.id for item in groups.future], ["endpoint"])
+        self.assertFalse(store.has_ddl_on(date(2026, 8, 7)))
+        self.assertTrue(store.has_ddl_on(date(2026, 8, 10)))
+
+    def test_complete_ddl_groups_classify_overdue_due_soon_future_and_completed(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 7, 12, 0)
+        store.events = [
+            Event("overdue", "逾期", "2026-08-07T11:59", event_type="ddl"),
+            Event("soon", "24 小时内", "2026-08-08T12:00", event_type="ddl"),
+            Event("future", "未来", "2026-08-08T12:01", event_type="ddl"),
+            Event("done", "已完成", "2026-08-06T10:00", event_type="ddl", done=True),
+        ]
+        groups = store.complete_ddl_groups(now)
+        self.assertEqual([item.id for item in groups.overdue], ["overdue"])
+        self.assertEqual([item.id for item in groups.due_soon], ["soon"])
+        self.assertEqual([item.id for item in groups.future], ["future"])
+        self.assertEqual([item.id for item in groups.completed], ["done"])
+        self.assertEqual(groups.total, 4)
+
+    def test_complete_ddl_groups_sort_each_section_stably(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 7, 12, 0)
+        store.events = [
+            Event("future-later", "未来稍后", "2026-08-10T10:00", event_type="ddl"),
+            Event("future-first", "未来较近", "2026-08-09T10:00", event_type="ddl"),
+            Event("same-one", "同时间一", "2026-08-08T10:00", event_type="ddl"),
+            Event("same-two", "同时间二", "2026-08-08T10:00", event_type="ddl"),
+            Event("done-old", "早期完成", "2026-08-01T10:00", event_type="ddl", done=True),
+            Event("done-recent", "近期完成", "2026-08-06T10:00", event_type="ddl", done=True),
+        ]
+        groups = store.complete_ddl_groups(now)
+        self.assertEqual([item.id for item in groups.due_soon], ["same-one", "same-two"])
+        self.assertEqual([item.id for item in groups.future], ["future-first", "future-later"])
+        self.assertEqual([item.id for item in groups.completed], ["done-recent", "done-old"])
+
+    def test_complete_ddl_groups_refresh_after_completion_retype_and_delete(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 7, 12, 0)
+        item = Event("changing", "变化事项", "2026-08-08T10:00", event_type="ddl")
+        store.events = [item]
+        self.assertEqual([entry.id for entry in store.complete_ddl_groups(now).due_soon], ["changing"])
+
+        item.done = True
+        self.assertEqual([entry.id for entry in store.complete_ddl_groups(now).completed], ["changing"])
+        item.done = False
+        item.event_type = "general"
+        self.assertEqual(store.complete_ddl_groups(now).total, 0)
+        item.event_type = "ddl"
+        self.assertEqual([entry.id for entry in store.complete_ddl_groups(now).due_soon], ["changing"])
+        store.delete(item.id)
+        self.assertEqual(store.complete_ddl_groups(now).total, 0)
+
+    def test_complete_ddl_groups_refresh_after_date_change_or_endpoint_cancel(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 7, 12, 0)
+        store.upsert(Event("move", "移动末日", "2026-08-07T10:00", duration_days=2, end_as_ddl=True))
+        self.assertEqual([entry.id for entry in store.complete_ddl_groups(now).due_soon], ["move"])
+        store.upsert(Event("anchor", "排序锚点", "2026-08-11T10:00", event_type="ddl"))
+        store.upsert(Event("move", "移动末日", "2026-08-11T10:00", duration_days=2, end_as_ddl=True))
+        self.assertEqual([entry.id for entry in store.complete_ddl_groups(now).future], ["anchor", "move"])
+        store.upsert(Event("move", "移动末日", "2026-08-08T10:00", duration_days=2, end_as_ddl=True))
+        self.assertEqual([entry.id for entry in store.complete_ddl_groups(now).future], ["move", "anchor"])
+        store.upsert(Event("move", "取消末日", "2026-08-08T10:00", duration_days=2, end_as_ddl=False))
+        self.assertEqual([entry.id for entry in store.complete_ddl_groups(now).future], ["anchor"])
+
     def test_untimed_ddl_deadline_uses_end_of_day_boundary(self):
         store = Store(self.data_file)
         item = Event("untimed", "无具体时间", "2026-08-06T23:59", event_type="ddl", has_time=False)

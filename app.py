@@ -77,8 +77,14 @@ CLOSED_HEIGHT = 405
 DDL_VISIBLE_ROWS = 2
 DDL_ROW_HEIGHT = 30
 DDL_REGION_CHROME_HEIGHT = 58
+DDL_LIST_MIN_HEIGHT = 250
+DDL_LIST_MAX_HEIGHT = 590
+DDL_LIST_CHROME_HEIGHT = 128
+DDL_LIST_GROUP_HEIGHT = 34
+DDL_LIST_ROW_HEIGHT = 66
 EVENT_STRIPE_WIDTH = 4
 ROUTINE_ENTRY_LABEL = "习惯"
+DDL_LIST_ENTRY_LABEL = "DDL列表"
 DATE_STATE_HALF_WIDTH = 14
 DATE_STATE_TOP = 1
 DATE_STATE_BOTTOM = 23
@@ -174,6 +180,47 @@ def event_type_badge_style(theme: Theme, event_type: str) -> tuple[str, str, str
     if event_type == "ddl":
         return theme.event_type_ddl, theme.event_type_ddl_background, theme.event_type_ddl_border
     return None
+
+
+def ddl_relative_label(deadline: datetime, now: datetime) -> str:
+    if deadline < now:
+        return "已逾期"
+    day_delta = (deadline.date() - now.date()).days
+    if day_delta == 0:
+        return "今天"
+    if day_delta == 1:
+        return "明天"
+    return f"{day_delta}天后"
+
+
+def ddl_display_datetime(deadline: datetime, now: datetime) -> str:
+    """Format a compact deadline without changing deadline semantics."""
+    date_text = (
+        f"{deadline.year}年{deadline.month}月{deadline.day}日"
+        if deadline.year != now.year
+        else f"{deadline.month}月{deadline.day}日"
+    )
+    return f"{date_text} {deadline:%H:%M}"
+
+
+def ddl_list_logical_height(
+    overdue_count: int,
+    due_soon_count: int,
+    future_count: int,
+    completed_count: int,
+    completed_open: bool,
+) -> int:
+    """Size the list for scanability while capping long collections."""
+    counts = (overdue_count, due_soon_count, future_count, completed_count)
+    group_count = sum(count > 0 for count in counts)
+    visible_rows = overdue_count + due_soon_count + future_count
+    if completed_open:
+        visible_rows += completed_count
+    content_height = group_count * DDL_LIST_GROUP_HEIGHT + visible_rows * DDL_LIST_ROW_HEIGHT
+    return max(
+        DDL_LIST_MIN_HEIGHT,
+        min(DDL_LIST_MAX_HEIGHT, DDL_LIST_CHROME_HEIGHT + content_height),
+    )
 
 
 def geometry_at(width: int, height: int, x: int, y: int) -> str:
@@ -1681,6 +1728,421 @@ class DayDetailDialog(tk.Toplevel):
         self.master_app.after(120, self.master_app.apply_window_mode)
 
 
+class DDLListDialog(tk.Toplevel):
+    WIDTH = 440
+    HEIGHT = DDL_LIST_MAX_HEIGHT
+
+    def __init__(self, master: "CalendarApp") -> None:
+        super().__init__(master)
+        self.master_app = master
+        self.completed_open = False
+        self.logical_height = self.HEIGHT
+        self.title("DDL列表")
+        self.configure(bg=master.theme.window_border_outer)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.geometry(f"{master.dpi.px(self.WIDTH)}x{master.dpi.px(self.HEIGHT)}")
+
+        shell = tk.Frame(self, bg=CARD)
+        shell.pack(fill="both", expand=True, padx=1, pady=1)
+        header = tk.Frame(shell, bg=CARD, padx=18, pady=10)
+        header.pack(fill="x")
+        title_box = tk.Frame(header, bg=CARD)
+        title_box.pack(side="left", fill="x", expand=True)
+        tk.Label(title_box, text="DDL列表", bg=CARD, fg=INK, font=(FONT, 13, "bold"), anchor="w").pack(anchor="w")
+        self.summary_label = tk.Label(title_box, text="", bg=CARD, fg=FAINT, font=(FONT, 8), anchor="w")
+        self.summary_label.pack(anchor="w")
+        button_label(header, "×", self.close, width=2, bg=CARD, font_size=13).pack(side="right")
+        tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
+
+        list_shell = tk.Frame(shell, bg=CARD, padx=12, pady=10)
+        list_shell.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(list_shell, bg=CARD, bd=0, highlightthickness=0, height=master.dpi.px(1))
+        self.scrollbar = ttk.Scrollbar(
+            list_shell,
+            orient="vertical",
+            command=self.canvas.yview,
+            style="DDL.Vertical.TScrollbar",
+        )
+        self.list_inner = tk.Frame(self.canvas, bg=CARD)
+        self.list_window = self.canvas.create_window((0, 0), window=self.list_inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.list_inner.bind("<Configure>", lambda _event: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda event: self.canvas.itemconfigure(self.list_window, width=event.width))
+        self.canvas.bind("<MouseWheel>", self._scroll)
+
+        footer = tk.Frame(shell, bg=CARD, padx=15, pady=10)
+        footer.pack(side="bottom", fill="x")
+        self.footer_hint = tk.Label(
+            footer,
+            text="",
+            bg=CARD,
+            fg=FAINT,
+            font=(FONT, 8),
+        )
+        self.footer_hint.pack(side="left")
+
+        self.bind("<Escape>", lambda _event: self.close())
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.refresh()
+        self.update_idletasks()
+        self.after_idle(lambda: master.present_overlay(self))
+
+    def refresh(self) -> None:
+        if not self.winfo_exists():
+            return
+        scroll_position = self.canvas.yview()[0] if self.canvas.bbox("all") else 0.0
+        for child in self.list_inner.winfo_children():
+            child.destroy()
+        groups = self.master_app.store.complete_ddl_groups()
+        unfinished_count = len(groups.overdue) + len(groups.due_soon) + len(groups.future)
+        self.summary_label.configure(text=f"未完成 {unfinished_count} 项 · 已完成 {len(groups.completed)} 项")
+        self.footer_hint.configure(
+            text="点击事项可编辑，复选框可完成或取消完成"
+            if groups.total
+            else "新增或标记 DDL 后会显示在这里"
+        )
+        self._resize_for_groups(groups)
+        if groups.total == 0:
+            empty = tk.Frame(self.list_inner, bg=CARD)
+            empty.pack(fill="both", expand=True, pady=56)
+            tk.Label(
+                empty,
+                text="暂无 DDL",
+                bg=CARD,
+                fg=current_theme().text_secondary,
+                font=(FONT, 10, "bold"),
+            ).pack()
+            tk.Label(
+                empty,
+                text="最近没有截止事项",
+                bg=CARD,
+                fg=FAINT,
+                font=(FONT, 8),
+            ).pack(pady=(5, 0))
+        else:
+            self._build_group("已逾期", groups.overdue, "overdue")
+            self._build_group("24小时内", groups.due_soon, "due_soon")
+            self._build_group("未来 DDL", groups.future, "future")
+            self._build_group("已完成", groups.completed, "completed", collapsible=True)
+        self.after_idle(lambda: self._finish_refresh(scroll_position))
+
+    def _resize_for_groups(self, groups) -> None:
+        self.logical_height = ddl_list_logical_height(
+            len(groups.overdue),
+            len(groups.due_soon),
+            len(groups.future),
+            len(groups.completed),
+            self.completed_open,
+        )
+        self.geometry(
+            f"{self.master_app.dpi.px(self.WIDTH)}x{self.master_app.dpi.px(self.logical_height)}"
+        )
+        self.update_idletasks()
+        center_toplevel(self, self.master_app, self.WIDTH, self.logical_height, y_offset=16)
+
+    def _finish_refresh(self, scroll_position: float) -> None:
+        if not self.winfo_exists():
+            return
+        self._update_scrollbar()
+        self.canvas.yview_moveto(scroll_position if self.scrollbar.winfo_manager() else 0.0)
+
+    @staticmethod
+    def _group_palette(theme: Theme, group_name: str) -> tuple[str, str, str]:
+        if group_name == "overdue":
+            return theme.danger, theme.ddl_overdue_background, theme.ddl_pinned_border
+        if group_name == "due_soon":
+            return theme.event_type_urgent, theme.ddl_due_background, theme.event_type_urgent_border
+        if group_name == "completed":
+            return theme.text_done, theme.card_done_background, theme.divider
+        return theme.text_secondary, theme.panel_secondary, theme.divider
+
+    def _build_group(
+        self,
+        title: str,
+        items: tuple[Event, ...],
+        group_name: str,
+        *,
+        collapsible: bool = False,
+    ) -> None:
+        if not items:
+            return
+        theme = current_theme()
+        accent, hover_background, separator_color = self._group_palette(theme, group_name)
+        cursor = "hand2" if collapsible else "arrow"
+        header = tk.Frame(self.list_inner, bg=CARD, padx=4, pady=6, cursor=cursor)
+        header.pack(fill="x", pady=(7, 2), padx=1)
+        marker = tk.Frame(header, bg=accent, width=2, cursor=cursor)
+        marker.pack(side="left", fill="y", padx=(0, 7))
+        marker.pack_propagate(False)
+        label = tk.Label(
+            header,
+            text=title,
+            bg=CARD,
+            fg=accent,
+            font=(FONT, 9, "bold"),
+            cursor=cursor,
+        )
+        label.pack(side="left")
+        count_text = f"{len(items)} 项"
+        if collapsible:
+            count_text += "  ⌄" if self.completed_open else "  ›"
+        count = tk.Label(
+            header,
+            text=count_text,
+            bg=CARD,
+            fg=theme.text_muted,
+            font=(FONT, 8),
+            cursor=cursor,
+            padx=4,
+        )
+        count.pack(side="right")
+        tk.Frame(self.list_inner, bg=separator_color, height=1).pack(fill="x", padx=1, pady=(0, 5))
+        if collapsible:
+            widgets = (header, marker, label, count)
+            for widget in widgets:
+                widget.bind(
+                    "<Enter>",
+                    lambda _event, ws=widgets, bg=hover_background: self._set_group_hover(ws, bg),
+                )
+                widget.bind(
+                    "<Leave>",
+                    lambda _event, ws=widgets: self._set_group_hover(ws, CARD),
+                )
+                widget.bind("<Button-1>", lambda _event: self._toggle_completed())
+        if collapsible and not self.completed_open:
+            return
+        for item in items:
+            self._build_event_row(item, group_name)
+
+    @staticmethod
+    def _set_group_hover(widgets: tuple[tk.Widget, ...], background: str) -> None:
+        for widget in widgets:
+            if isinstance(widget, tk.Frame) and int(widget.cget("width") or 0) == 2:
+                continue
+            widget.configure(bg=background)
+
+    def _build_event_row(self, item: Event, group_name: str) -> None:
+        theme = current_theme()
+        if item.done:
+            background = theme.card_done_background
+            border = theme.divider
+        elif group_name == "overdue":
+            background = theme.ddl_overdue_background
+            border = theme.ddl_pinned_border
+        elif group_name == "due_soon":
+            background = theme.ddl_due_background
+            border = theme.event_type_urgent_border
+        else:
+            background = theme.schedule_card_background
+            border = theme.schedule_card_border
+        row = tk.Frame(
+            self.list_inner,
+            bg=background,
+            highlightthickness=1,
+            highlightbackground=border,
+            cursor="hand2",
+        )
+        row.pack(fill="x", pady=(0, 7), padx=1)
+        stripe = tk.Frame(row, bg=event_stripe_color(theme, item), width=EVENT_STRIPE_WIDTH, cursor="hand2")
+        stripe.pack(side="left", fill="y")
+        stripe.pack_propagate(False)
+        check = TaskCheck(
+            row,
+            self.master_app,
+            done=item.done,
+            background=background,
+            command=lambda event=item: self.master_app.toggle_done(event),
+            height=58,
+        )
+        check.pack(side="left", fill="y", padx=(3, 0))
+        content = tk.Frame(row, bg=background, padx=2, pady=6, cursor="hand2")
+        content.pack(side="left", fill="both", expand=True)
+        if theme.style == "aero":
+            tk.Frame(
+                content,
+                bg=blend(background, theme.control_highlight, 0.58),
+                height=1,
+            ).pack(fill="x", pady=(0, 3))
+        title_row = tk.Frame(content, bg=background, cursor="hand2")
+        title_row.pack(fill="x")
+        title = tk.Label(
+            title_row,
+            text=truncate(item.title, 31),
+            bg=background,
+            fg=theme.text_done if item.done else theme.text_primary,
+            font=(FONT, 9, "overstrike" if item.done else "normal"),
+            anchor="w",
+            cursor="hand2",
+        )
+        title.pack(side="left", fill="x", expand=True)
+
+        source_badge = None
+        if item.end_as_ddl:
+            badge_style = event_type_badge_style(theme, item.event_type)
+            if badge_style:
+                badge_text, badge_background, badge_border = badge_style
+            else:
+                badge_text = theme.event_type_general
+                badge_background = theme.panel_secondary
+                badge_border = theme.divider
+            source_badge = tk.Label(
+                title_row,
+                text=EVENT_TYPE_LABELS[item.event_type],
+                bg=badge_background,
+                fg=badge_text,
+                font=(FONT, 7),
+                padx=4,
+                highlightthickness=1,
+                highlightbackground=badge_border,
+                cursor="hand2",
+            )
+            source_badge.pack(side="right", padx=(4, 0))
+
+        deadline = self.master_app.store.event_ends_at(item)
+        reference = datetime.now()
+        date_text = ddl_display_datetime(deadline, reference)
+        if not item.has_time:
+            date_text = date_text.rsplit(" ", 1)[0]
+        status_text = "已完成" if item.done else ddl_relative_label(deadline, reference)
+        meta_row = tk.Frame(content, bg=background, cursor="hand2")
+        meta_row.pack(fill="x", pady=(3, 0))
+        date_label = tk.Label(
+            meta_row,
+            text=date_text,
+            bg=background,
+            fg=theme.text_done if item.done else theme.schedule_time_text,
+            font=(FONT, 8),
+            anchor="w",
+            cursor="hand2",
+        )
+        date_label.pack(side="left")
+
+        status_background = background
+        status_border = background
+        status_color = theme.schedule_time_text
+        if item.done:
+            status_color = theme.text_done
+        elif group_name == "overdue":
+            status_background = theme.danger_soft
+            status_border = theme.event_type_ddl_border
+            status_color = theme.danger
+        elif group_name == "due_soon":
+            status_background = theme.event_type_urgent_background
+            status_border = theme.event_type_urgent_border
+            status_color = theme.event_type_urgent
+        status = tk.Label(
+            meta_row,
+            text=status_text,
+            bg=status_background,
+            fg=status_color,
+            font=(FONT, 7, "bold" if group_name in ("overdue", "due_soon") and not item.done else "normal"),
+            padx=4,
+            highlightthickness=1 if status_border != background else 0,
+            highlightbackground=status_border,
+            cursor="hand2",
+        )
+        status.pack(side="left", padx=(7, 0))
+
+        actions = tk.Frame(row, bg=background, padx=5, cursor="hand2")
+        actions.pack(side="right", fill="y")
+        open_hint = tk.Label(actions, text="›", bg=background, fg=theme.text_muted, font=(FONT, 12), cursor="hand2")
+        open_hint.pack(pady=(7, 0))
+        delete = tk.Label(actions, text="删除", bg=background, fg=theme.text_muted, font=(FONT, 7), cursor="hand2")
+        delete.pack(pady=(0, 4))
+
+        surface_widgets = [row, check, content, title_row, title, meta_row, date_label, actions, open_hint, delete]
+        interactive = [row, stripe, content, title_row, title, meta_row, date_label, status, actions, open_hint]
+        if source_badge:
+            interactive.append(source_badge)
+        for widget in interactive + [check, delete]:
+            widget.bind(
+                "<Enter>",
+                lambda _event, widgets=surface_widgets, task_check=check, normal=background, edge=border: self._set_row_state(
+                    row, widgets, task_check, normal, edge, "hover"
+                ),
+            )
+            widget.bind(
+                "<Leave>",
+                lambda _event, widgets=surface_widgets, task_check=check, normal=background, edge=border: self._set_row_state(
+                    row, widgets, task_check, normal, edge, "normal"
+                ),
+            )
+            widget.bind("<MouseWheel>", self._scroll)
+        for widget in interactive:
+            widget.bind(
+                "<Button-1>",
+                lambda _event, event=item, widgets=surface_widgets, task_check=check, normal=background, edge=border: self._open_item(
+                    event, row, widgets, task_check, normal, edge
+                ),
+            )
+        delete.bind("<Button-1>", lambda _event, event=item: self.master_app._confirm_delete(event, parent=self))
+        delete.bind("<Enter>", lambda _event: delete.configure(fg=theme.danger), add="+")
+        delete.bind("<Leave>", lambda _event: delete.configure(fg=theme.text_muted), add="+")
+
+    def _set_row_state(
+        self,
+        row: tk.Frame,
+        widgets: list[tk.Widget],
+        check: TaskCheck,
+        normal_background: str,
+        normal_border: str,
+        state: str,
+    ) -> None:
+        theme = current_theme()
+        if state == "pressed":
+            background = blend(normal_background, theme.control_pressed, 0.24)
+            border = theme.control_border
+        elif state == "hover":
+            background = blend(normal_background, theme.schedule_card_hover, 0.56)
+            border = theme.control_border
+        else:
+            background = normal_background
+            border = normal_border
+        row.configure(highlightbackground=border)
+        for widget in widgets:
+            widget.configure(bg=background)
+        check.draw()
+
+    def _open_item(
+        self,
+        item: Event,
+        row: tk.Frame,
+        widgets: list[tk.Widget],
+        check: TaskCheck,
+        background: str,
+        border: str,
+    ) -> None:
+        self._set_row_state(row, widgets, check, background, border, "pressed")
+        self.master_app.open_editor(item)
+
+    def _toggle_completed(self) -> None:
+        self.completed_open = not self.completed_open
+        self.refresh()
+
+    def _scroll(self, event: tk.Event) -> str:
+        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+        return "break"
+
+    def _update_scrollbar(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.list_inner.update_idletasks()
+        bbox = self.canvas.bbox("all")
+        needs_scroll = bool(bbox and bbox[3] > self.canvas.winfo_height())
+        if needs_scroll and not self.scrollbar.winfo_manager():
+            self.scrollbar.pack(side="right", fill="y")
+        elif not needs_scroll and self.scrollbar.winfo_manager():
+            self.scrollbar.pack_forget()
+
+    def close(self) -> None:
+        if self.master_app.ddl_list_window is self:
+            self.master_app.ddl_list_window = None
+        self.destroy()
+        self.master_app.after(120, self.master_app.apply_window_mode)
+
+
 class UpcomingDialog(tk.Toplevel):
     def __init__(self, master: "CalendarApp") -> None:
         super().__init__(master)
@@ -1812,6 +2274,7 @@ class CalendarApp(tk.Tk):
         self.routine_manager: Optional[RoutineManager] = None
         self.routine_editor: Optional[RoutineEditor] = None
         self.day_detail_window: Optional[DayDetailDialog] = None
+        self.ddl_list_window: Optional[DDLListDialog] = None
         self.update_dialog: Optional[UpdateProgressDialog] = None
         self.update_busy = False
         self._dpi_check_job: Optional[str] = None
@@ -1897,6 +2360,23 @@ class CalendarApp(tk.Tk):
             fieldbackground=[("readonly", self.theme.input_background)],
             selectbackground=[("readonly", self.theme.input_background)],
             selectforeground=[("readonly", self.theme.text_primary)],
+        )
+        style.configure(
+            "DDL.Vertical.TScrollbar",
+            width=self.dpi.px(9),
+            background=self.theme.control_background,
+            troughcolor=self.theme.panel_background,
+            bordercolor=self.theme.divider,
+            arrowcolor=self.theme.control_text,
+            relief="flat",
+        )
+        style.map(
+            "DDL.Vertical.TScrollbar",
+            background=[
+                ("pressed", self.theme.control_pressed),
+                ("active", self.theme.control_hover),
+            ],
+            arrowcolor=[("disabled", self.theme.text_disabled)],
         )
 
     def _apply_theme_opacity(self, value: Optional[float] = None) -> None:
@@ -2208,6 +2688,21 @@ class CalendarApp(tk.Tk):
         self.upcoming_label.pack(side="left")
         self.upcoming_label.bind("<Button-1>", lambda _event: UpcomingDialog(self))
         Tooltip(self.upcoming_label, "查看未来 7 天和已逾期日程")
+        self.ddl_list_label = tk.Label(
+            self.footer_frame,
+            text=f"{DDL_LIST_ENTRY_LABEL} ›",
+            bg=theme.schedule_background,
+            fg=theme.text_secondary,
+            font=(FONT, 8),
+            cursor="hand2",
+            padx=dp(3),
+        )
+        self.ddl_list_label.pack(side="left", fill="y", padx=(dp(6), 0))
+        self.ddl_list_label.bind("<Enter>", lambda _event: self._set_ddl_list_entry_state("hover"))
+        self.ddl_list_label.bind("<Leave>", lambda _event: self._set_ddl_list_entry_state("normal"))
+        self.ddl_list_label.bind("<ButtonPress-1>", lambda _event: self._set_ddl_list_entry_state("pressed"))
+        self.ddl_list_label.bind("<ButtonRelease-1>", self._activate_ddl_list_entry)
+        Tooltip(self.ddl_list_label, "查看全部未完成和已完成 DDL")
         tk.Label(self.footer_frame, text="双击日期查看详情", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8)).pack(side="right")
 
         self.collapsible_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background)
@@ -2450,6 +2945,8 @@ class CalendarApp(tk.Tk):
         self.render_agenda()
         if self.day_detail_window and self.day_detail_window.winfo_exists():
             self.day_detail_window.refresh()
+        if self.ddl_list_window and self.ddl_list_window.winfo_exists():
+            self.ddl_list_window.refresh()
 
     def _display_holiday(self, day: date) -> Optional[HolidayInfo]:
         custom_status = self.store.date_status(day)
@@ -2803,6 +3300,14 @@ class CalendarApp(tk.Tk):
         send_to_desktop(self)
         self.routine_manager = RoutineManager(self)
 
+    def open_ddl_list(self) -> None:
+        if self.ddl_list_window and self.ddl_list_window.winfo_exists():
+            self.present_overlay(self.ddl_list_window)
+            return
+        self.attributes("-topmost", False)
+        send_to_desktop(self)
+        self.ddl_list_window = DDLListDialog(self)
+
     def open_routine_editor(self, item: Optional[RoutineItem] = None) -> None:
         if self.routine_editor and self.routine_editor.winfo_exists():
             self.present_overlay(self.routine_editor)
@@ -3138,6 +3643,26 @@ class CalendarApp(tk.Tk):
 
     def _focus_quick_entry(self) -> None:
         self.quick_entry.focus_set()
+
+    def _set_ddl_list_entry_state(self, state: str) -> None:
+        if not hasattr(self, "ddl_list_label") or not self.ddl_list_label.winfo_exists():
+            return
+        if state == "pressed":
+            background = self.theme.control_pressed
+            foreground = self.theme.accent
+        elif state == "hover":
+            background = self.theme.control_hover
+            foreground = self.theme.accent
+        else:
+            background = self.theme.schedule_background
+            foreground = self.theme.text_secondary
+        self.ddl_list_label.configure(bg=background, fg=foreground)
+
+    def _activate_ddl_list_entry(self, event: tk.Event) -> None:
+        inside = 0 <= event.x < self.ddl_list_label.winfo_width() and 0 <= event.y < self.ddl_list_label.winfo_height()
+        self._set_ddl_list_entry_state("hover" if inside else "normal")
+        if inside:
+            self.open_ddl_list()
 
     def show_main_menu(self) -> None:
         menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
