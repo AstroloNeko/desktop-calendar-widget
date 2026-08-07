@@ -1393,7 +1393,7 @@ class DayDetailDialog(tk.Toplevel):
             footer,
             self.master_app,
             "＋ 新增事项",
-            lambda: self.master_app.open_editor(selected=self.day),
+            self._add_event,
             width=102,
             height=32,
             font_size=9,
@@ -1421,6 +1421,9 @@ class DayDetailDialog(tk.Toplevel):
     def set_day(self, day: date) -> None:
         self.day = day
         self.refresh()
+
+    def _add_event(self) -> None:
+        self.master_app.open_new_event(self.day)
 
     def refresh(self) -> None:
         if not self.winfo_exists():
@@ -1948,7 +1951,7 @@ class CalendarApp(tk.Tk):
             self.agenda_bar,
             self,
             "+",
-            self.open_day_detail,
+            self.open_new_event,
             width=28,
             height=25,
             font_size=13,
@@ -2686,6 +2689,9 @@ class CalendarApp(tk.Tk):
         self.attributes("-topmost", False)
         send_to_desktop(self)
         self.editor_window = EventEditor(self, selected or (event.due_date if event else self.selected), event)
+
+    def open_new_event(self, selected: Optional[date] = None) -> None:
+        self.open_editor(selected=selected or self.selected)
 
     def open_day_detail(self, day: Optional[date] = None) -> None:
         target_day = day or self.selected

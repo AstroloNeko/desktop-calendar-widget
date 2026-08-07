@@ -1,7 +1,16 @@
 import unittest
 from datetime import date
 
-from app import CalendarApp, DayCell, EVENT_STRIPE_WIDTH, event_stripe_color, main_region_visibility, parse_event_due
+from app import (
+    CalendarApp,
+    DayCell,
+    DayDetailDialog,
+    EVENT_STRIPE_WIDTH,
+    EventEditor,
+    event_stripe_color,
+    main_region_visibility,
+    parse_event_due,
+)
 from calendar_core import Event
 
 
@@ -113,6 +122,83 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertEqual(result, "break")
         self.assertEqual(selected, [date(2026, 8, 5)])
         self.assertEqual(details, [date(2026, 8, 5)])
+
+    def test_main_add_entry_opens_editor_for_selected_date(self) -> None:
+        opened: list[date] = []
+        selected_day = date(2026, 8, 7)
+
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "selected": selected_day,
+                "open_editor": lambda self, **kwargs: opened.append(kwargs["selected"]),
+            },
+        )()
+
+        CalendarApp.open_new_event(fake)
+        self.assertEqual(opened, [selected_day])
+
+    def test_day_detail_add_entry_opens_editor_for_detail_date(self) -> None:
+        opened: list[date] = []
+        detail_day = date(2026, 8, 8)
+
+        master = type("FakeCalendar", (), {"open_new_event": lambda self, day: opened.append(day)})()
+        detail = type("FakeDetail", (), {"master_app": master, "day": detail_day})()
+
+        DayDetailDialog._add_event(detail)
+        self.assertEqual(opened, [detail_day])
+
+    def test_editor_close_refreshes_existing_day_detail(self) -> None:
+        actions: list[str] = []
+
+        class FakeDetail:
+            def winfo_exists(self) -> bool:
+                return True
+
+            def refresh(self) -> None:
+                actions.append("refresh")
+
+        class FakeMaster:
+            editor_window = None
+            day_detail_window = FakeDetail()
+
+            def after(self, _delay: int, callback) -> None:
+                callback()
+
+            def present_overlay(self, _window) -> None:
+                actions.append("present")
+
+        master = FakeMaster()
+        editor = type("FakeEditor", (), {"master_app": master, "destroy": lambda self: actions.append("destroy")})()
+        master.editor_window = editor
+
+        EventEditor.close(editor)
+
+        self.assertIsNone(master.editor_window)
+        self.assertEqual(actions, ["destroy", "refresh", "present"])
+
+    def test_editor_cancel_without_detail_only_returns_to_main_window(self) -> None:
+        actions: list[str] = []
+
+        class FakeMaster:
+            editor_window = None
+            day_detail_window = None
+
+            def after(self, _delay: int, callback) -> None:
+                callback()
+
+            def apply_window_mode(self) -> None:
+                actions.append("main")
+
+        master = FakeMaster()
+        editor = type("FakeEditor", (), {"master_app": master, "destroy": lambda self: actions.append("destroy")})()
+        master.editor_window = editor
+
+        EventEditor.close(editor)
+
+        self.assertIsNone(master.editor_window)
+        self.assertEqual(actions, ["destroy", "main"])
 
     def test_event_stripe_uses_item_color_independently_from_type(self) -> None:
         theme = type("FakeTheme", (), {"event_done": "#A0A0A0"})()
