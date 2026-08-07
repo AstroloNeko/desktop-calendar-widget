@@ -350,3 +350,44 @@ def draw_calendar_date_ring(
             width=1,
             tags=tags,
         )
+
+
+def draw_calendar_today_accent(
+    canvas: tk.Canvas,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    color: str,
+    highlight: str | None = None,
+    tags: str | Iterable[str] = "date_today_marker",
+) -> None:
+    """Add a compact warm marker inside a selected date without another ring."""
+    left, right = sorted((round(x1), round(x2)))
+    top, bottom = sorted((round(y1), round(y2)))
+    if right - left < 10 or bottom <= top:
+        return
+    center = (left + right) // 2
+    marker_y = top + 3
+    if highlight:
+        canvas.create_line(
+            center - 4,
+            marker_y + 1,
+            center + 4,
+            marker_y + 1,
+            fill=highlight,
+            width=1,
+            capstyle="round",
+            tags=tags,
+        )
+    canvas.create_line(
+        center - 4,
+        marker_y,
+        center + 4,
+        marker_y,
+        fill=color,
+        width=2,
+        capstyle="round",
+        tags=tags,
+    )
