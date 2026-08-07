@@ -375,6 +375,131 @@ class StoreTests(unittest.TestCase):
         item.done = True
         self.assertEqual(store.grouped_ddl_events(now), ([], []))
 
+    def test_multiday_event_does_not_create_deadline_by_default(self):
+        store = Store(self.data_file)
+        item = Event("span", "普通多日事项", "2026-08-05T10:00", duration_days=3)
+        store.events = [item]
+        self.assertFalse(store.has_ddl_on(date(2026, 8, 7)))
+        self.assertEqual(store.ddl_events(datetime(2026, 8, 5, 9, 0)), [])
+
+    def test_end_as_ddl_round_trips_and_legacy_events_default_to_false(self):
+        store = Store(self.data_file)
+        store.upsert(Event("endpoint", "末日截止", "2026-08-05T10:00", duration_days=3, end_as_ddl=True))
+        self.assertTrue(Store(self.data_file).events[0].end_as_ddl)
+
+        self.data_file.write_text(
+            json.dumps({"events": [{"id": "legacy", "title": "旧事项", "due": "2026-08-05T10:00", "duration_days": 3}]}),
+            encoding="utf-8",
+        )
+        self.assertFalse(Store(self.data_file).events[0].end_as_ddl)
+
+    def test_end_as_ddl_marks_only_the_actual_last_day(self):
+        store = Store(self.data_file)
+        item = Event("span", "末日截止", "2026-08-05T10:00", duration_days=3, end_as_ddl=True)
+        store.events = [item]
+        self.assertFalse(store.has_ddl_on(date(2026, 8, 5)))
+        self.assertFalse(store.has_ddl_on(date(2026, 8, 6)))
+        self.assertTrue(store.has_ddl_on(date(2026, 8, 7)))
+        self.assertEqual([entry.id for entry in store.ddl_events(datetime(2026, 8, 5, 9, 0))], ["span"])
+
+    def test_end_as_ddl_enters_regular_deadline_list(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 5, 9, 0)
+        item = Event("regular", "普通 DDL", "2026-08-05T10:00", duration_days=3, end_as_ddl=True)
+        store.events = [item]
+        pinned, regular = store.grouped_ddl_events(now)
+        self.assertEqual(pinned, [])
+        self.assertEqual([entry.id for entry in regular], ["regular"])
+
+    def test_end_as_ddl_enters_pinned_list_within_24_hours(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 5, 12, 0)
+        item = Event("soon", "即将截止", "2026-08-05T10:00", duration_days=2, end_as_ddl=True)
+        store.events = [item]
+        pinned, regular = store.grouped_ddl_events(now)
+        self.assertEqual([entry.id for entry in pinned], ["soon"])
+        self.assertEqual(regular, [])
+
+    def test_overdue_end_as_ddl_is_pinned_first(self):
+        store = Store(self.data_file)
+        now = datetime(2026, 8, 8, 12, 0)
+        overdue = Event("late", "已经逾期", "2026-08-05T10:00", duration_days=2, end_as_ddl=True)
+        later = Event("later", "以后截止", "2026-08-08T13:00", duration_days=2, end_as_ddl=True)
+        store.events = [later, overdue]
+        pinned, regular = store.grouped_ddl_events(now)
+        self.assertEqual([entry.id for entry in pinned], ["late"])
+        self.assertEqual([entry.id for entry in regular], ["later"])
+
+    def test_deadline_groups_never_duplicate_end_as_ddl_event(self):
+        store = Store(self.data_file)
+        item = Event("once", "只出现一次", "2026-08-05T10:00", duration_days=2, end_as_ddl=True)
+        store.events = [item]
+        pinned, regular = store.grouped_ddl_events(datetime(2026, 8, 5, 12, 0))
+        self.assertEqual([entry.id for entry in pinned + regular].count("once"), 1)
+        self.assertFalse({entry.id for entry in pinned} & {entry.id for entry in regular})
+
+    def test_general_and_urgent_keep_their_type_with_end_deadline(self):
+        store = Store(self.data_file)
+        general = Event("general-end", "一般末日", "2026-08-05T10:00", duration_days=2, event_type="general", end_as_ddl=True)
+        urgent = Event("urgent-end", "紧急末日", "2026-08-05T11:00", duration_days=2, event_type="urgent", end_as_ddl=True)
+        store.events = [general, urgent]
+        self.assertEqual(general.event_type, "general")
+        self.assertEqual(urgent.event_type, "urgent")
+        self.assertEqual({entry.id for entry in store.ddl_events(datetime(2026, 8, 5, 9, 0))}, {"general-end", "urgent-end"})
+
+    def test_ddl_type_uses_one_end_deadline_without_extra_flag(self):
+        store = Store(self.data_file)
+        item = Event("ddl", "原生 DDL", "2026-08-05T10:00", duration_days=3, event_type="ddl", end_as_ddl=True)
+        store.events = [item]
+        self.assertFalse(item.end_as_ddl)
+        self.assertFalse(store.has_ddl_on(date(2026, 8, 5)))
+        self.assertTrue(store.has_ddl_on(date(2026, 8, 7)))
+        self.assertEqual([entry.id for entry in store.ddl_events()], ["ddl"])
+
+    def test_workday_end_deadline_uses_last_generated_weekday(self):
+        store = Store(self.data_file)
+        item = Event(
+            "weekend",
+            "跨周末",
+            "2026-08-07T10:00",
+            duration_days=2,
+            skip_non_working_days=True,
+            end_as_ddl=True,
+        )
+        store.events = [item]
+        self.assertFalse(store.has_ddl_on(date(2026, 8, 8)))
+        self.assertTrue(store.has_ddl_on(date(2026, 8, 10)))
+
+    def test_workday_end_deadline_uses_last_generated_day_after_holiday(self):
+        store = Store(self.data_file)
+        item = Event(
+            "holiday",
+            "跨节假日",
+            "2026-09-24T10:00",
+            duration_days=2,
+            skip_non_working_days=True,
+            end_as_ddl=True,
+        )
+        store.events = [item]
+        self.assertTrue(store.has_ddl_on(date(2026, 9, 28)))
+        self.assertFalse(store.has_ddl_on(date(2026, 9, 25)))
+
+    def test_changing_duration_moves_end_deadline(self):
+        store = Store(self.data_file)
+        store.upsert(Event("move", "修改持续时间", "2026-08-05T10:00", duration_days=2, end_as_ddl=True))
+        self.assertTrue(store.has_ddl_on(date(2026, 8, 6)))
+        store.upsert(Event("move", "修改持续时间", "2026-08-05T10:00", duration_days=4, end_as_ddl=True))
+        self.assertFalse(store.has_ddl_on(date(2026, 8, 6)))
+        self.assertTrue(store.has_ddl_on(date(2026, 8, 8)))
+
+    def test_deleting_event_removes_end_deadline(self):
+        store = Store(self.data_file)
+        store.upsert(Event("delete", "删除末日", "2026-08-05T10:00", duration_days=2, end_as_ddl=True))
+        self.assertTrue(store.has_ddl_on(date(2026, 8, 6)))
+        store.delete("delete")
+        self.assertFalse(store.has_ddl_on(date(2026, 8, 6)))
+        self.assertEqual(store.ddl_events(), [])
+
     def test_upcoming_includes_overdue_and_next_week(self):
         store = Store(self.data_file)
         now = datetime.now().replace(second=0, microsecond=0)
@@ -424,6 +549,95 @@ class StoreTests(unittest.TestCase):
         loaded = Store(self.data_file)
         self.assertEqual(len(loaded.routines), 1)
         self.assertTrue(loaded.routines[0].is_done_on(date(2026, 8, 4)))
+
+    def test_legacy_routine_defaults_to_no_reminder(self):
+        self.data_file.write_text(
+            json.dumps({"routines": [{"id": "legacy", "title": "旧习惯", "created_on": "2026-08-03"}]}),
+            encoding="utf-8",
+        )
+        item = Store(self.data_file).routines[0]
+        self.assertFalse(item.reminder_enabled)
+        self.assertIsNone(item.reminder_time)
+
+    def test_invalid_routine_reminder_time_is_safely_disabled(self):
+        item = RoutineItem.from_dict(
+            {
+                "id": "invalid-time",
+                "title": "无效提醒",
+                "created_on": "2026-08-03",
+                "reminder_enabled": True,
+                "reminder_time": "25:99",
+            }
+        )
+        self.assertFalse(item.reminder_enabled)
+        self.assertIsNone(item.reminder_time)
+
+    def test_disabled_routine_reminder_is_not_due(self):
+        store = Store(self.data_file)
+        store.routines = [RoutineItem("off", "不提醒", created_on="2026-08-03", reminder_time="09:00")]
+        self.assertEqual(store.due_routine_reminders(datetime(2026, 8, 5, 10, 0)), [])
+
+    def test_enabled_routine_reminder_is_due_once(self):
+        store = Store(self.data_file)
+        item = RoutineItem("on", "提醒", created_on="2026-08-03", reminder_enabled=True, reminder_time="09:00")
+        store.routines = [item]
+        now = datetime(2026, 8, 5, 9, 0)
+        self.assertEqual([entry.id for entry in store.due_routine_reminders(now)], ["on"])
+        store.notified.add(store.routine_notification_key(item, now.date()))
+        self.assertEqual(store.due_routine_reminders(now), [])
+
+    def test_changing_routine_reminder_time_replaces_schedule(self):
+        store = Store(self.data_file)
+        original = RoutineItem("habit", "提醒", created_on="2026-08-03", reminder_enabled=True, reminder_time="09:00")
+        store.upsert_routine(original)
+        old_key = store.routine_notification_key(original, date(2026, 8, 5))
+        store.notified.add(old_key)
+        edited = RoutineItem("habit", "提醒", created_on="2026-08-03", reminder_enabled=True, reminder_time="10:00")
+        store.upsert_routine(edited)
+        self.assertNotIn(old_key, store.notified)
+        self.assertEqual(store.due_routine_reminders(datetime(2026, 8, 5, 9, 30)), [])
+        self.assertEqual([entry.id for entry in store.due_routine_reminders(datetime(2026, 8, 5, 10, 0))], ["habit"])
+
+    def test_disabling_routine_reminder_clears_notification_state(self):
+        store = Store(self.data_file)
+        original = RoutineItem("habit", "提醒", created_on="2026-08-03", reminder_enabled=True, reminder_time="09:00")
+        store.upsert_routine(original)
+        key = store.routine_notification_key(original, date(2026, 8, 5))
+        store.notified.add(key)
+        store.upsert_routine(RoutineItem("habit", "提醒", created_on="2026-08-03", reminder_enabled=False, reminder_time="09:00"))
+        self.assertNotIn(key, store.notified)
+        self.assertEqual(store.due_routine_reminders(datetime(2026, 8, 5, 10, 0)), [])
+
+    def test_deleting_routine_clears_notification_state(self):
+        store = Store(self.data_file)
+        item = RoutineItem("habit", "提醒", created_on="2026-08-03", reminder_enabled=True, reminder_time="09:00")
+        store.upsert_routine(item)
+        key = store.routine_notification_key(item, date(2026, 8, 5))
+        store.notified.add(key)
+        store.delete_routine(item.id)
+        self.assertNotIn(key, store.notified)
+        self.assertEqual(store.routines, [])
+
+    def test_routine_reminder_skips_non_workday(self):
+        store = Store(self.data_file)
+        store.routines = [RoutineItem("habit", "提醒", created_on="2026-08-03", reminder_enabled=True, reminder_time="09:00")]
+        self.assertEqual(store.due_routine_reminders(datetime(2026, 8, 8, 10, 0)), [])
+
+    def test_completed_routine_does_not_remind_later_that_day(self):
+        store = Store(self.data_file)
+        item = RoutineItem("habit", "提醒", created_on="2026-08-03", reminder_enabled=True, reminder_time="18:00")
+        store.routines = [item]
+        store.toggle_routine(item, date(2026, 8, 5))
+        self.assertEqual(store.due_routine_reminders(datetime(2026, 8, 5, 18, 0)), [])
+
+    def test_routine_reminder_fields_round_trip(self):
+        store = Store(self.data_file)
+        store.upsert_routine(
+            RoutineItem("habit", "提醒", created_on="2026-08-03", reminder_enabled=True, reminder_time="07:30")
+        )
+        loaded = Store(self.data_file).routines[0]
+        self.assertTrue(loaded.reminder_enabled)
+        self.assertEqual(loaded.reminder_time, "07:30")
 
 
 if __name__ == "__main__":

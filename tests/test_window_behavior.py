@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, datetime
 
 from app import (
     CalendarApp,
@@ -7,11 +7,12 @@ from app import (
     DayDetailDialog,
     EVENT_STRIPE_WIDTH,
     EventEditor,
+    ROUTINE_ENTRY_LABEL,
     event_stripe_color,
     main_region_visibility,
     parse_event_due,
 )
-from calendar_core import Event
+from calendar_core import Event, RoutineItem
 
 
 class _AvailableTray:
@@ -38,6 +39,63 @@ class _FakeCalendar:
 
 
 class WindowBehaviorTests(unittest.TestCase):
+    def test_main_routine_entry_uses_habit_module_label(self) -> None:
+        self.assertEqual(ROUTINE_ENTRY_LABEL, "习惯")
+
+    def test_routine_entry_opens_existing_habit_manager(self) -> None:
+        presented: list[object] = []
+
+        class FakeManager:
+            def winfo_exists(self) -> bool:
+                return True
+
+        manager = FakeManager()
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "routine_manager": manager,
+                "present_overlay": lambda self, window: presented.append(window),
+            },
+        )()
+
+        CalendarApp.open_routine_manager(fake)
+        self.assertEqual(presented, [manager])
+
+    def test_routine_scheduler_marks_each_due_item_and_notifies_once(self) -> None:
+        now = datetime(2026, 8, 5, 9, 0)
+        first = RoutineItem("first", "第一个习惯", reminder_enabled=True, reminder_time="09:00")
+        second = RoutineItem("second", "第二个习惯", reminder_enabled=True, reminder_time="08:30")
+        notified: set[str] = set()
+        shown: list[list[RoutineItem]] = []
+
+        class FakeStore:
+            def due_routine_reminders(self, _now: datetime) -> list[RoutineItem]:
+                return [first, second]
+
+            def routine_notification_key(self, item: RoutineItem, day: date) -> str:
+                return f"routine:{item.id}:{day.isoformat()}:{item.reminder_time}"
+
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "store": FakeStore(),
+                "show_routine_notification": lambda self, items: shown.append(items),
+            },
+        )()
+        fake.store.notified = notified
+
+        self.assertTrue(CalendarApp._check_routine_reminder(fake, now))
+        self.assertEqual(
+            notified,
+            {
+                "routine:first:2026-08-05:09:00",
+                "routine:second:2026-08-05:08:30",
+            },
+        )
+        self.assertEqual(shown, [[first, second]])
+
     def test_collapsed_layout_keeps_quick_add_and_pinned_ddl_visible(self) -> None:
         visible = main_region_visibility(False, pinned_ddl_count=2, regular_ddl_count=3)
         self.assertTrue(visible.pinned_ddl)
