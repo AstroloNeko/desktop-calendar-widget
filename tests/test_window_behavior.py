@@ -10,6 +10,8 @@ from app import (
     EVENT_STRIPE_WIDTH,
     EventEditor,
     ROUTINE_ENTRY_LABEL,
+    ddl_display_datetime,
+    ddl_list_logical_height,
     ddl_relative_label,
     event_stripe_color,
     main_region_visibility,
@@ -51,6 +53,20 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertEqual(ddl_relative_label(datetime(2026, 8, 7, 18, 0), now), "今天")
         self.assertEqual(ddl_relative_label(datetime(2026, 8, 8, 9, 0), now), "明天")
         self.assertEqual(ddl_relative_label(datetime(2026, 8, 10, 9, 0), now), "3天后")
+
+    def test_ddl_display_datetime_is_compact_but_keeps_other_year(self) -> None:
+        now = datetime(2026, 8, 7, 12, 0)
+        self.assertEqual(ddl_display_datetime(datetime(2026, 8, 10, 18, 30), now), "8月10日 18:30")
+        self.assertEqual(ddl_display_datetime(datetime(2027, 1, 2, 9, 5), now), "2027年1月2日 09:05")
+
+    def test_ddl_list_height_adapts_and_caps_long_collections(self) -> None:
+        self.assertEqual(ddl_list_logical_height(0, 0, 1, 0, False), 250)
+        self.assertEqual(ddl_list_logical_height(0, 0, 0, 8, False), 250)
+        self.assertGreater(
+            ddl_list_logical_height(0, 0, 0, 8, True),
+            ddl_list_logical_height(0, 0, 0, 8, False),
+        )
+        self.assertEqual(ddl_list_logical_height(4, 4, 12, 8, True), 590)
 
     def test_ddl_entry_reuses_existing_complete_list_window(self) -> None:
         presented: list[object] = []
