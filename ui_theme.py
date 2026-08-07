@@ -335,13 +335,123 @@ WIN7_AERO = Theme(
 )
 
 
-THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO)}
+PAPER = Theme(
+    name="paper",
+    display_name="Paper",
+    style="paper",
+    window_background="#E1D8CA",
+    window_border_outer="#A99E8E",
+    window_border_inner="#FBF6EC",
+    window_shadow="#BDB3A5",
+    panel_background="#F5EFE4",
+    panel_secondary="#ECE3D5",
+    divider="#D9CFC0",
+    header_background="#EEE3D2",
+    header_gradient_start="#FAF4E9",
+    header_gradient_mid="#F1E7D7",
+    header_gradient_end="#E7DAC6",
+    header_highlight="#FFFDF8",
+    header_border="#D3C5B1",
+    header_shadow="#C6B7A1",
+    header_text="#40382F",
+    header_subtext="#7D7367",
+    text_primary="#403A33",
+    text_secondary="#766D63",
+    text_muted="#A1988C",
+    text_disabled="#C0B7AA",
+    text_on_accent="#FFF9F1",
+    control_background="#EEE5D8",
+    control_hover="#E8DACA",
+    control_pressed="#DDCDB8",
+    control_border="#CDBFAC",
+    control_highlight="#FFFDF7",
+    control_disabled="#EAE3D8",
+    control_text="#665E55",
+    calendar_background="#FBF7EF",
+    weekday_text="#958A7C",
+    date_text="#403A33",
+    date_other_month="#B9AFA2",
+    date_hover_background="#F3E8D9",
+    date_hover_border="#DDCDB7",
+    date_selected_background="#617663",
+    date_selected_border="#526657",
+    date_selected_gradient_start="#637865",
+    date_selected_gradient_end="#5E7260",
+    date_selected_inner_border="#849786",
+    date_today_background="#FFF1DB",
+    date_today_border="#C57B42",
+    date_event_indicator="#A8683C",
+    date_weekend_text="#A16056",
+    date_selected_today="#D6924E",
+    schedule_background="#F5EFE4",
+    schedule_card_background="#FCF8F0",
+    schedule_card_hover="#F7F0E5",
+    schedule_card_border="#DED4C5",
+    schedule_time_text="#80766B",
+    input_background="#FFFDF7",
+    input_border="#CFC2B0",
+    input_hover_border="#B9A993",
+    input_focus="#A96136",
+    accent="#A96136",
+    accent_hover="#94542F",
+    accent_soft="#F0DDCA",
+    danger="#9D5047",
+    danger_soft="#F5E4DF",
+    ddl_indicator="#9D5047",
+    ddl_indicator_highlight="#DDB9AF",
+    event_type_general="#8B8175",
+    event_type_urgent="#A96A3D",
+    event_type_ddl="#9D5047",
+    event_type_urgent_background="#F5E8D9",
+    event_type_urgent_border="#DEC0A0",
+    event_type_ddl_background="#F5E4DF",
+    event_type_ddl_border="#D9B4AC",
+    ddl_pinned_background="#F7EBE5",
+    ddl_pinned_border="#D9BDB3",
+    ddl_regular_background="#F1E9DE",
+    ddl_regular_border="#D8CDBF",
+    ddl_overdue_background="#F4E0DC",
+    ddl_due_background="#F5E7D7",
+    checkbox_border="#B9AD9D",
+    checkbox_checked="#8E8376",
+    date_leave_indicator="#A66D50",
+    date_holiday_indicator="#9E6751",
+    quick_success="#668775",
+    weekend="#A16056",
+    holiday_workday="#A96835",
+    holiday_festival="#866F88",
+    tooltip_background="#453E36",
+    tooltip_text="#FFF9F1",
+    card_done_background="#EEE8DE",
+    event_done="#B7AEA2",
+    text_done="#948C82",
+    todo_tag_background="#F1E2C4",
+    todo_tag_text="#966B28",
+    metrics=ThemeMetrics(
+        corner_radius=7,
+        control_radius=4,
+        date_radius=5,
+        outer_border_width=1,
+        inner_border_width=1,
+        control_height=26,
+        shadow_depth=1,
+        highlight_alpha=0.32,
+        animation_ms=90,
+    ),
+)
+
+
+THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER)}
 VALID_THEME_NAMES = tuple(THEMES)
 DEFAULT_THEME_NAME = MODERN.name
+LEGACY_THEME_ALIASES = {"aero": WIN7_AERO.name}
 
 
 def normalize_theme_name(value: object) -> str:
-    return value if isinstance(value, str) and value in THEMES else DEFAULT_THEME_NAME
+    if not isinstance(value, str):
+        return DEFAULT_THEME_NAME
+    normalized = LEGACY_THEME_ALIASES.get(value, value)
+    return normalized if normalized in THEMES else DEFAULT_THEME_NAME
 
 
 def get_theme(value: object) -> Theme:

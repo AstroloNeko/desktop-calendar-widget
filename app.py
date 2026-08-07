@@ -68,7 +68,7 @@ from ui_draw import (
     vertical_gradient,
     vertical_multi_gradient,
 )
-from ui_theme import Theme, get_theme, normalize_theme_name
+from ui_theme import THEMES, Theme, get_theme, normalize_theme_name
 
 
 WINDOW_WIDTH = 372
@@ -377,7 +377,7 @@ class ThemeButton(LogicalCanvas):
                 width=1,
             )
         y_offset = 1 if self.state == "pressed" else 0
-        text_color = self.foreground or (theme.text_on_accent if self.accented and theme.style == "flat" else theme.control_text)
+        text_color = self.foreground or (theme.text_on_accent if self.accented and theme.style != "aero" else theme.control_text)
         self.create_text(
             width / 2,
             height / 2 + y_offset,
@@ -580,6 +580,7 @@ class DayCell(LogicalCanvas):
             )
         if self.selected:
             selected_glass = theme.style == "aero"
+            selected_paper = theme.style == "paper"
             draw_calendar_date_state(
                 self,
                 center_x - DATE_STATE_HALF_WIDTH,
@@ -589,14 +590,14 @@ class DayCell(LogicalCanvas):
                 fill=theme.date_selected_background,
                 border=theme.date_selected_border,
                 radius=max(4, theme.metrics.date_radius - 1) if selected_glass else theme.metrics.date_radius,
-                gradient_start=theme.date_selected_gradient_start if selected_glass else None,
-                gradient_end=theme.date_selected_gradient_end if selected_glass else None,
-                inner_border=theme.date_selected_inner_border if selected_glass else None,
+                gradient_start=theme.date_selected_gradient_start if selected_glass or selected_paper else None,
+                gradient_end=theme.date_selected_gradient_end if selected_glass or selected_paper else None,
+                inner_border=theme.date_selected_inner_border if selected_glass or selected_paper else None,
                 top_highlight=blend(
                     theme.date_selected_gradient_start,
                     theme.control_highlight,
-                    0.18,
-                ) if selected_glass else None,
+                    0.18 if selected_glass else 0.10,
+                ) if selected_glass or selected_paper else None,
             )
         elif self.today:
             draw_calendar_date_state(
@@ -668,7 +669,7 @@ class DayCell(LogicalCanvas):
                 holiday_color = blend(
                     holiday_color,
                     theme.date_selected_border,
-                    0.22 if theme.style == "flat" else 0.15,
+                    0.15 if theme.style == "aero" else 0.22,
                 )
             self.create_text(
                 center_x,
@@ -678,7 +679,7 @@ class DayCell(LogicalCanvas):
                 font=(
                     FONT,
                     7 if len(self.holiday.short_name) <= 4 else 6,
-                    "normal" if theme.style == "flat" else "bold" if self.holiday.kind != "festival" else "normal",
+                    "bold" if theme.style == "aero" and self.holiday.kind != "festival" else "normal",
                 ),
                 tags="date_text",
             )
@@ -2039,9 +2040,9 @@ class CalendarApp(tk.Tk):
             width=28,
             height=25,
             font_size=13,
-            foreground=None if theme.style == "flat" else theme.control_text,
+            foreground=None if theme.style != "aero" else theme.control_text,
             surface_background=theme.schedule_background,
-            accented=theme.style == "flat",
+            accented=theme.style != "aero",
         )
         add.pack(side="right", pady=dp(4))
         routines = ThemeButton(
@@ -2052,7 +2053,7 @@ class CalendarApp(tk.Tk):
             width=43,
             height=25,
             font_size=8,
-            foreground=theme.text_secondary if theme.style == "flat" else theme.control_text,
+            foreground=theme.text_secondary if theme.style != "aero" else theme.control_text,
             surface_background=theme.schedule_background,
             outlined=True,
         )
@@ -2191,7 +2192,7 @@ class CalendarApp(tk.Tk):
             width=66,
             height=25 if theme.style == "aero" else 29,
             font_size=8,
-            foreground=theme.text_secondary if theme.style == "flat" else theme.control_text,
+            foreground=theme.text_secondary if theme.style != "aero" else theme.control_text,
             surface_background=theme.schedule_background,
             outlined=True,
         )
@@ -3031,11 +3032,11 @@ class CalendarApp(tk.Tk):
 
     def _update_mode_badge(self) -> None:
         if self.window_mode == "pinned":
-            self.mode_button.set_text("置顶", self.theme.accent if self.theme.style == "flat" else self.theme.control_text)
+            self.mode_button.set_text("置顶", self.theme.accent if self.theme.style != "aero" else self.theme.control_text)
         elif self.desktop_session_active:
-            self.mode_button.set_text("前台", self.theme.accent if self.theme.style == "flat" else self.theme.control_text)
+            self.mode_button.set_text("前台", self.theme.accent if self.theme.style != "aero" else self.theme.control_text)
         else:
-            self.mode_button.set_text("桌面", self.theme.text_secondary if self.theme.style == "flat" else self.theme.control_text)
+            self.mode_button.set_text("桌面", self.theme.text_secondary if self.theme.style != "aero" else self.theme.control_text)
 
     def _activate_desktop_session(self, _event=None) -> None:
         if not self._window_ready or self.window_mode != "desktop":
@@ -3150,18 +3151,13 @@ class CalendarApp(tk.Tk):
         menu.add_separator()
         theme_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         self.theme_var = tk.StringVar(value=self.theme_name)
-        theme_menu.add_radiobutton(
-            label="Modern",
-            variable=self.theme_var,
-            value="modern",
-            command=lambda: self.set_theme("modern"),
-        )
-        theme_menu.add_radiobutton(
-            label="Win7 Aero",
-            variable=self.theme_var,
-            value="win7_aero",
-            command=lambda: self.set_theme("win7_aero"),
-        )
+        for theme_name, theme in THEMES.items():
+            theme_menu.add_radiobutton(
+                label=theme.display_name,
+                variable=self.theme_var,
+                value=theme_name,
+                command=lambda name=theme_name: self.set_theme(name),
+            )
         menu.add_cascade(label=f"主题 · {self.theme.display_name}", menu=theme_menu)
         opacity_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         current_opacity = round(float(self.attributes("-alpha")), 2)
