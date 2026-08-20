@@ -47,6 +47,26 @@ class WindowBehaviorTests(unittest.TestCase):
     def test_main_ddl_entry_uses_complete_list_label(self) -> None:
         self.assertEqual(DDL_LIST_ENTRY_LABEL, "DDL列表")
 
+    def test_global_toggle_routes_by_explicit_view_mode(self) -> None:
+        actions: list[str] = []
+        compact = type(
+            "FakeCalendar",
+            (),
+            {
+                "view_mode": "compact",
+                "enter_global_view": lambda self: actions.append("global"),
+                "return_to_compact_view": lambda self: actions.append("compact"),
+            },
+        )()
+        CalendarApp.toggle_global_view(compact)
+        compact.view_mode = "global"
+        CalendarApp.toggle_global_view(compact)
+        self.assertEqual(actions, ["global", "compact"])
+
+    def test_view_mode_is_not_inferred_from_window_width(self) -> None:
+        fake = type("FakeCalendar", (), {"view_mode": "compact", "winfo_width": lambda self: 2000})()
+        self.assertEqual(CalendarApp.get_view_mode(fake), "compact")
+
     def test_ddl_relative_labels_cover_overdue_today_tomorrow_and_future(self) -> None:
         now = datetime(2026, 8, 7, 12, 0)
         self.assertEqual(ddl_relative_label(datetime(2026, 8, 7, 11, 59), now), "已逾期")

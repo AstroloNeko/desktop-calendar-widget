@@ -65,6 +65,26 @@ def make_tool_window(widget) -> None:
         pass
 
 
+def make_app_window(widget) -> None:
+    """Restore normal taskbar/window chrome after leaving the compact tool window."""
+    if not IS_WINDOWS:
+        return
+    hwnd = window_handle(widget)
+    if not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+    get_long.restype = ctypes.c_ssize_t
+    set_long.restype = ctypes.c_ssize_t
+    index = -20  # GWL_EXSTYLE
+    style = get_long(hwnd, index)
+    style = (style & ~0x00000080) | 0x00040000  # no TOOLWINDOW, add APPWINDOW
+    set_long(hwnd, index, style)
+    flags = 0x0001 | 0x0002 | 0x0004 | 0x0020  # NOSIZE | NOMOVE | NOZORDER | FRAMECHANGED
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags)
+
+
 def _desktop_host() -> Optional[int]:
     if not IS_WINDOWS:
         return None

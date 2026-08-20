@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from dpi_utils import DpiManager, LogicalCanvas, enable_dpi_awareness, scale_px, scaled_geometry, unscale_px
+from dpi_utils import DpiManager, LogicalCanvas, enable_dpi_awareness, scale_px, scaled_geometry, unscale_px, work_area_for_rect
 
 
 DPI_AWARENESS_MODE = enable_dpi_awareness()
@@ -43,11 +43,14 @@ from win_integration import (
     clamp_to_work_area,
     is_autostart_enabled,
     is_foreground_process,
+    make_app_window,
     make_tool_window,
     raise_for_interaction,
     send_to_desktop,
     set_autostart,
 )
+from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
+from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry
 from update_manager import (
     UpdateError,
     UpdateInfo,
@@ -94,6 +97,12 @@ DATE_STATE_BOTTOM = 23
 DATE_RING_HALF_WIDTH = 17
 DATE_RING_TOP = 0
 DATE_RING_BOTTOM = 26
+GLOBAL_MIN_WIDTH = 720
+GLOBAL_MIN_HEIGHT = 520
+GLOBAL_TITLE_WIDTH = 190
+GLOBAL_DAY_MIN_WIDTH = 28
+GLOBAL_HEADER_HEIGHT = 58
+GLOBAL_ROW_HEIGHT = 42
 
 FONT = "Microsoft YaHei UI"
 
@@ -2319,6 +2328,14 @@ class CalendarApp(tk.Tk):
         self.selected = date.today()
         self.shown_year = self.selected.year
         self.shown_month = self.selected.month
+        # The desktop gadget remains the startup mode even if the previous
+        # session ended while the large workspace was open.
+        self.view_mode = "compact"
+        self.timeline_selection = TimelineSelection()
+        self.timeline_model: Optional[TimelineMonth] = None
+        self._global_normal_geometry: Optional[WindowGeometry] = None
+        self._geometry_save_job: Optional[str] = None
+        self._global_render_job: Optional[str] = None
         self.day_cells: list[DayCell] = []
         self.agenda_open = bool(self.store.settings.get("agenda_open", True))
         self.window_mode = self.store.settings.get("window_mode", "desktop")
@@ -2379,6 +2396,7 @@ class CalendarApp(tk.Tk):
         self._set_initial_geometry()
         self._bind_shortcuts()
         self.bind("<Configure>", self._schedule_dpi_check, add="+")
+        self.bind("<Configure>", self._schedule_view_geometry_save, add="+")
         self.bind("<FocusIn>", self._schedule_dpi_check, add="+")
         self.render()
         self.after(80, self._finish_window_setup)
@@ -2458,6 +2476,9 @@ class CalendarApp(tk.Tk):
             pass
 
     def _build_ui(self) -> None:
+        if self.view_mode == "global":
+            self._build_global_ui()
+            return
         theme = self.theme
         dp = self.dpi.px
         header_height = 55 if theme.style == "aero" else 56
@@ -2508,7 +2529,7 @@ class CalendarApp(tk.Tk):
         self.header.tag_bind("month_text", "<Button-1>", lambda _event: self.go_today())
 
         compact = theme.style == "aero"
-        widths = (25, 25, 25, 37, 29, 25) if compact else (27, 27, 27, 39, 31, 27)
+        widths = (25, 25, 25, 37, 29, 25, 25) if compact else (27, 27, 27, 39, 31, 27, 27)
         control_height = 25 if compact else 27
         control_y = 15 if compact else 14
         previous = ThemeButton(self.header, self, "‹", lambda: self.change_month(-1), width=widths[0], height=control_height, font_size=13 if compact else 14)
@@ -2516,8 +2537,9 @@ class CalendarApp(tk.Tk):
         following = ThemeButton(self.header, self, "›", lambda: self.change_month(1), width=widths[2], height=control_height, font_size=13 if compact else 14)
         self.mode_button = ThemeButton(self.header, self, "桌面", self.toggle_window_mode, width=widths[3], height=control_height, font_size=8)
         self.menu_button = ThemeButton(self.header, self, "···", self.show_main_menu, width=widths[4], height=control_height, font_size=9 if compact else 10)
-        minimize = ThemeButton(self.header, self, "−", self.hide_to_tray, width=widths[5], height=control_height, font_size=10)
-        controls = (previous, today, following, self.mode_button, self.menu_button, minimize)
+        global_view = ThemeButton(self.header, self, "□", self.toggle_global_view, width=widths[5], height=control_height, font_size=10)
+        minimize = ThemeButton(self.header, self, "−", self.hide_to_tray, width=widths[6], height=control_height, font_size=10)
+        controls = (previous, today, following, self.mode_button, self.menu_button, global_view, minimize)
         x = WINDOW_WIDTH - 13 - sum(widths) - 5 * 2
         for control, control_width in zip(controls, widths):
             control.place(x=dp(x), y=dp(control_y), width=dp(control_width), height=dp(control_height))
@@ -2526,6 +2548,7 @@ class CalendarApp(tk.Tk):
         Tooltip(today, "回到今天（Ctrl+T）")
         Tooltip(following, "下个月（滚轮向下 / PgDn）")
         Tooltip(self.mode_button, "桌面模式空闲时不遮挡应用；点击月历会临时前置")
+        Tooltip(global_view, "打开全局视图")
         Tooltip(minimize, "隐藏到通知区域，提醒仍会继续")
 
         self.header.bind("<ButtonPress-1>", self._start_drag)
@@ -2604,6 +2627,119 @@ class CalendarApp(tk.Tk):
             widget.bind("<Button-1>", lambda _event: self.toggle_agenda())
 
         self._build_agenda_body()
+
+    def _build_global_ui(self) -> None:
+        """Build the structural V1 workspace; visual polish belongs to the UI phase."""
+        theme = self.theme
+        dp = self.dpi.px
+        self.configure(bg=theme.window_shadow)
+        self.window_frame = tk.Frame(self, bg=theme.window_border_outer)
+        self.window_frame.pack(fill="both", expand=True, padx=dp(theme.metrics.shadow_depth), pady=dp(theme.metrics.shadow_depth))
+        self.inner_frame = tk.Frame(self.window_frame, bg=theme.window_border_inner)
+        self.inner_frame.pack(fill="both", expand=True, padx=dp(theme.metrics.outer_border_width), pady=dp(theme.metrics.outer_border_width))
+        self.shell = tk.Frame(self.inner_frame, bg=theme.panel_background)
+        self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
+
+        toolbar = tk.Frame(self.shell, bg=theme.header_background, padx=dp(14), pady=dp(9))
+        toolbar.pack(fill="x")
+        title_box = tk.Frame(toolbar, bg=theme.header_background)
+        title_box.pack(side="left", fill="x", expand=True)
+        tk.Label(
+            title_box,
+            text="全局视图",
+            bg=theme.header_background,
+            fg=theme.header_text,
+            font=(FONT, 13, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        self.global_month_label = tk.Label(
+            title_box,
+            text="",
+            bg=theme.header_background,
+            fg=theme.header_subtext,
+            font=(FONT, 8),
+            anchor="w",
+        )
+        self.global_month_label.pack(anchor="w")
+        controls = (
+            ("‹", lambda: self.change_month(-1), 30),
+            ("今", self.go_today, 30),
+            ("›", lambda: self.change_month(1), 30),
+            ("返回紧凑视图", self.return_to_compact_view, 92),
+        )
+        for text, command, width in controls:
+            ThemeButton(
+                toolbar,
+                self,
+                text,
+                command,
+                width=width,
+                height=29,
+                font_size=9,
+                surface_background=theme.header_background,
+                outlined=True,
+            ).pack(side="left", padx=(dp(5), 0))
+
+        info_bar = tk.Frame(self.shell, bg=theme.panel_secondary, padx=dp(14), pady=dp(7))
+        info_bar.pack(fill="x")
+        tk.Label(
+            info_bar,
+            text="全局时间轴 · 本月",
+            bg=theme.panel_secondary,
+            fg=theme.text_primary,
+            font=(FONT, 10, "bold"),
+        ).pack(side="left")
+        self.global_summary_label = tk.Label(
+            info_bar,
+            text="",
+            bg=theme.panel_secondary,
+            fg=theme.text_secondary,
+            font=(FONT, 8),
+        )
+        self.global_summary_label.pack(side="left", padx=(dp(10), 0))
+        tk.Label(
+            info_bar,
+            text="单击选择 · 双击编辑",
+            bg=theme.panel_secondary,
+            fg=theme.text_muted,
+            font=(FONT, 8),
+        ).pack(side="right")
+
+        timeline_shell = tk.Frame(self.shell, bg=theme.panel_background, padx=dp(10), pady=dp(10))
+        timeline_shell.pack(fill="both", expand=True)
+        self.global_canvas = tk.Canvas(
+            timeline_shell,
+            bg=theme.schedule_background,
+            bd=0,
+            highlightthickness=dp(1),
+            highlightbackground=theme.divider,
+        )
+        self.global_vscroll = ttk.Scrollbar(timeline_shell, orient="vertical", command=self.global_canvas.yview)
+        self.global_hscroll = ttk.Scrollbar(timeline_shell, orient="horizontal", command=self.global_canvas.xview)
+        self.global_canvas.configure(
+            yscrollcommand=self.global_vscroll.set,
+            xscrollcommand=self.global_hscroll.set,
+        )
+        self.global_canvas.grid(row=0, column=0, sticky="nsew")
+        self.global_vscroll.grid(row=0, column=1, sticky="ns")
+        self.global_hscroll.grid(row=1, column=0, sticky="ew")
+        timeline_shell.grid_rowconfigure(0, weight=1)
+        timeline_shell.grid_columnconfigure(0, weight=1)
+        self.global_canvas.bind("<Configure>", self._schedule_global_render)
+        self.global_canvas.bind("<MouseWheel>", self._global_mousewheel)
+        self.global_canvas.bind("<Shift-MouseWheel>", self._global_shift_mousewheel)
+
+        self.global_status_label = tk.Label(
+            self.shell,
+            text="",
+            bg=theme.panel_background,
+            fg=theme.text_secondary,
+            font=(FONT, 8),
+            anchor="w",
+            padx=dp(14),
+            pady=dp(5),
+        )
+        self.global_status_label.pack(fill="x")
 
     def _draw_header(self, _event=None) -> None:
         width = max(1, self.header.logical_width())
@@ -2909,16 +3045,127 @@ class CalendarApp(tk.Tk):
         self.update_idletasks()
         area = self.dpi.work_area()
         window_width = self.dpi.px(WINDOW_WIDTH)
+        saved = WindowGeometry.from_mapping(self.store.settings.get("compact_geometry"))
+        if saved is not None:
+            height = saved.height
+            x, y = saved.x, saved.y
+        else:
+            saved_x = self.store.settings.get("x")
+            saved_y = self.store.settings.get("y")
+            try:
+                x = int(saved_x) if saved_x is not None else area.right - window_width - self.dpi.px(26)
+                y = int(saved_y) if saved_y is not None else area.top + self.dpi.px(44)
+            except (TypeError, ValueError):
+                x, y = area.right - window_width - self.dpi.px(26), area.top + self.dpi.px(44)
         window_height = self.dpi.px(height)
-        saved_x = self.store.settings.get("x")
-        saved_y = self.store.settings.get("y")
-        try:
-            x = int(saved_x) if saved_x is not None else area.right - window_width - self.dpi.px(26)
-            y = int(saved_y) if saved_y is not None else area.top + self.dpi.px(44)
-        except (TypeError, ValueError):
-            x, y = area.right - window_width - self.dpi.px(26), area.top + self.dpi.px(44)
         x, y = clamp_to_work_area(x, y, window_width, window_height)
         self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
+
+    def get_view_mode(self) -> str:
+        return self.view_mode
+
+    def _capture_window_geometry(self) -> WindowGeometry:
+        self.update_idletasks()
+        return WindowGeometry(
+            self.dpi.logical(self.winfo_width()),
+            self.dpi.logical(self.winfo_height()),
+            self.winfo_x(),
+            self.winfo_y(),
+        )
+
+    def _apply_saved_geometry(self, geometry: WindowGeometry) -> WindowGeometry:
+        device_width = self.dpi.px(geometry.width)
+        device_height = self.dpi.px(geometry.height)
+        target_area = work_area_for_rect(geometry.x, geometry.y, device_width, device_height)
+        fitted = fit_geometry_to_work_area(geometry, target_area, self.dpi.dpi)
+        self.geometry(scaled_geometry(fitted.width, fitted.height, fitted.x, fitted.y, self.dpi.dpi))
+        return fitted
+
+    def enter_global_view(self) -> None:
+        if self.view_mode == "global":
+            return
+        compact_geometry = self._capture_window_geometry()
+        self.store.settings["compact_geometry"] = compact_geometry.as_dict()
+        self.store.settings["x"] = compact_geometry.x
+        self.store.settings["y"] = compact_geometry.y
+        self.store.settings["view_mode"] = "global"
+        self.view_mode = "global"
+        self.desktop_session_active = False
+        self.timeline_selection.clear()
+        self.withdraw()
+        self.overrideredirect(False)
+        self.resizable(True, True)
+        self.minsize(self.dpi.px(GLOBAL_MIN_WIDTH), self.dpi.px(GLOBAL_MIN_HEIGHT))
+        self.title(f"{APP_NAME} · 全局视图")
+        self._rebuild_main_ui("", True)
+        saved = WindowGeometry.from_mapping(
+            self.store.settings.get("global_geometry"),
+            minimum_width=GLOBAL_MIN_WIDTH,
+            minimum_height=GLOBAL_MIN_HEIGHT,
+        )
+        geometry = saved or initial_global_geometry(self.dpi.work_area(), self.dpi.dpi)
+        self._global_normal_geometry = self._apply_saved_geometry(geometry)
+        self.deiconify()
+        self.update_idletasks()
+        make_app_window(self)
+        self.render()
+        self.store.save()
+        self.after(80, self.apply_window_mode)
+
+    def return_to_compact_view(self) -> None:
+        if self.view_mode == "compact":
+            return
+        if self.state() == "normal":
+            self._global_normal_geometry = self._capture_window_geometry()
+        if self._global_normal_geometry is not None:
+            self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
+        compact = WindowGeometry.from_mapping(self.store.settings.get("compact_geometry"))
+        self.withdraw()
+        try:
+            self.state("normal")
+        except tk.TclError:
+            pass
+        self.overrideredirect(True)
+        self.resizable(False, False)
+        self.minsize(1, 1)
+        self.title(APP_NAME)
+        self.view_mode = "compact"
+        self.store.settings["view_mode"] = "compact"
+        self._rebuild_main_ui("", True)
+        if compact is None:
+            self._set_initial_geometry()
+        else:
+            compact = WindowGeometry(WINDOW_WIDTH, compact.height, compact.x, compact.y)
+            self._apply_saved_geometry(compact)
+        self.deiconify()
+        self.update_idletasks()
+        make_tool_window(self)
+        self.store.save()
+        self.after(80, self.apply_window_mode)
+
+    def toggle_global_view(self) -> None:
+        if self.view_mode == "global":
+            self.return_to_compact_view()
+        else:
+            self.enter_global_view()
+
+    def _schedule_view_geometry_save(self, event: tk.Event) -> None:
+        if event.widget is not self or self.view_mode != "global" or self._dpi_rebuilding:
+            return
+        if self._geometry_save_job:
+            try:
+                self.after_cancel(self._geometry_save_job)
+            except tk.TclError:
+                pass
+        self._geometry_save_job = self.after(180, self._save_global_geometry)
+
+    def _save_global_geometry(self) -> None:
+        self._geometry_save_job = None
+        if self.view_mode != "global" or not self.winfo_exists() or self.state() != "normal":
+            return
+        self._global_normal_geometry = self._capture_window_geometry()
+        self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
+        self.store.save()
 
     def _ddl_canvas_height(self, item_count: int) -> int:
         return DDL_ROW_HEIGHT * min(max(0, item_count), DDL_VISIBLE_ROWS)
@@ -2939,6 +3186,8 @@ class CalendarApp(tk.Tk):
         return min(base_height, max(CLOSED_HEIGHT, work_height - 48))
 
     def _apply_window_height(self, pinned_ddl_count: int, regular_ddl_count: int) -> None:
+        if self.view_mode != "compact":
+            return
         height = self._desired_window_height(pinned_ddl_count, regular_ddl_count)
         x, y = clamp_to_work_area(
             self.winfo_x(),
@@ -3017,13 +3266,27 @@ class CalendarApp(tk.Tk):
             self.quick_var.set(quick_value)
             self.quick_placeholder_active = False
             self.quick_entry.configure(fg=self.theme.text_primary)
-        self.after_idle(self._draw_header)
+        if self.view_mode == "compact":
+            self.after_idle(self._draw_header)
 
     def _apply_dpi_change(self, new_dpi: int) -> None:
         quick_value = self.quick_var.get() if hasattr(self, "quick_var") else ""
         quick_was_placeholder = self.quick_placeholder_active
         x, y = self.winfo_x(), self.winfo_y()
         old_dpi = self.dpi.dpi
+        global_was_maximized = self.view_mode == "global" and self.state() == "zoomed"
+        global_geometry = (
+            self._global_normal_geometry
+            if global_was_maximized and self._global_normal_geometry is not None
+            else WindowGeometry(
+                unscale_px(self.winfo_width(), old_dpi),
+                unscale_px(self.winfo_height(), old_dpi),
+                x,
+                y,
+            )
+            if self.view_mode == "global"
+            else None
+        )
         popup_geometries: list[tuple[tk.Toplevel, int, int, int, int]] = []
         for child in self.winfo_children():
             if not isinstance(child, tk.Toplevel) or not child.winfo_exists():
@@ -3056,11 +3319,20 @@ class CalendarApp(tk.Tk):
                 popup.geometry(
                     scaled_geometry(logical_width, logical_height, popup_x, popup_y, new_dpi)
                 )
-            pinned, regular = self.store.grouped_ddl_events()
-            height = self._desired_window_height(len(pinned), len(regular))
-            x, y = clamp_to_work_area(x, y, self.dpi.px(WINDOW_WIDTH), self.dpi.px(height))
-            self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
-            make_tool_window(self)
+            if self.view_mode == "global":
+                self.minsize(self.dpi.px(GLOBAL_MIN_WIDTH), self.dpi.px(GLOBAL_MIN_HEIGHT))
+                if global_was_maximized:
+                    self.state("normal")
+                self._global_normal_geometry = self._apply_saved_geometry(global_geometry or initial_global_geometry(self.dpi.work_area(), new_dpi))
+                if global_was_maximized:
+                    self.state("zoomed")
+                make_app_window(self)
+            else:
+                pinned, regular = self.store.grouped_ddl_events()
+                height = self._desired_window_height(len(pinned), len(regular))
+                x, y = clamp_to_work_area(x, y, self.dpi.px(WINDOW_WIDTH), self.dpi.px(height))
+                self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
+                make_tool_window(self)
         finally:
             self._dpi_rebuilding = False
         self.after(80, self.apply_window_mode)
@@ -3068,6 +3340,7 @@ class CalendarApp(tk.Tk):
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-n>", lambda _event: self.open_day_detail())
         self.bind("<Control-t>", lambda _event: self.go_today())
+        self.bind("<Control-g>", lambda _event: self.toggle_global_view())
         self.bind("<Home>", lambda event: self._keyboard_command(event, self.go_today))
         self.bind("<Key-t>", lambda event: self._keyboard_command(event, self.go_today))
         self.bind("<Key-n>", lambda event: self._keyboard_command(event, self.open_day_detail))
@@ -3083,6 +3356,13 @@ class CalendarApp(tk.Tk):
         self.bind("<Escape>", lambda _event: self._end_desktop_session())
 
     def render(self) -> None:
+        if self.view_mode == "global":
+            self._render_global_timeline()
+            if self.day_detail_window and self.day_detail_window.winfo_exists():
+                self.day_detail_window.refresh()
+            if self.ddl_list_window and self.ddl_list_window.winfo_exists():
+                self.ddl_list_window.refresh()
+            return
         self.header.itemconfigure(self.month_label, text=f"{self.shown_year}年 {self.shown_month}月")
         today = date.today()
         self.header.itemconfigure(self.month_hint, text=f"今天 {today.month}月{today.day}日 · {WEEKDAYS[today.weekday()]}")
@@ -3121,6 +3401,209 @@ class CalendarApp(tk.Tk):
             self.day_detail_window.refresh()
         if self.ddl_list_window and self.ddl_list_window.winfo_exists():
             self.ddl_list_window.refresh()
+
+    def _schedule_global_render(self, _event=None) -> None:
+        if self.view_mode != "global" or self._global_render_job:
+            return
+        self._global_render_job = self.after_idle(self._finish_global_render)
+
+    def _finish_global_render(self) -> None:
+        self._global_render_job = None
+        if self.view_mode == "global" and self.winfo_exists():
+            self._render_global_timeline()
+
+    def _render_global_timeline(self) -> None:
+        if not hasattr(self, "global_canvas") or not self.global_canvas.winfo_exists():
+            return
+        model = build_month_timeline(self.store, self.shown_year, self.shown_month)
+        self.timeline_model = model
+        selected = self.timeline_selection.get(model)
+        self.global_month_label.configure(text=f"{model.year}年 {model.month}月 · {len(model.days)} 天")
+        unfinished = sum(not item.completed for item in model.items)
+        self.global_summary_label.configure(text=f"{len(model.items)} 项工作 · {unfinished} 项未完成")
+
+        canvas = self.global_canvas
+        x_position = canvas.xview()[0] if canvas.bbox("all") else 0.0
+        y_position = canvas.yview()[0] if canvas.bbox("all") else 0.0
+        canvas.delete("all")
+        dp = self.dpi.px
+        title_width = dp(GLOBAL_TITLE_WIDTH)
+        header_height = dp(GLOBAL_HEADER_HEIGHT)
+        row_height = dp(GLOBAL_ROW_HEIGHT)
+        canvas_width = max(dp(GLOBAL_MIN_WIDTH), canvas.winfo_width())
+        available_days_width = max(1, canvas_width - title_width)
+        day_width = max(dp(GLOBAL_DAY_MIN_WIDTH), available_days_width // len(model.days))
+        content_width = title_width + day_width * len(model.days)
+        content_height = header_height + max(1, len(model.items)) * row_height
+        theme = self.theme
+
+        for index, day_meta in enumerate(model.days):
+            x1 = title_width + index * day_width
+            x2 = x1 + day_width
+            if day_meta.is_user_leave or day_meta.is_user_holiday:
+                background = theme.ddl_overdue_background
+            elif day_meta.is_legal_holiday:
+                background = theme.ddl_due_background
+            elif day_meta.is_weekend and not day_meta.is_adjusted_workday:
+                background = theme.panel_secondary
+            else:
+                background = theme.schedule_background
+            canvas.create_rectangle(x1, 0, x2, content_height, fill=background, outline="")
+            canvas.create_line(x1, 0, x1, content_height, fill=theme.divider)
+            weekday = "一二三四五六日"[day_meta.weekday]
+            canvas.create_text(
+                (x1 + x2) // 2,
+                dp(16),
+                text=str(day_meta.date.day),
+                fill=theme.date_weekend_text if day_meta.is_weekend else theme.text_primary,
+                font=(FONT, 8, "bold" if day_meta.is_today else "normal"),
+            )
+            canvas.create_text(
+                (x1 + x2) // 2,
+                dp(36),
+                text=day_meta.holiday_name or f"周{weekday}",
+                fill=theme.holiday_workday if day_meta.is_adjusted_workday else theme.text_muted,
+                font=(FONT, 7),
+            )
+            if day_meta.is_today:
+                canvas.create_rectangle(
+                    x1 + dp(1),
+                    0,
+                    x2 - dp(1),
+                    content_height,
+                    outline=theme.date_today_border,
+                    width=dp(2),
+                )
+
+        canvas.create_rectangle(0, 0, title_width, content_height, fill=theme.panel_background, outline="")
+        canvas.create_text(dp(14), dp(19), text="事项", fill=theme.text_primary, font=(FONT, 9, "bold"), anchor="w")
+        canvas.create_text(dp(14), dp(39), text="一项工作一行", fill=theme.text_muted, font=(FONT, 7), anchor="w")
+        canvas.create_line(0, header_height, content_width, header_height, fill=theme.divider, width=dp(1))
+
+        if not model.items:
+            canvas.create_text(
+                title_width + available_days_width // 2,
+                header_height + row_height // 2,
+                text="这个月还没有事项",
+                fill=theme.text_muted,
+                font=(FONT, 10),
+            )
+        for row_index, item in enumerate(model.items):
+            y1 = header_height + row_index * row_height
+            y2 = y1 + row_height
+            row_tag = f"timeline-item:{item.id}"
+            if selected and selected.id == item.id:
+                canvas.create_rectangle(0, y1, content_width, y2, fill=theme.accent_soft, outline="", tags=(row_tag,))
+            canvas.create_line(0, y2, content_width, y2, fill=theme.divider)
+            title_color = theme.text_done if item.completed else theme.text_primary
+            canvas.create_text(
+                dp(14),
+                y1 + dp(14),
+                text=truncate(item.title, 24),
+                fill=title_color,
+                font=(FONT, 8, "overstrike" if item.completed else "normal"),
+                anchor="w",
+                tags=(row_tag,),
+            )
+            duration_text = f"{item.effective_days_count}天"
+            if item.calendar_span_days != item.effective_days_count:
+                duration_text += f" · 跨度{item.calendar_span_days}天"
+            canvas.create_text(
+                dp(14),
+                y1 + dp(31),
+                text=duration_text,
+                fill=theme.text_muted,
+                font=(FONT, 7),
+                anchor="w",
+                tags=(row_tag,),
+            )
+            bar_fill = blend(item.color, theme.schedule_background, 0.68) if item.completed else item.color
+            outline = (
+                theme.accent
+                if selected and selected.id == item.id
+                else theme.event_type_urgent
+                if item.is_urgent
+                else theme.schedule_card_border
+            )
+            for segment in item.segments:
+                start_index = (segment.start_date - model.period_start).days
+                end_index = (segment.end_date - model.period_start).days
+                segment_x1 = title_width + start_index * day_width + dp(3)
+                segment_x2 = title_width + (end_index + 1) * day_width - dp(3)
+                canvas.create_rectangle(
+                    segment_x1,
+                    y1 + dp(9),
+                    segment_x2,
+                    y2 - dp(9),
+                    fill=bar_fill,
+                    outline=outline,
+                    width=dp(2) if selected and selected.id == item.id else dp(1),
+                    tags=(row_tag,),
+                )
+            if item.continues_from_previous_period:
+                x = title_width + dp(3)
+                canvas.create_polygon(x, (y1 + y2) // 2, x + dp(7), y1 + dp(12), x + dp(7), y2 - dp(12), fill=outline, tags=(row_tag,))
+            if item.continues_to_next_period:
+                x = content_width - dp(3)
+                canvas.create_polygon(x, (y1 + y2) // 2, x - dp(7), y1 + dp(12), x - dp(7), y2 - dp(12), fill=outline, tags=(row_tag,))
+            if item.ddl_date and model.period_start <= item.ddl_date <= model.period_end:
+                ddl_index = (item.ddl_date - model.period_start).days
+                center_x = title_width + ddl_index * day_width + day_width // 2
+                center_y = (y1 + y2) // 2
+                radius = dp(5)
+                canvas.create_polygon(
+                    center_x,
+                    center_y - radius,
+                    center_x + radius,
+                    center_y,
+                    center_x,
+                    center_y + radius,
+                    center_x - radius,
+                    center_y,
+                    fill=theme.event_type_ddl,
+                    outline=theme.ddl_indicator_highlight,
+                    tags=(row_tag,),
+                )
+            canvas.tag_bind(row_tag, "<Button-1>", lambda _event, item_id=item.id: self.select_timeline_item(item_id))
+            canvas.tag_bind(row_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self.open_timeline_item(item_id))
+
+        canvas.configure(scrollregion=(0, 0, content_width, content_height))
+        canvas.xview_moveto(x_position)
+        canvas.yview_moveto(y_position)
+        if selected:
+            self.global_status_label.configure(
+                text=f"已选择：{selected.title} · {selected.start_date:%Y-%m-%d} → {selected.end_date:%Y-%m-%d}"
+            )
+        else:
+            self.global_status_label.configure(text="选择一个事项可查看持续时间；双击使用现有事项编辑器")
+
+    def _global_mousewheel(self, event: tk.Event) -> str:
+        self.global_canvas.yview_scroll(int(-event.delta / 120), "units")
+        return "break"
+
+    def _global_shift_mousewheel(self, event: tk.Event) -> str:
+        self.global_canvas.xview_scroll(int(-event.delta / 120), "units")
+        return "break"
+
+    def select_timeline_item(self, item_id: str) -> Optional[TimelineItem]:
+        model = self.timeline_model or build_month_timeline(self.store, self.shown_year, self.shown_month)
+        selected = self.timeline_selection.select(item_id, model)
+        self._render_global_timeline()
+        return selected
+
+    def get_selected_timeline_item(self) -> Optional[TimelineItem]:
+        model = self.timeline_model or build_month_timeline(self.store, self.shown_year, self.shown_month)
+        return self.timeline_selection.get(model)
+
+    def clear_timeline_selection(self) -> None:
+        self.timeline_selection.clear()
+        if self.view_mode == "global":
+            self._render_global_timeline()
+
+    def open_timeline_item(self, item_id: str) -> None:
+        event = self.store.event_by_id(item_id)
+        if event is not None:
+            self.open_editor(event)
 
     def _display_holiday(self, day: date) -> Optional[HolidayInfo]:
         custom_status = self.store.date_status(day)
@@ -3465,7 +3948,8 @@ class CalendarApp(tk.Tk):
                 pass
             self._lower_job = None
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.editor_window = EventEditor(self, selected or (event.due_date if event else self.selected), event)
 
     def open_new_event(self, selected: Optional[date] = None) -> None:
@@ -3479,7 +3963,8 @@ class CalendarApp(tk.Tk):
             self.present_overlay(self.day_detail_window)
             return
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.day_detail_window = DayDetailDialog(self, target_day)
 
     def open_routine_manager(self) -> None:
@@ -3487,7 +3972,8 @@ class CalendarApp(tk.Tk):
             self.present_overlay(self.routine_manager)
             return
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.routine_manager = RoutineManager(self)
 
     def open_ddl_list(self) -> None:
@@ -3495,7 +3981,8 @@ class CalendarApp(tk.Tk):
             self.present_overlay(self.ddl_list_window)
             return
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.ddl_list_window = DDLListDialog(self)
 
     def open_routine_editor(self, item: Optional[RoutineItem] = None) -> None:
@@ -3503,7 +3990,8 @@ class CalendarApp(tk.Tk):
             self.present_overlay(self.routine_editor)
             return
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.routine_editor = RoutineEditor(self, item)
 
     def present_overlay(self, window: tk.Toplevel) -> None:
@@ -3517,7 +4005,8 @@ class CalendarApp(tk.Tk):
                 add="+",
             )
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         make_tool_window(window)
         window.attributes("-topmost", True)
         window.lift()
@@ -3703,14 +4192,23 @@ class CalendarApp(tk.Tk):
     def apply_window_mode(self, force_desktop: bool = False) -> None:
         if not self.winfo_exists():
             return
-        make_tool_window(self)
+        if self.view_mode == "global":
+            make_app_window(self)
+        else:
+            make_tool_window(self)
         overlays = self._active_overlays()
         if overlays:
             self.attributes("-topmost", False)
-            send_to_desktop(self)
+            if self.view_mode == "compact":
+                send_to_desktop(self)
             for overlay in overlays:
                 overlay.attributes("-topmost", True)
             bring_to_front(overlays[-1])
+            return
+        if self.view_mode == "global":
+            self.attributes("-topmost", self.window_mode == "pinned")
+            if self.window_mode == "pinned":
+                self.lift()
             return
         if self.window_mode == "pinned":
             self.attributes("-topmost", True)
@@ -3734,7 +4232,7 @@ class CalendarApp(tk.Tk):
             self.mode_button.set_text("桌面", self.theme.text_secondary if self.theme.style != "aero" else self.theme.control_text)
 
     def _activate_desktop_session(self, _event=None) -> None:
-        if not self._window_ready or self.window_mode != "desktop":
+        if self.view_mode != "compact" or not self._window_ready or self.window_mode != "desktop":
             return
         if self._lower_job:
             try:
@@ -3747,7 +4245,7 @@ class CalendarApp(tk.Tk):
         self._update_mode_badge()
 
     def _on_focus_out(self, _event=None) -> None:
-        if self.window_mode != "desktop" or not self.desktop_session_active:
+        if self.view_mode != "compact" or self.window_mode != "desktop" or not self.desktop_session_active:
             return
         if self._lower_job:
             try:
@@ -3758,7 +4256,7 @@ class CalendarApp(tk.Tk):
 
     def _return_to_desktop_if_inactive(self) -> None:
         self._lower_job = None
-        if self.window_mode != "desktop" or not self.desktop_session_active:
+        if self.view_mode != "compact" or self.window_mode != "desktop" or not self.desktop_session_active:
             return
         if self._active_overlays() or is_foreground_process():
             self._lower_job = self.after(900, self._return_to_desktop_if_inactive)
@@ -3766,7 +4264,7 @@ class CalendarApp(tk.Tk):
         self._end_desktop_session()
 
     def _end_desktop_session(self) -> None:
-        if self.window_mode != "desktop":
+        if self.view_mode != "compact" or self.window_mode != "desktop":
             return
         self.desktop_session_active = False
         self.apply_window_mode(force_desktop=True)
@@ -3792,8 +4290,17 @@ class CalendarApp(tk.Tk):
         self.after(150, self.apply_window_mode)
 
     def _save_window_settings(self) -> None:
-        self.store.settings["x"] = self.winfo_x()
-        self.store.settings["y"] = self.winfo_y()
+        if self.view_mode == "global":
+            if self.state() == "normal":
+                self._global_normal_geometry = self._capture_window_geometry()
+            if self._global_normal_geometry is not None:
+                self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
+        else:
+            compact_geometry = self._capture_window_geometry()
+            self.store.settings["compact_geometry"] = compact_geometry.as_dict()
+            self.store.settings["x"] = compact_geometry.x
+            self.store.settings["y"] = compact_geometry.y
+        self.store.settings["view_mode"] = self.view_mode
         self.store.settings["agenda_open"] = self.agenda_open
         self.store.settings["window_mode"] = self.window_mode
         self.store.settings["theme"] = self.theme_name
@@ -4000,6 +4507,7 @@ class CalendarApp(tk.Tk):
             "方向键：移动所选日期\n"
             "Ctrl+N：打开当天事项详情\n"
             "Ctrl+T：回到今天\n"
+            "Ctrl+G：打开 / 关闭全局视图\n"
             "拖动顶部：移动挂件位置\n\n"
             "顶部横线 / Alt+F4：隐藏到通知区域，提醒继续运行\n"
             "真正退出：右键托盘图标并选择“退出桌面月历”\n\n"
