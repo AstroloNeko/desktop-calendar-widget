@@ -61,9 +61,12 @@ from version import __version__
 from ui_draw import (
     bevel_control,
     blend,
+    draw_bubble_motif,
     draw_calendar_date_ring,
     draw_calendar_date_state,
     draw_calendar_today_accent,
+    draw_ecology_horizon,
+    glossy_control,
     rounded_rectangle,
     vertical_gradient,
     vertical_multi_gradient,
@@ -373,7 +376,42 @@ class ThemeButton(LogicalCanvas):
         width = max(2, self.logical_width())
         height = max(2, self.logical_height())
         self.delete("all")
-        if theme.style == "aero":
+        if theme.style == "frutiger":
+            background = (
+                {
+                    "normal": theme.accent,
+                    "hover": theme.accent_hover,
+                    "pressed": blend(theme.accent, theme.control_pressed, 0.24),
+                }[self.state]
+                if self.accented
+                else {
+                    "normal": theme.control_background,
+                    "hover": theme.control_hover,
+                    "pressed": theme.control_pressed,
+                }[self.state]
+            )
+            border = (
+                theme.header_highlight
+                if self.accented and self.state == "hover"
+                else theme.accent
+                if self.accented
+                else theme.accent_hover
+                if self.state == "hover"
+                else theme.control_border
+            )
+            self.configure(bg=self.surface_background or theme.header_background)
+            glossy_control(
+                self,
+                width,
+                height,
+                background=background,
+                border=border,
+                highlight=theme.control_highlight,
+                depth=theme.header_shadow,
+                radius=theme.metrics.control_radius,
+                pressed=self.state == "pressed",
+            )
+        elif theme.style == "aero":
             background = (
                 {
                     "normal": blend(theme.accent, theme.control_background, 0.58),
@@ -423,7 +461,7 @@ class ThemeButton(LogicalCanvas):
                 outline=theme.control_border if self.outlined else "",
                 width=1,
             )
-        y_offset = 1 if self.state == "pressed" else 0
+        y_offset = 1 if self.state == "pressed" and theme.style != "frutiger" else 0
         text_color = self.foreground or (theme.text_on_accent if self.accented and theme.style != "aero" else theme.control_text)
         self.create_text(
             width / 2,
@@ -623,10 +661,16 @@ class DayCell(LogicalCanvas):
                 fill=theme.date_hover_background,
                 border=theme.date_hover_border,
                 radius=theme.metrics.date_radius,
-                top_highlight=blend(theme.date_hover_background, theme.control_highlight, 0.30) if theme.style == "aero" else None,
+                top_highlight=(
+                    blend(theme.date_hover_background, theme.control_highlight, 0.42)
+                    if theme.style == "frutiger"
+                    else blend(theme.date_hover_background, theme.control_highlight, 0.30)
+                    if theme.style == "aero"
+                    else None
+                ),
             )
         if self.selected:
-            selected_glass = theme.style == "aero"
+            selected_glass = theme.style in ("aero", "frutiger")
             selected_paper = theme.style == "paper"
             draw_calendar_date_state(
                 self,
@@ -643,7 +687,7 @@ class DayCell(LogicalCanvas):
                 top_highlight=blend(
                     theme.date_selected_gradient_start,
                     theme.control_highlight,
-                    0.18 if selected_glass else 0.10,
+                    0.30 if theme.style == "frutiger" else 0.18 if selected_glass else 0.10,
                 ) if selected_glass or selected_paper else None,
             )
         elif self.today:
@@ -656,7 +700,13 @@ class DayCell(LogicalCanvas):
                 fill=theme.date_today_background,
                 border=theme.date_today_background if self.ddl else theme.date_today_border,
                 radius=theme.metrics.date_radius,
-                top_highlight=blend(theme.date_today_background, theme.control_highlight, 0.34) if theme.style == "aero" else None,
+                top_highlight=(
+                    blend(theme.date_today_background, theme.control_highlight, 0.48)
+                    if theme.style == "frutiger"
+                    else blend(theme.date_today_background, theme.control_highlight, 0.34)
+                    if theme.style == "aero"
+                    else None
+                ),
             )
 
         if self.ddl:
@@ -670,6 +720,9 @@ class DayCell(LogicalCanvas):
                 DATE_RING_BOTTOM,
                 color=theme.ddl_indicator,
                 radius=theme.metrics.date_radius + 2,
+                # Windows glass keeps a restrained double edge. Frutiger's
+                # brighter coral ring remains single so combined states do
+                # not turn into an onion of outlines.
                 inner_highlight=theme.ddl_indicator_highlight if theme.style == "aero" else None,
             )
 
@@ -681,7 +734,13 @@ class DayCell(LogicalCanvas):
                 center_x + DATE_STATE_HALF_WIDTH,
                 DATE_STATE_BOTTOM,
                 color=theme.date_selected_today,
-                highlight=blend(theme.date_selected_today, theme.control_highlight, 0.42) if theme.style == "aero" else None,
+                highlight=(
+                    blend(theme.date_selected_today, theme.control_highlight, 0.58)
+                    if theme.style == "frutiger"
+                    else blend(theme.date_selected_today, theme.control_highlight, 0.42)
+                    if theme.style == "aero"
+                    else None
+                ),
             )
 
         if self.date_status in ("leave", "holiday"):
@@ -716,7 +775,7 @@ class DayCell(LogicalCanvas):
                 holiday_color = blend(
                     holiday_color,
                     theme.date_selected_border,
-                    0.15 if theme.style == "aero" else 0.22,
+                    0.12 if theme.style == "frutiger" else 0.15 if theme.style == "aero" else 0.22,
                 )
             self.create_text(
                 center_x,
@@ -726,7 +785,7 @@ class DayCell(LogicalCanvas):
                 font=(
                     FONT,
                     7 if len(self.holiday.short_name) <= 4 else 6,
-                    "bold" if theme.style == "aero" and self.holiday.kind != "festival" else "normal",
+                    "bold" if theme.style in ("aero", "frutiger") and self.holiday.kind != "festival" else "normal",
                 ),
                 tags="date_text",
             )
@@ -2386,9 +2445,10 @@ class CalendarApp(tk.Tk):
             except (TypeError, ValueError):
                 value = 1.0
         value = min(1.0, max(0.90, value))
-        # Tk applies alpha to every child uniformly. Aero therefore uses an
-        # opaque composite so desktop content cannot ghost through the body.
-        self.attributes("-alpha", 1.0 if self.theme.style == "aero" else value)
+        # Tk applies alpha to every child uniformly. Simulated glass themes
+        # therefore use an opaque composite so desktop content cannot ghost
+        # through text and controls.
+        self.attributes("-alpha", 1.0 if self.theme.style in ("aero", "frutiger") else value)
 
     def report_callback_exception(self, exc_type, exc_value, exc_traceback) -> None:
         log_exception(exc_type, exc_value, exc_traceback)
@@ -2411,7 +2471,7 @@ class CalendarApp(tk.Tk):
         self.shell = tk.Frame(
             self.inner_frame,
             bg=theme.panel_background,
-            highlightthickness=dp(1) if theme.style == "aero" else 0,
+            highlightthickness=dp(1) if theme.style in ("aero", "frutiger") else 0,
             highlightbackground=theme.window_background,
         )
         self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
@@ -2549,7 +2609,77 @@ class CalendarApp(tk.Tk):
         width = max(1, self.header.logical_width())
         height = max(1, self.header.logical_height())
         self.header.delete("header_art")
-        if self.theme.style == "aero":
+        if self.theme.style == "frutiger":
+            vertical_multi_gradient(
+                self.header,
+                0,
+                0,
+                width,
+                height,
+                (
+                    (0.0, self.theme.header_highlight),
+                    (0.10, self.theme.header_gradient_start),
+                    (0.28, blend(self.theme.header_gradient_start, self.theme.header_gradient_mid, 0.35)),
+                    (0.56, self.theme.header_gradient_mid),
+                    (0.82, blend(self.theme.header_gradient_mid, self.theme.header_gradient_end, 0.48)),
+                    (1.0, self.theme.header_gradient_end),
+                ),
+                tags="header_art",
+            )
+            rounded_rectangle(
+                self.header,
+                5,
+                2,
+                width - 5,
+                round(height * 0.36),
+                11,
+                fill=blend(self.theme.header_gradient_start, self.theme.header_highlight, 0.58),
+                outline="",
+                tags="header_art",
+            )
+            self.header.create_line(
+                8,
+                3,
+                width - 9,
+                3,
+                fill=self.theme.header_highlight,
+                tags="header_art",
+            )
+            draw_bubble_motif(
+                self.header,
+                ((133, 10, 6), (146, 26, 4), (126, 31, 2.5)),
+                outline=blend(self.theme.header_gradient_mid, self.theme.header_highlight, 0.66),
+                highlight=self.theme.header_highlight,
+                accent=blend(self.theme.environment_accent, self.theme.header_highlight, 0.34),
+                tags="header_art",
+            )
+            reflection_y = round(height * 0.39)
+            self.header.create_line(
+                4,
+                reflection_y,
+                width - 5,
+                reflection_y,
+                fill=blend(self.theme.header_highlight, self.theme.header_gradient_mid, 0.55),
+                tags="header_art",
+            )
+            self.header.create_line(
+                11,
+                height - 3,
+                91,
+                height - 3,
+                fill=blend(self.theme.header_gradient_end, self.theme.environment_accent, 0.45),
+                width=1,
+                tags="header_art",
+            )
+            self.header.create_line(
+                0,
+                height - 2,
+                width,
+                height - 2,
+                fill=self.theme.header_shadow,
+                tags="header_art",
+            )
+        elif self.theme.style == "aero":
             vertical_multi_gradient(
                 self.header,
                 0,
@@ -2583,6 +2713,38 @@ class CalendarApp(tk.Tk):
             )
         self.header.create_line(0, height - 1, width, height - 1, fill=self.theme.header_border, tags="header_art")
         self.header.tag_lower("header_art")
+
+    def _draw_frutiger_empty_state(self, canvas: LogicalCanvas, title: str) -> None:
+        canvas.delete("all")
+        width = max(1, canvas.logical_width())
+        height = max(1, canvas.logical_height())
+        draw_ecology_horizon(
+            canvas,
+            width,
+            height,
+            background=self.theme.schedule_background,
+            haze=self.theme.environment_haze,
+            horizon=self.theme.environment_horizon,
+            highlight=self.theme.environment_highlight,
+            accent=self.theme.environment_accent,
+            tags="environment_art",
+        )
+        canvas.create_text(
+            width // 2,
+            34,
+            text=title,
+            fill=self.theme.text_secondary,
+            font=(FONT, 9, "bold"),
+            tags="empty_text",
+        )
+        canvas.create_text(
+            width // 2,
+            55,
+            text="双击日期查看详情 · 习惯清单仅在工作日出现",
+            fill=self.theme.text_muted,
+            font=(FONT, 8),
+            tags="empty_text",
+        )
 
     def _build_ddl_area(self, parent: tk.Widget, title: str, *, pinned: bool):
         theme = self.theme
@@ -2681,17 +2843,29 @@ class CalendarApp(tk.Tk):
 
         self.agenda_bar.pack(fill="x")
 
-        self.footer_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background, padx=dp(13), height=dp(21))
+        footer_height = 21
+        footer_background = (
+            blend(theme.schedule_background, theme.environment_haze, 0.28)
+            if theme.style == "frutiger"
+            else theme.schedule_background
+        )
+        self.footer_frame = tk.Frame(
+            self.schedule_section,
+            bg=footer_background,
+            padx=dp(13),
+            height=dp(footer_height),
+        )
         self.footer_frame.pack(side="bottom", fill="x")
         self.footer_frame.pack_propagate(False)
-        self.upcoming_label = tk.Label(self.footer_frame, text="", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8), cursor="hand2")
+        footer_parent = self.footer_frame
+        self.upcoming_label = tk.Label(footer_parent, text="", bg=footer_background, fg=theme.text_muted, font=(FONT, 8), cursor="hand2")
         self.upcoming_label.pack(side="left")
         self.upcoming_label.bind("<Button-1>", lambda _event: UpcomingDialog(self))
         Tooltip(self.upcoming_label, "查看未来 7 天和已逾期日程")
         self.ddl_list_label = tk.Label(
-            self.footer_frame,
+            footer_parent,
             text=f"{DDL_LIST_ENTRY_LABEL} ›",
-            bg=theme.schedule_background,
+            bg=footer_background,
             fg=theme.text_secondary,
             font=(FONT, 8),
             cursor="hand2",
@@ -2703,7 +2877,7 @@ class CalendarApp(tk.Tk):
         self.ddl_list_label.bind("<ButtonPress-1>", lambda _event: self._set_ddl_list_entry_state("pressed"))
         self.ddl_list_label.bind("<ButtonRelease-1>", self._activate_ddl_list_entry)
         Tooltip(self.ddl_list_label, "查看全部未完成和已完成 DDL")
-        tk.Label(self.footer_frame, text="双击日期查看详情", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8)).pack(side="right")
+        tk.Label(footer_parent, text="双击日期查看详情", bg=footer_background, fg=theme.text_muted, font=(FONT, 8)).pack(side="right")
 
         self.collapsible_frame = tk.Frame(self.schedule_section, bg=theme.schedule_background)
         (
@@ -2971,12 +3145,28 @@ class CalendarApp(tk.Tk):
         self.agenda_toggle.configure(text="⌃" if self.agenda_open else "⌄")
 
         if not events and not routine_items:
-            empty = tk.Frame(self.agenda_inner, bg=theme.schedule_background, height=114)
-            empty.pack(fill="both", expand=True)
-            empty.pack_propagate(False)
             empty_title = "休息日不安排习惯清单" if not self.store.is_workday(self.selected) and self.store.routines else "这一天很清静"
-            tk.Label(empty, text=empty_title, bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 9, "bold")).pack(pady=(27, 2))
-            tk.Label(empty, text="双击日期查看详情 · 习惯清单仅在工作日出现", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8)).pack()
+            if theme.style == "frutiger":
+                empty = LogicalCanvas(
+                    self.agenda_inner,
+                    dpi=self.dpi,
+                    height=126,
+                    bg=theme.schedule_background,
+                    bd=0,
+                    highlightthickness=0,
+                )
+                empty.pack(fill="both", expand=True)
+                empty.bind(
+                    "<Configure>",
+                    lambda _event, canvas=empty, title=empty_title: self._draw_frutiger_empty_state(canvas, title),
+                )
+                self.after_idle(lambda canvas=empty, title=empty_title: self._draw_frutiger_empty_state(canvas, title))
+            else:
+                empty = tk.Frame(self.agenda_inner, bg=theme.schedule_background, height=114)
+                empty.pack(fill="both", expand=True)
+                empty.pack_propagate(False)
+                tk.Label(empty, text=empty_title, bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 9, "bold")).pack(pady=(27, 2))
+                tk.Label(empty, text="双击日期查看详情 · 习惯清单仅在工作日出现", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8)).pack()
         else:
             for item in items:
                 if isinstance(item, RoutineItem):
@@ -3654,7 +3844,11 @@ class CalendarApp(tk.Tk):
             background = self.theme.control_hover
             foreground = self.theme.accent
         else:
-            background = self.theme.schedule_background
+            background = (
+                blend(self.theme.schedule_background, self.theme.environment_haze, 0.28)
+                if self.theme.style == "frutiger"
+                else self.theme.schedule_background
+            )
             foreground = self.theme.text_secondary
         self.ddl_list_label.configure(bg=background, fg=foreground)
 

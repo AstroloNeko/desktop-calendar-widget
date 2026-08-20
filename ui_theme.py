@@ -31,6 +31,12 @@ class Theme:
     panel_secondary: str
     divider: str
 
+    # Optional environmental decoration used by expressive themes.
+    environment_haze: str
+    environment_horizon: str
+    environment_highlight: str
+    environment_accent: str
+
     # Header
     header_background: str
     header_gradient_start: str
@@ -137,6 +143,10 @@ MODERN = Theme(
     panel_background="#F7F6F2",
     panel_secondary="#EEEDE9",
     divider="#D8D7D2",
+    environment_haze="#F2F1ED",
+    environment_horizon="#D8D7D2",
+    environment_highlight="#FFFFFF",
+    environment_accent="#A9ABB2",
     header_background="#FAF9F6",
     header_gradient_start="#FAF9F6",
     header_gradient_mid="#FAF9F6",
@@ -230,8 +240,8 @@ MODERN = Theme(
 
 
 WIN7_AERO = Theme(
-    name="win7_aero",
-    display_name="Win7 Aero",
+    name="aero",
+    display_name="Windows 7 Glass",
     style="aero",
     window_background="#C3CDD1",
     window_border_outer="#75838A",
@@ -240,6 +250,10 @@ WIN7_AERO = Theme(
     panel_background="#FAFAF7",
     panel_secondary="#F1F2EF",
     divider="#E1E3E1",
+    environment_haze="#F1F2EF",
+    environment_horizon="#D5DCDA",
+    environment_highlight="#FFFFFF",
+    environment_accent="#91AAA8",
     header_background="#D2E0E4",
     header_gradient_start="#F5FDFE",
     header_gradient_mid="#C8D8DD",
@@ -346,6 +360,10 @@ PAPER = Theme(
     panel_background="#F5EFE4",
     panel_secondary="#ECE3D5",
     divider="#D9CFC0",
+    environment_haze="#EEE8DA",
+    environment_horizon="#D3C8B6",
+    environment_highlight="#FFFDF8",
+    environment_accent="#9C9A72",
     header_background="#EEE3D2",
     header_gradient_start="#FAF4E9",
     header_gradient_mid="#F1E7D7",
@@ -441,10 +459,122 @@ PAPER = Theme(
 )
 
 
-THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER)}
+FRUTIGER = Theme(
+    name="frutiger",
+    display_name="Frutiger Aero",
+    style="frutiger",
+    window_background="#8ED9E5",
+    window_border_outer="#3D8FA8",
+    window_border_inner="#F2FFFF",
+    window_shadow="#6B929D",
+    panel_background="#EFFAFA",
+    panel_secondary="#DDF3F4",
+    divider="#B9DDE0",
+    environment_haze="#ECF8E9",
+    environment_horizon="#B9DCAC",
+    environment_highlight="#F8FFF5",
+    environment_accent="#73BC7D",
+    header_background="#73CEE1",
+    header_gradient_start="#E9FCFF",
+    header_gradient_mid="#76D5E9",
+    header_gradient_end="#2C9BC2",
+    header_highlight="#FFFFFF",
+    header_border="#3C91AB",
+    header_shadow="#267A97",
+    header_text="#123E55",
+    header_subtext="#285F72",
+    text_primary="#173843",
+    text_secondary="#53747D",
+    text_muted="#7E9DA4",
+    text_disabled="#AEC6CA",
+    text_on_accent="#FFFFFF",
+    control_background="#BDEBF2",
+    control_hover="#E5FCFF",
+    control_pressed="#79C7D8",
+    control_border="#5AA8BD",
+    control_highlight="#FFFFFF",
+    control_disabled="#D7E8EA",
+    control_text="#17485A",
+    calendar_background="#F4FCFB",
+    weekday_text="#588087",
+    date_text="#173B47",
+    date_other_month="#A3C0C4",
+    date_hover_background="#DDF7F8",
+    date_hover_border="#87D3DC",
+    date_selected_background="#39B5D3",
+    date_selected_border="#168FB3",
+    date_selected_gradient_start="#8CE5F1",
+    date_selected_gradient_end="#2498C2",
+    date_selected_inner_border="#BFF5F8",
+    date_today_background="#FFF8D9",
+    date_today_border="#E0A139",
+    date_event_indicator="#20A5C0",
+    date_weekend_text="#B15C68",
+    date_selected_today="#FFC34D",
+    schedule_background="#EAF8F7",
+    schedule_card_background="#FAFFFF",
+    schedule_card_hover="#E4F6F7",
+    schedule_card_border="#B7DCE0",
+    schedule_time_text="#5D828A",
+    input_background="#F8FFFF",
+    input_border="#8DC8D2",
+    input_hover_border="#55B5C8",
+    input_focus="#00A3CF",
+    accent="#008FC5",
+    accent_hover="#00ABD4",
+    accent_soft="#D4F2F8",
+    danger="#D84C57",
+    danger_soft="#FBE7E8",
+    ddl_indicator="#E66B42",
+    ddl_indicator_highlight="#FFD0B9",
+    event_type_general="#6D9097",
+    event_type_urgent="#D34F52",
+    event_type_ddl="#E1663E",
+    event_type_urgent_background="#FBE9E8",
+    event_type_urgent_border="#E8B8B5",
+    event_type_ddl_background="#FFF0E5",
+    event_type_ddl_border="#EDC1A5",
+    ddl_pinned_background="#FFF3EA",
+    ddl_pinned_border="#E9B694",
+    ddl_regular_background="#E6F5F4",
+    ddl_regular_border="#B4D9DC",
+    ddl_overdue_background="#FBE7E6",
+    ddl_due_background="#FFF0E2",
+    checkbox_border="#75B8C4",
+    checkbox_checked="#29A9C4",
+    date_leave_indicator="#C88355",
+    date_holiday_indicator="#B96C56",
+    quick_success="#3FA469",
+    weekend="#B15C68",
+    holiday_workday="#D27B24",
+    holiday_festival="#7D62B2",
+    tooltip_background="#173E4D",
+    tooltip_text="#F7FFFF",
+    card_done_background="#E4EEEE",
+    event_done="#9EB6B9",
+    text_done="#7F989E",
+    todo_tag_background="#E5F5CC",
+    todo_tag_text="#548021",
+    metrics=ThemeMetrics(
+        corner_radius=11,
+        control_radius=9,
+        date_radius=8,
+        outer_border_width=1,
+        inner_border_width=1,
+        control_height=27,
+        shadow_depth=2,
+        highlight_alpha=0.76,
+        animation_ms=80,
+    ),
+)
+
+
+THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER, FRUTIGER)}
 VALID_THEME_NAMES = tuple(THEMES)
 DEFAULT_THEME_NAME = MODERN.name
-LEGACY_THEME_ALIASES = {"aero": WIN7_AERO.name}
+# v0.6 and earlier builds saved ``win7_aero``.  ``aero`` is the stable
+# public settings ID; accepting both values keeps every existing profile valid.
+LEGACY_THEME_ALIASES = {"win7_aero": WIN7_AERO.name}
 
 
 def normalize_theme_name(value: object) -> str:

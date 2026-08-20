@@ -160,6 +160,233 @@ def bevel_control(
         canvas.create_line(3, height - 3, width - 4, height - 3, fill=blend(background, border, 0.28))
 
 
+def glossy_control(
+    canvas: tk.Canvas,
+    width: int,
+    height: int,
+    *,
+    background: str,
+    border: str,
+    highlight: str,
+    depth: str,
+    radius: int,
+    pressed: bool = False,
+) -> None:
+    """Draw a compact translucent-plastic control without moving its bounds."""
+    left, top, right, bottom = 0, 0, max(1, width - 1), max(1, height - 1)
+    inner_radius = max(2, radius - 1)
+    gradient_start = (
+        blend(background, depth, 0.22)
+        if pressed
+        else blend(background, highlight, 0.58)
+    )
+    gradient_end = (
+        blend(background, highlight, 0.08)
+        if pressed
+        else blend(background, depth, 0.28)
+    )
+    rounded_vertical_gradient(
+        canvas,
+        left + 1,
+        top + 1,
+        right - 1,
+        bottom - 1,
+        inner_radius,
+        gradient_start,
+        gradient_end,
+        tags="control_art",
+    )
+    rounded_rectangle(
+        canvas,
+        left,
+        top,
+        right,
+        bottom,
+        radius,
+        fill="",
+        outline=border,
+        width=1,
+        tags="control_art",
+    )
+    rounded_rectangle(
+        canvas,
+        left + 1,
+        top + 1,
+        right - 1,
+        bottom - 1,
+        inner_radius,
+        fill="",
+        outline=blend(border, highlight, 0.58 if not pressed else 0.28),
+        width=1,
+        tags="control_art",
+    )
+    shine_y = top + 3
+    canvas.create_line(
+        left + radius,
+        shine_y,
+        right - radius,
+        shine_y,
+        fill=blend(background, highlight, 0.76 if not pressed else 0.26),
+        width=1,
+        capstyle="round",
+        tags="control_art",
+    )
+    canvas.create_line(
+        left + radius,
+        bottom - 2,
+        right - radius,
+        bottom - 2,
+        fill=blend(background, depth, 0.44),
+        width=1,
+        capstyle="round",
+        tags="control_art",
+    )
+
+
+def draw_bubble_motif(
+    canvas: tk.Canvas,
+    bubbles: Iterable[tuple[float, float, float]],
+    *,
+    outline: str,
+    highlight: str,
+    accent: str,
+    tags: str | Iterable[str] = "bubble_art",
+) -> None:
+    """Draw deterministic glass bubbles suitable for static chrome decoration."""
+    for center_x, center_y, radius in bubbles:
+        if radius < 2:
+            continue
+        canvas.create_oval(
+            center_x - radius,
+            center_y - radius,
+            center_x + radius,
+            center_y + radius,
+            fill="",
+            outline=outline,
+            width=1,
+            tags=tags,
+        )
+        canvas.create_arc(
+            center_x - radius + 1,
+            center_y - radius + 1,
+            center_x + radius - 1,
+            center_y + radius - 1,
+            start=48,
+            extent=94,
+            style="arc",
+            outline=highlight,
+            width=1,
+            tags=tags,
+        )
+        glint = max(1, round(radius * 0.18))
+        canvas.create_oval(
+            center_x - radius * 0.36 - glint,
+            center_y - radius * 0.35 - glint,
+            center_x - radius * 0.36 + glint,
+            center_y - radius * 0.35 + glint,
+            fill=highlight,
+            outline="",
+            tags=tags,
+        )
+        if radius >= 6:
+            canvas.create_arc(
+                center_x - radius + 2,
+                center_y - radius + 2,
+                center_x + radius - 2,
+                center_y + radius - 2,
+                start=214,
+                extent=52,
+                style="arc",
+                outline=accent,
+                width=1,
+                tags=tags,
+            )
+
+
+def draw_ecology_horizon(
+    canvas: tk.Canvas,
+    width: int,
+    height: int,
+    *,
+    background: str,
+    haze: str,
+    horizon: str,
+    highlight: str,
+    accent: str,
+    tags: str | Iterable[str] = "environment_art",
+) -> None:
+    """Blend a cool surface into a soft ecological haze at the lower edge."""
+    if width <= 1 or height <= 1:
+        return
+    lower_haze = blend(background, haze, 0.42)
+    vertical_multi_gradient(
+        canvas,
+        0,
+        0,
+        width,
+        height,
+        (
+            (0.0, background),
+            (0.26, blend(background, haze, 0.03)),
+            (0.56, blend(background, haze, 0.10)),
+            (0.82, blend(background, haze, 0.24)),
+            (1.0, lower_haze),
+        ),
+        tags=tags,
+    )
+    horizon_y = max(2, round(height * 0.88))
+    canvas.create_line(
+        0,
+        horizon_y,
+        round(width * 0.34),
+        horizon_y - 1,
+        round(width * 0.67),
+        horizon_y,
+        width,
+        horizon_y - 1,
+        fill=blend(lower_haze, horizon, 0.08),
+        width=1,
+        smooth=True,
+        tags=tags,
+    )
+    canvas.create_line(
+        round(width * 0.18),
+        horizon_y - 3,
+        round(width * 0.49),
+        horizon_y - 4,
+        round(width * 0.82),
+        horizon_y - 3,
+        fill=blend(lower_haze, highlight, 0.24),
+        width=1,
+        smooth=True,
+        tags=tags,
+    )
+
+    # A very low-contrast side reflection hints at vegetation outside the
+    # glass without drawing any countable blades or a landscape silhouette.
+    side_glow = blend(lower_haze, accent, 0.08)
+    canvas.create_line(
+        0,
+        height - 2,
+        round(width * 0.10),
+        height - 3,
+        fill=side_glow,
+        width=1,
+        smooth=True,
+        tags=tags,
+    )
+    canvas.create_line(
+        round(width * 0.90),
+        height - 3,
+        width,
+        height - 2,
+        fill=side_glow,
+        width=1,
+        smooth=True,
+        tags=tags,
+    )
+
+
 def _calendar_rounded_rectangle(
     canvas: tk.Canvas,
     left: int,
