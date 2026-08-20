@@ -3130,6 +3130,7 @@ class CalendarApp(tk.Tk):
         self.minsize(1, 1)
         self.title(APP_NAME)
         self.view_mode = "compact"
+        self._activate_compact_return_session()
         self.store.settings["view_mode"] = "compact"
         self._rebuild_main_ui("", True)
         if compact is None:
@@ -3142,6 +3143,10 @@ class CalendarApp(tk.Tk):
         make_tool_window(self)
         self.store.save()
         self.after(80, self.apply_window_mode)
+
+    def _activate_compact_return_session(self) -> None:
+        """Keep a restored desktop-mode gadget interactable without making it permanently topmost."""
+        self.desktop_session_active = self.window_mode == "desktop"
 
     def toggle_global_view(self) -> None:
         if self.view_mode == "global":

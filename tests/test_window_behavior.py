@@ -67,6 +67,15 @@ class WindowBehaviorTests(unittest.TestCase):
         fake = type("FakeCalendar", (), {"view_mode": "compact", "winfo_width": lambda self: 2000})()
         self.assertEqual(CalendarApp.get_view_mode(fake), "compact")
 
+    def test_return_to_compact_activates_foreground_session_in_desktop_mode(self) -> None:
+        fake = type("FakeCalendar", (), {"window_mode": "desktop", "desktop_session_active": False})()
+        CalendarApp._activate_compact_return_session(fake)
+        self.assertTrue(fake.desktop_session_active)
+
+        fake.window_mode = "pinned"
+        CalendarApp._activate_compact_return_session(fake)
+        self.assertFalse(fake.desktop_session_active)
+
     def test_ddl_relative_labels_cover_overdue_today_tomorrow_and_future(self) -> None:
         now = datetime(2026, 8, 7, 12, 0)
         self.assertEqual(ddl_relative_label(datetime(2026, 8, 7, 11, 59), now), "已逾期")
