@@ -52,7 +52,7 @@ class StoreTests(unittest.TestCase):
 
     def test_theme_round_trips(self):
         store = Store(self.data_file)
-        for theme_name in ("modern", "win7_aero", "paper"):
+        for theme_name in ("modern", "aero", "paper", "frutiger"):
             store.settings["theme"] = theme_name
             store.save()
             loaded = Store(self.data_file)
@@ -61,7 +61,24 @@ class StoreTests(unittest.TestCase):
     def test_legacy_aero_theme_name_is_preserved(self):
         self.data_file.write_text(json.dumps({"settings": {"theme": "aero"}}), encoding="utf-8")
         store = Store(self.data_file)
-        self.assertEqual(store.settings["theme"], "win7_aero")
+        self.assertEqual(store.settings["theme"], "aero")
+
+    def test_v06_win7_aero_theme_name_is_migrated(self):
+        self.data_file.write_text(json.dumps({"settings": {"theme": "win7_aero"}}), encoding="utf-8")
+        store = Store(self.data_file)
+        self.assertEqual(store.settings["theme"], "aero")
+
+    def test_frutiger_theme_persistence_does_not_change_events(self):
+        store = Store(self.data_file)
+        event = Event("theme-safe", "主题切换不改事项", "2026-08-10T09:30", event_type="ddl")
+        store.upsert(event)
+        store.settings["theme"] = "frutiger"
+        store.save()
+
+        loaded = Store(self.data_file)
+        self.assertEqual(loaded.settings["theme"], "frutiger")
+        self.assertEqual([item.id for item in loaded.events], ["theme-safe"])
+        self.assertEqual(loaded.events[0].event_type, "ddl")
 
     def test_invalid_theme_falls_back_to_modern(self):
         self.data_file.write_text(json.dumps({"settings": {"theme": "neon_hud"}}), encoding="utf-8")
