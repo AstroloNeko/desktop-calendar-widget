@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from dpi_utils import DpiManager, LogicalCanvas, enable_dpi_awareness, scale_px, scaled_geometry, unscale_px
+from dpi_utils import DpiManager, LogicalCanvas, enable_dpi_awareness, scale_px, scaled_geometry, unscale_px, work_area_for_rect
 
 
 DPI_AWARENESS_MODE = enable_dpi_awareness()
@@ -36,6 +36,25 @@ from calendar_core import (
     normalize_reminder_time,
 )
 from holiday_data import HolidayInfo, holiday_for
+from calendar_flow_layout import (
+    CalendarFlowLayout,
+    build_calendar_flow_layout,
+    flow_card_detail_level,
+    flow_day_at,
+    flow_date_range_text,
+    normalize_flow_drag_range,
+    normalize_global_display_mode,
+)
+from global_timeline_ui import (
+    GLOBAL_TIMELINE_LAYOUT,
+    canvas_day_at,
+    detail_state_text,
+    primary_action_for_view,
+    timeline_tooltip_text,
+    timeline_bar_label,
+    timeline_type_label,
+    wheel_units,
+)
 from tray_icon import TrayIcon
 from win_integration import (
     SingleInstance,
@@ -43,11 +62,14 @@ from win_integration import (
     clamp_to_work_area,
     is_autostart_enabled,
     is_foreground_process,
+    make_app_window,
     make_tool_window,
     raise_for_interaction,
     send_to_desktop,
     set_autostart,
 )
+from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
+from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry
 from update_manager import (
     UpdateError,
     UpdateInfo,
@@ -94,6 +116,12 @@ DATE_STATE_BOTTOM = 23
 DATE_RING_HALF_WIDTH = 17
 DATE_RING_TOP = 0
 DATE_RING_BOTTOM = 26
+GLOBAL_MIN_WIDTH = 720
+GLOBAL_MIN_HEIGHT = 520
+GLOBAL_TITLE_WIDTH = GLOBAL_TIMELINE_LAYOUT.label_width
+GLOBAL_DAY_MIN_WIDTH = GLOBAL_TIMELINE_LAYOUT.day_min_width
+GLOBAL_HEADER_HEIGHT = GLOBAL_TIMELINE_LAYOUT.date_header_height
+GLOBAL_ROW_HEIGHT = GLOBAL_TIMELINE_LAYOUT.row_height
 
 FONT = "Microsoft YaHei UI"
 
@@ -567,6 +595,54 @@ class Tooltip:
             self.window = None
 
 
+class CanvasTooltip:
+    """One reusable tooltip for tagged Canvas content."""
+
+    def __init__(self, owner: tk.Widget) -> None:
+        self.owner = owner
+        self.window: Optional[tk.Toplevel] = None
+        self.after_id: Optional[str] = None
+        self.pending: Optional[tuple[str, int, int]] = None
+
+    def schedule(self, text: str, x_root: int, y_root: int) -> None:
+        self.hide()
+        self.pending = (text, x_root, y_root)
+        self.after_id = self.owner.after(420, self.show)
+
+    def show(self) -> None:
+        self.after_id = None
+        if self.window or not self.pending or not self.owner.winfo_exists():
+            return
+        text, x_root, y_root = self.pending
+        palette = current_theme()
+        self.window = tk.Toplevel(self.owner)
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        self.window.geometry(position_at(x_root + 12, y_root + 16))
+        tk.Label(
+            self.window,
+            text=text,
+            justify="left",
+            bg=palette.tooltip_background,
+            fg=palette.tooltip_text,
+            font=(FONT, 8),
+            padx=8,
+            pady=6,
+        ).pack()
+
+    def hide(self, _event=None) -> None:
+        if self.after_id:
+            try:
+                self.owner.after_cancel(self.after_id)
+            except tk.TclError:
+                pass
+            self.after_id = None
+        self.pending = None
+        if self.window:
+            self.window.destroy()
+            self.window = None
+
+
 class DayCell(LogicalCanvas):
     def __init__(self, parent: tk.Widget, app: "CalendarApp", column: int) -> None:
         cell_height = 35 if app.theme.style == "aero" else 36
@@ -811,7 +887,14 @@ class EventEditor(tk.Toplevel):
     WIDTH = 400
     HEIGHT = 590
 
-    def __init__(self, master: "CalendarApp", selected: date, event: Optional[Event] = None) -> None:
+    def __init__(
+        self,
+        master: "CalendarApp",
+        selected: date,
+        event: Optional[Event] = None,
+        *,
+        initial_duration_days: int = 1,
+    ) -> None:
         super().__init__(master)
         self.master_app = master
         self.event = event
@@ -825,7 +908,7 @@ class EventEditor(tk.Toplevel):
         self.title_var = tk.StringVar(value=event.title if event else "")
         self.date_var = tk.StringVar(value=due.strftime("%Y-%m-%d"))
         self.time_var = tk.StringVar(value=due.strftime("%H:%M") if event and event.has_time else "")
-        self.duration_var = tk.StringVar(value=str(event.duration_days if event else 1))
+        self.duration_var = tk.StringVar(value=str(event.duration_days if event else max(1, initial_duration_days)))
         self.skip_non_working_var = tk.BooleanVar(value=event.skip_non_working_days if event else False)
         self.end_as_ddl_var = tk.BooleanVar(value=event.end_as_ddl if event else False)
         self.event_type_var = tk.StringVar(value=event.event_type if event else "general")
@@ -846,6 +929,10 @@ class EventEditor(tk.Toplevel):
         title.pack(side="left", pady=12)
         close = button_label(header, "×", self.close, width=2, bg=CARD, fg=SUBTLE, hover=HOVER, font_size=13)
         close.pack(side="right", pady=8)
+        # Close on release so destroying this modal cannot hand the matching
+        # release event to a ThemeButton underneath it.
+        close.unbind("<Button-1>")
+        close.bind("<ButtonRelease-1>", self._close_from_pointer)
         for widget in (header, title):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag)
@@ -1047,8 +1134,21 @@ class EventEditor(tk.Toplevel):
     def _present(self) -> None:
         if not self.winfo_exists():
             return
+        self.transient(self.master_app)
         self.master_app.present_overlay(self)
-        self.title_entry.focus_force()
+        try:
+            self.grab_set()
+        except tk.TclError:
+            return
+        self.focus_set()
+        self.title_entry.focus_set()
+
+    def _close_from_pointer(self, _event: tk.Event) -> str:
+        # Let Tk finish dispatching the release before the native child window
+        # disappears, otherwise Windows can deliver the tail of the gesture to
+        # the Global View underneath it.
+        self.after_idle(self.close)
+        return "break"
 
     @staticmethod
     def _field_label(parent: tk.Widget, text: str) -> None:
@@ -1176,6 +1276,11 @@ class EventEditor(tk.Toplevel):
     def close(self) -> None:
         if self.master_app.editor_window is self:
             self.master_app.editor_window = None
+        try:
+            if self.grab_current() is self:
+                self.grab_release()
+        except (AttributeError, tk.TclError):
+            pass
         self.destroy()
         detail = self.master_app.day_detail_window
         if detail and detail.winfo_exists():
@@ -2319,6 +2424,30 @@ class CalendarApp(tk.Tk):
         self.selected = date.today()
         self.shown_year = self.selected.year
         self.shown_month = self.selected.month
+        # The desktop gadget remains the startup mode even if the previous
+        # session ended while the large workspace was open.
+        self.view_mode = "compact"
+        self.global_display_mode = normalize_global_display_mode(self.store.settings.get("global_display_mode"))
+        self.timeline_selection = TimelineSelection()
+        self.timeline_model: Optional[TimelineMonth] = None
+        self.calendar_flow_layout: Optional[CalendarFlowLayout] = None
+        self._global_normal_geometry: Optional[WindowGeometry] = None
+        self._geometry_save_job: Optional[str] = None
+        self._global_render_job: Optional[str] = None
+        self._global_resize_job: Optional[str] = None
+        self._global_day_width = 0
+        self._global_content_width = 0
+        self._global_content_height = 0
+        self._global_flow_column_width = 0
+        self._global_flow_week_height = 0
+        self._global_flow_drag_start: Optional[date] = None
+        self._global_flow_drag_end: Optional[date] = None
+        self._global_flow_drag_anchor: Optional[date] = None
+        self._global_flow_drag_moved = False
+        self._global_flow_hover_item_id: Optional[str] = None
+        self._global_flow_card_styles: dict[str, list[tuple[str, str, str, int]]] = {}
+        self._global_detail_visible = True
+        self._global_tooltip: Optional[CanvasTooltip] = None
         self.day_cells: list[DayCell] = []
         self.agenda_open = bool(self.store.settings.get("agenda_open", True))
         self.window_mode = self.store.settings.get("window_mode", "desktop")
@@ -2379,6 +2508,7 @@ class CalendarApp(tk.Tk):
         self._set_initial_geometry()
         self._bind_shortcuts()
         self.bind("<Configure>", self._schedule_dpi_check, add="+")
+        self.bind("<Configure>", self._schedule_view_geometry_save, add="+")
         self.bind("<FocusIn>", self._schedule_dpi_check, add="+")
         self.render()
         self.after(80, self._finish_window_setup)
@@ -2437,6 +2567,25 @@ class CalendarApp(tk.Tk):
             ],
             arrowcolor=[("disabled", self.theme.text_disabled)],
         )
+        for orientation in ("Vertical", "Horizontal"):
+            style_name = f"Global.{orientation}.TScrollbar"
+            style.configure(
+                style_name,
+                width=self.dpi.px(8),
+                background=self.theme.control_background,
+                troughcolor=self.theme.panel_background,
+                bordercolor=self.theme.divider,
+                arrowcolor=self.theme.control_text,
+                relief="flat",
+            )
+            style.map(
+                style_name,
+                background=[
+                    ("pressed", self.theme.control_pressed),
+                    ("active", self.theme.control_hover),
+                ],
+                arrowcolor=[("disabled", self.theme.text_disabled)],
+            )
 
     def _apply_theme_opacity(self, value: Optional[float] = None) -> None:
         if value is None:
@@ -2458,6 +2607,9 @@ class CalendarApp(tk.Tk):
             pass
 
     def _build_ui(self) -> None:
+        if self.view_mode == "global":
+            self._build_global_ui()
+            return
         theme = self.theme
         dp = self.dpi.px
         header_height = 55 if theme.style == "aero" else 56
@@ -2508,7 +2660,7 @@ class CalendarApp(tk.Tk):
         self.header.tag_bind("month_text", "<Button-1>", lambda _event: self.go_today())
 
         compact = theme.style == "aero"
-        widths = (25, 25, 25, 37, 29, 25) if compact else (27, 27, 27, 39, 31, 27)
+        widths = (25, 25, 25, 37, 29, 25, 25) if compact else (27, 27, 27, 39, 31, 27, 27)
         control_height = 25 if compact else 27
         control_y = 15 if compact else 14
         previous = ThemeButton(self.header, self, "‹", lambda: self.change_month(-1), width=widths[0], height=control_height, font_size=13 if compact else 14)
@@ -2516,8 +2668,9 @@ class CalendarApp(tk.Tk):
         following = ThemeButton(self.header, self, "›", lambda: self.change_month(1), width=widths[2], height=control_height, font_size=13 if compact else 14)
         self.mode_button = ThemeButton(self.header, self, "桌面", self.toggle_window_mode, width=widths[3], height=control_height, font_size=8)
         self.menu_button = ThemeButton(self.header, self, "···", self.show_main_menu, width=widths[4], height=control_height, font_size=9 if compact else 10)
-        minimize = ThemeButton(self.header, self, "−", self.hide_to_tray, width=widths[5], height=control_height, font_size=10)
-        controls = (previous, today, following, self.mode_button, self.menu_button, minimize)
+        global_view = ThemeButton(self.header, self, "□", self.toggle_global_view, width=widths[5], height=control_height, font_size=10)
+        minimize = ThemeButton(self.header, self, "−", self.hide_to_tray, width=widths[6], height=control_height, font_size=10)
+        controls = (previous, today, following, self.mode_button, self.menu_button, global_view, minimize)
         x = WINDOW_WIDTH - 13 - sum(widths) - 5 * 2
         for control, control_width in zip(controls, widths):
             control.place(x=dp(x), y=dp(control_y), width=dp(control_width), height=dp(control_height))
@@ -2526,6 +2679,7 @@ class CalendarApp(tk.Tk):
         Tooltip(today, "回到今天（Ctrl+T）")
         Tooltip(following, "下个月（滚轮向下 / PgDn）")
         Tooltip(self.mode_button, "桌面模式空闲时不遮挡应用；点击月历会临时前置")
+        Tooltip(global_view, "打开全局视图")
         Tooltip(minimize, "隐藏到通知区域，提醒仍会继续")
 
         self.header.bind("<ButtonPress-1>", self._start_drag)
@@ -2604,6 +2758,316 @@ class CalendarApp(tk.Tk):
             widget.bind("<Button-1>", lambda _event: self.toggle_agenda())
 
         self._build_agenda_body()
+
+    def _build_global_ui(self) -> None:
+        """Build the complete Global workspace without changing Compact layout."""
+        theme = self.theme
+        dp = self.dpi.px
+        self.configure(bg=theme.window_shadow)
+        self.window_frame = tk.Frame(self, bg=theme.window_border_outer)
+        self.window_frame.pack(fill="both", expand=True, padx=dp(theme.metrics.shadow_depth), pady=dp(theme.metrics.shadow_depth))
+        self.inner_frame = tk.Frame(self.window_frame, bg=theme.window_border_inner)
+        self.inner_frame.pack(fill="both", expand=True, padx=dp(theme.metrics.outer_border_width), pady=dp(theme.metrics.outer_border_width))
+        self.shell = tk.Frame(self.inner_frame, bg=theme.panel_background)
+        self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
+
+        toolbar = tk.Frame(
+            self.shell,
+            bg=theme.header_background,
+            highlightthickness=dp(1) if theme.style in ("aero", "frutiger") else 0,
+            highlightbackground=theme.header_highlight,
+            padx=dp(14),
+            pady=dp(9),
+        )
+        toolbar.pack(fill="x")
+        title_box = tk.Frame(toolbar, bg=theme.header_background)
+        title_box.pack(side="left", fill="x", expand=True)
+        self.global_month_label = tk.Label(
+            title_box,
+            text="",
+            bg=theme.header_background,
+            fg=theme.header_text,
+            font=(FONT, 14, "bold"),
+            anchor="w",
+        )
+        self.global_month_label.pack(side="left")
+        self.global_view_title_label = tk.Label(
+            title_box,
+            text="全局时间轴",
+            bg=theme.header_background,
+            fg=theme.header_subtext,
+            font=(FONT, 8),
+        )
+        self.global_view_title_label.pack(side="left", padx=(dp(10), 0), pady=(dp(5), 0))
+        if theme.style == "frutiger":
+            motif = LogicalCanvas(title_box, dpi=self.dpi, width=42, height=30, bg=theme.header_background, bd=0, highlightthickness=0)
+            motif.pack(side="left", padx=(dp(8), 0))
+            draw_bubble_motif(
+                motif,
+                ((10, 13, 6), (25, 8, 4), (31, 20, 3)),
+                outline=blend(theme.header_gradient_mid, theme.header_highlight, 0.64),
+                highlight=theme.header_highlight,
+                accent=theme.environment_accent,
+            )
+
+        minimize = ThemeButton(toolbar, self, "−", self.hide_to_tray, width=29, height=29, font_size=11, surface_background=theme.header_background)
+        restore = ThemeButton(toolbar, self, "紧凑视图", self.return_to_compact_view, width=68, height=29, font_size=8, surface_background=theme.header_background, outlined=True)
+        self.menu_button = ThemeButton(toolbar, self, "···", self.show_main_menu, width=34, height=29, font_size=10, surface_background=theme.header_background)
+        self.mode_button = ThemeButton(toolbar, self, "窗口置顶", self.toggle_window_mode, width=62, height=29, font_size=8, surface_background=theme.header_background, outlined=True)
+        ddl_button = ThemeButton(toolbar, self, "DDL列表", self.open_ddl_list, width=58, height=29, font_size=8, surface_background=theme.header_background, outlined=True)
+        habit_button = ThemeButton(toolbar, self, ROUTINE_ENTRY_LABEL, self.open_routine_manager, width=46, height=29, font_size=8, surface_background=theme.header_background, outlined=True)
+        create_button = ThemeButton(toolbar, self, "+ 新建事项", self.open_new_event, width=82, height=29, font_size=8, surface_background=theme.header_background, accented=True)
+        following = ThemeButton(toolbar, self, "›", lambda: self.change_month(1), width=29, height=29, font_size=13, surface_background=theme.header_background)
+        today = ThemeButton(toolbar, self, "今", self.go_today, width=29, height=29, font_size=9, surface_background=theme.header_background)
+        previous = ThemeButton(toolbar, self, "‹", lambda: self.change_month(-1), width=29, height=29, font_size=13, surface_background=theme.header_background)
+        for control in (minimize, restore, self.menu_button, self.mode_button, ddl_button, habit_button, create_button, following, today, previous):
+            control.pack(side="right", padx=(dp(4), 0))
+        Tooltip(previous, "上个月（PgUp）")
+        Tooltip(today, "回到今天（Ctrl+T）")
+        Tooltip(following, "下个月（PgDn）")
+        Tooltip(create_button, "在当前选中日期新建事项")
+        Tooltip(habit_button, "打开习惯清单")
+        Tooltip(ddl_button, "查看完整 DDL 列表")
+        Tooltip(self.mode_button, "切换桌面 / 置顶模式")
+        Tooltip(self.menu_button, "设置、主题、更新与数据工具")
+        Tooltip(restore, "返回紧凑视图")
+        Tooltip(minimize, "隐藏到通知区域")
+
+        quick_surface = blend(theme.schedule_background, theme.environment_haze, 0.18) if theme.style == "frutiger" else theme.schedule_background
+        quick_frame = tk.Frame(self.shell, bg=quick_surface, padx=dp(14), pady=dp(8))
+        quick_frame.pack(fill="x")
+        tk.Label(quick_frame, text="快速添加", bg=quick_surface, fg=theme.text_secondary, font=(FONT, 8, "bold")).pack(side="left", padx=(0, dp(9)))
+        self._quick_entry_hovered = False
+        self.quick_var = tk.StringVar(value="")
+        self.quick_entry = tk.Entry(
+            quick_frame,
+            textvariable=self.quick_var,
+            bg=theme.input_background,
+            fg=theme.text_muted,
+            insertbackground=theme.text_primary,
+            relief="flat",
+            highlightthickness=dp(1),
+            highlightbackground=theme.input_border,
+            highlightcolor=theme.input_focus,
+            font=(FONT, 9),
+        )
+        self.quick_entry.pack(side="left", fill="x", expand=True, ipady=dp(6))
+        self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
+        self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
+        self.quick_entry.bind("<Enter>", lambda _event: self._quick_entry_hover(True))
+        self.quick_entry.bind("<Leave>", lambda _event: self._quick_entry_hover(False))
+        self.quick_entry.bind("<Return>", self.quick_add)
+        self.quick_options_button = ThemeButton(
+            quick_frame,
+            self,
+            "一般 · 选项",
+            self.show_quick_options,
+            width=72,
+            height=29,
+            font_size=8,
+            surface_background=quick_surface,
+            outlined=True,
+        )
+        self.quick_options_button.pack(side="right", padx=(dp(6), 0))
+        self._refresh_quick_options_button()
+
+        info_bar = tk.Frame(self.shell, bg=theme.panel_secondary, padx=dp(14), pady=dp(5))
+        info_bar.pack(fill="x")
+        self.global_summary_label = tk.Label(info_bar, text="", bg=theme.panel_secondary, fg=theme.text_secondary, font=(FONT, 8), anchor="w")
+        self.global_summary_label.pack(side="left")
+        day_detail_button = ThemeButton(info_bar, self, "当天详情", self.open_day_detail, width=66, height=23, font_size=8, surface_background=theme.panel_secondary, outlined=True)
+        day_detail_button.pack(side="right", padx=(dp(8), 0))
+        mode_switch = tk.Frame(
+            info_bar,
+            bg=theme.divider,
+            padx=dp(1),
+            pady=dp(1),
+        )
+        mode_switch.pack(side="right", padx=(dp(8), 0))
+        self.global_flow_mode_button = ThemeButton(
+            mode_switch,
+            self,
+            "▦ 月度排期",
+            lambda: self.set_global_display_mode("flow"),
+            width=82,
+            height=23,
+            font_size=8,
+            surface_background=theme.panel_secondary,
+            outlined=True,
+        )
+        self.global_flow_mode_button.pack(side="left")
+        self.global_timeline_mode_button = ThemeButton(
+            mode_switch,
+            self,
+            "▤ 时间轴",
+            lambda: self.set_global_display_mode("timeline"),
+            width=76,
+            height=23,
+            font_size=8,
+            surface_background=theme.panel_secondary,
+            outlined=True,
+        )
+        self.global_timeline_mode_button.pack(side="left")
+        Tooltip(day_detail_button, "查看当前选中日期的完整事项列表")
+        Tooltip(self.global_flow_mode_button, "按周查看本月每天的安排")
+        Tooltip(self.global_timeline_mode_button, "按事项查看持续时间与 DDL")
+
+        self.global_workspace = tk.Frame(self.shell, bg=theme.panel_background, padx=dp(10), pady=dp(9))
+        self.global_workspace.pack(fill="both", expand=True)
+        self.global_workspace.grid_rowconfigure(0, weight=1)
+        self.global_workspace.grid_columnconfigure(0, weight=1)
+        self.global_workspace.bind("<Configure>", self._on_global_workspace_configure)
+
+        self.global_timeline_shell = tk.Frame(
+            self.global_workspace,
+            bg=theme.schedule_background,
+            highlightthickness=dp(1),
+            highlightbackground=theme.divider,
+        )
+        self.global_timeline_shell.grid(row=0, column=0, sticky="nsew")
+        self.global_timeline_shell.grid_rowconfigure(1, weight=1)
+        self.global_timeline_shell.grid_columnconfigure(1, weight=1)
+        label_width = dp(GLOBAL_TITLE_WIDTH)
+        header_height = dp(GLOBAL_HEADER_HEIGHT)
+        self.global_corner_canvas = tk.Canvas(self.global_timeline_shell, width=label_width, height=header_height, bg=theme.panel_secondary, bd=0, highlightthickness=0)
+        self.global_date_canvas = tk.Canvas(self.global_timeline_shell, height=header_height, bg=theme.schedule_background, bd=0, highlightthickness=0)
+        self.global_label_canvas = tk.Canvas(self.global_timeline_shell, width=label_width, bg=theme.panel_background, bd=0, highlightthickness=0)
+        self.global_timeline_canvas = tk.Canvas(self.global_timeline_shell, bg=theme.schedule_background, bd=0, highlightthickness=0)
+        self.global_canvas = self.global_timeline_canvas
+        self.global_vscroll = ttk.Scrollbar(
+            self.global_timeline_shell,
+            orient="vertical",
+            command=self._global_yview,
+            style="Global.Vertical.TScrollbar",
+        )
+        self.global_hscroll = ttk.Scrollbar(
+            self.global_timeline_shell,
+            orient="horizontal",
+            command=self._global_xview,
+            style="Global.Horizontal.TScrollbar",
+        )
+        self.global_timeline_canvas.configure(xscrollcommand=self._sync_global_xscroll, yscrollcommand=self._sync_global_yscroll)
+        self.global_corner_canvas.grid(row=0, column=0, sticky="nsew")
+        self.global_date_canvas.grid(row=0, column=1, sticky="nsew")
+        self.global_label_canvas.grid(row=1, column=0, sticky="nsew")
+        self.global_timeline_canvas.grid(row=1, column=1, sticky="nsew")
+        self.global_vscroll.grid(row=1, column=2, sticky="ns")
+        self.global_hscroll.grid(row=2, column=1, sticky="ew")
+        self.global_timeline_canvas.bind("<Configure>", self._schedule_global_render)
+        for canvas in (self.global_date_canvas, self.global_label_canvas, self.global_timeline_canvas):
+            canvas.bind("<MouseWheel>", self._global_mousewheel)
+            canvas.bind("<Shift-MouseWheel>", self._global_shift_mousewheel)
+        self.global_date_canvas.bind("<Button-1>", self._select_global_day)
+        self.global_date_canvas.bind("<Double-Button-1>", self._create_global_day)
+        self.global_date_canvas.bind("<Button-3>", self._show_global_day_menu)
+        self.global_timeline_canvas.bind("<Button-1>", self._select_global_day)
+        self.global_timeline_canvas.bind("<Double-Button-1>", self._create_global_day)
+        self.global_timeline_canvas.bind("<Button-3>", self._show_global_day_menu)
+
+        self.global_flow_shell = tk.Frame(
+            self.global_workspace,
+            bg=theme.schedule_background,
+            highlightthickness=dp(1),
+            highlightbackground=theme.divider,
+        )
+        self.global_flow_shell.grid(row=0, column=0, sticky="nsew")
+        self.global_flow_shell.grid_rowconfigure(1, weight=1)
+        self.global_flow_shell.grid_columnconfigure(0, weight=1)
+        self.global_flow_header_canvas = tk.Canvas(
+            self.global_flow_shell,
+            height=dp(34),
+            bg=theme.panel_secondary,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.global_flow_canvas = tk.Canvas(
+            self.global_flow_shell,
+            bg=theme.schedule_background,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.global_flow_vscroll = ttk.Scrollbar(
+            self.global_flow_shell,
+            orient="vertical",
+            command=self.global_flow_canvas.yview,
+            style="Global.Vertical.TScrollbar",
+        )
+        self.global_flow_canvas.configure(yscrollcommand=self.global_flow_vscroll.set)
+        self.global_flow_header_canvas.grid(row=0, column=0, sticky="ew")
+        self.global_flow_canvas.grid(row=1, column=0, sticky="nsew")
+        self.global_flow_vscroll.grid(row=1, column=1, sticky="ns")
+        self.global_flow_canvas.bind("<Configure>", self._schedule_global_render)
+        self.global_flow_canvas.bind("<MouseWheel>", self._global_flow_mousewheel)
+        self.global_flow_header_canvas.bind("<MouseWheel>", self._global_flow_mousewheel)
+        self.global_flow_canvas.bind("<ButtonPress-1>", self._start_flow_drag)
+        self.global_flow_canvas.bind("<B1-Motion>", self._update_flow_drag)
+        self.global_flow_canvas.bind("<ButtonRelease-1>", self._finish_flow_drag)
+        self.global_flow_canvas.bind("<Double-ButtonRelease-1>", self._create_flow_day)
+        self.global_flow_canvas.bind("<Button-3>", self._show_flow_day_menu)
+        self._update_global_display_mode_widgets()
+
+        self.global_detail_frame = tk.Frame(
+            self.global_workspace,
+            width=dp(GLOBAL_TIMELINE_LAYOUT.detail_width),
+            bg=theme.panel_secondary,
+            highlightthickness=dp(1),
+            highlightbackground=theme.divider,
+            padx=dp(14),
+            pady=dp(14),
+        )
+        self.global_detail_frame.grid(row=0, column=1, sticky="nsew", padx=(dp(10), 0))
+        self.global_detail_frame.grid_propagate(False)
+        detail_heading = tk.Frame(self.global_detail_frame, bg=theme.panel_secondary)
+        detail_heading.pack(fill="x")
+        tk.Label(detail_heading, text="事项详情", bg=theme.panel_secondary, fg=theme.text_secondary, font=(FONT, 8, "bold"), anchor="w").pack(side="left")
+        self.global_detail_state_label = tk.Label(
+            detail_heading,
+            text="未选择",
+            bg=theme.control_background,
+            fg=theme.text_muted,
+            font=(FONT, 7, "bold"),
+            padx=dp(6),
+            pady=dp(2),
+        )
+        self.global_detail_state_label.pack(side="right")
+        self.global_detail_title = tk.Label(
+            self.global_detail_frame,
+            text="选择一个事项查看详情",
+            bg=theme.panel_secondary,
+            fg=theme.text_primary,
+            font=(FONT, 12, "bold"),
+            anchor="nw",
+            justify="left",
+            wraplength=dp(220),
+        )
+        self.global_detail_title.pack(fill="x", pady=(dp(12), dp(8)))
+        self.global_detail_meta = tk.Label(self.global_detail_frame, text="", bg=theme.panel_secondary, fg=theme.text_secondary, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
+        self.global_detail_meta.pack(fill="x")
+        self.global_detail_notes = tk.Label(self.global_detail_frame, text="", bg=theme.panel_secondary, fg=theme.text_muted, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
+        self.global_detail_notes.pack(fill="both", expand=True, pady=(dp(12), dp(8)))
+        detail_actions = tk.Frame(self.global_detail_frame, bg=theme.panel_secondary)
+        detail_actions.pack(side="bottom", fill="x")
+        self.global_detail_edit_button = ThemeButton(detail_actions, self, "编辑", self._edit_selected_timeline, width=58, height=29, font_size=8, surface_background=theme.panel_secondary, accented=True)
+        self.global_detail_edit_button.pack(side="left")
+        self.global_detail_toggle_button = ThemeButton(detail_actions, self, "完成", self._toggle_selected_timeline, width=64, height=29, font_size=8, surface_background=theme.panel_secondary, outlined=True)
+        self.global_detail_toggle_button.pack(side="left", padx=(dp(5), 0))
+        self.global_detail_delete_button = ThemeButton(detail_actions, self, "删除", self._delete_selected_timeline, width=54, height=29, font_size=8, foreground=theme.danger, surface_background=theme.panel_secondary, outlined=True)
+        self.global_detail_delete_button.pack(side="right")
+
+        self.global_status_label = tk.Label(
+            self.shell,
+            text="",
+            bg=quick_surface if theme.style == "frutiger" else theme.panel_background,
+            fg=theme.text_secondary,
+            font=(FONT, 8),
+            anchor="w",
+            padx=dp(14),
+            pady=dp(5),
+        )
+        self.global_status_label.pack(fill="x")
+        self._global_tooltip = CanvasTooltip(self)
+        self._set_quick_placeholder()
+        self._update_mode_badge()
 
     def _draw_header(self, _event=None) -> None:
         width = max(1, self.header.logical_width())
@@ -2909,16 +3373,132 @@ class CalendarApp(tk.Tk):
         self.update_idletasks()
         area = self.dpi.work_area()
         window_width = self.dpi.px(WINDOW_WIDTH)
+        saved = WindowGeometry.from_mapping(self.store.settings.get("compact_geometry"))
+        if saved is not None:
+            height = saved.height
+            x, y = saved.x, saved.y
+        else:
+            saved_x = self.store.settings.get("x")
+            saved_y = self.store.settings.get("y")
+            try:
+                x = int(saved_x) if saved_x is not None else area.right - window_width - self.dpi.px(26)
+                y = int(saved_y) if saved_y is not None else area.top + self.dpi.px(44)
+            except (TypeError, ValueError):
+                x, y = area.right - window_width - self.dpi.px(26), area.top + self.dpi.px(44)
         window_height = self.dpi.px(height)
-        saved_x = self.store.settings.get("x")
-        saved_y = self.store.settings.get("y")
-        try:
-            x = int(saved_x) if saved_x is not None else area.right - window_width - self.dpi.px(26)
-            y = int(saved_y) if saved_y is not None else area.top + self.dpi.px(44)
-        except (TypeError, ValueError):
-            x, y = area.right - window_width - self.dpi.px(26), area.top + self.dpi.px(44)
         x, y = clamp_to_work_area(x, y, window_width, window_height)
         self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
+
+    def get_view_mode(self) -> str:
+        return self.view_mode
+
+    def _capture_window_geometry(self) -> WindowGeometry:
+        self.update_idletasks()
+        return WindowGeometry(
+            self.dpi.logical(self.winfo_width()),
+            self.dpi.logical(self.winfo_height()),
+            self.winfo_x(),
+            self.winfo_y(),
+        )
+
+    def _apply_saved_geometry(self, geometry: WindowGeometry) -> WindowGeometry:
+        device_width = self.dpi.px(geometry.width)
+        device_height = self.dpi.px(geometry.height)
+        target_area = work_area_for_rect(geometry.x, geometry.y, device_width, device_height)
+        fitted = fit_geometry_to_work_area(geometry, target_area, self.dpi.dpi)
+        self.geometry(scaled_geometry(fitted.width, fitted.height, fitted.x, fitted.y, self.dpi.dpi))
+        return fitted
+
+    def enter_global_view(self) -> None:
+        if self.view_mode == "global":
+            return
+        compact_geometry = self._capture_window_geometry()
+        self.store.settings["compact_geometry"] = compact_geometry.as_dict()
+        self.store.settings["x"] = compact_geometry.x
+        self.store.settings["y"] = compact_geometry.y
+        self.store.settings["view_mode"] = "global"
+        self.view_mode = "global"
+        self.desktop_session_active = False
+        self.timeline_selection.clear()
+        self.withdraw()
+        self.overrideredirect(False)
+        self.resizable(True, True)
+        self.minsize(self.dpi.px(GLOBAL_MIN_WIDTH), self.dpi.px(GLOBAL_MIN_HEIGHT))
+        self.title(f"{APP_NAME} · 全局视图")
+        self._rebuild_main_ui("", True)
+        saved = WindowGeometry.from_mapping(
+            self.store.settings.get("global_geometry"),
+            minimum_width=GLOBAL_MIN_WIDTH,
+            minimum_height=GLOBAL_MIN_HEIGHT,
+        )
+        geometry = saved or initial_global_geometry(self.dpi.work_area(), self.dpi.dpi)
+        self._global_normal_geometry = self._apply_saved_geometry(geometry)
+        self.deiconify()
+        self.update_idletasks()
+        make_app_window(self)
+        self.render()
+        self.store.save()
+        self.after(80, self.apply_window_mode)
+
+    def return_to_compact_view(self) -> None:
+        if self.view_mode == "compact":
+            return
+        if self.state() == "normal":
+            self._global_normal_geometry = self._capture_window_geometry()
+        if self._global_normal_geometry is not None:
+            self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
+        compact = WindowGeometry.from_mapping(self.store.settings.get("compact_geometry"))
+        self.withdraw()
+        try:
+            self.state("normal")
+        except tk.TclError:
+            pass
+        self.overrideredirect(True)
+        self.resizable(False, False)
+        self.minsize(1, 1)
+        self.title(APP_NAME)
+        self.view_mode = "compact"
+        self._activate_compact_return_session()
+        self.store.settings["view_mode"] = "compact"
+        self._rebuild_main_ui("", True)
+        if compact is None:
+            self._set_initial_geometry()
+        else:
+            compact = WindowGeometry(WINDOW_WIDTH, compact.height, compact.x, compact.y)
+            self._apply_saved_geometry(compact)
+        self.deiconify()
+        self.update_idletasks()
+        make_tool_window(self)
+        self.store.save()
+        self.after(80, self.apply_window_mode)
+
+    def _activate_compact_return_session(self) -> None:
+        """Keep a restored desktop-mode gadget interactable without making it permanently topmost."""
+        self.desktop_session_active = self.window_mode == "desktop"
+
+    def toggle_global_view(self) -> None:
+        if self.view_mode == "global":
+            self.return_to_compact_view()
+        else:
+            self.enter_global_view()
+
+    def _schedule_view_geometry_save(self, event: tk.Event) -> None:
+        if event.widget is not self or self.view_mode != "global" or self._dpi_rebuilding:
+            return
+        if self._geometry_save_job:
+            try:
+                self.after_cancel(self._geometry_save_job)
+            except tk.TclError:
+                pass
+        self._geometry_save_job = self.after(180, self._save_global_geometry)
+
+    def _save_global_geometry(self) -> None:
+        self._geometry_save_job = None
+        if self.view_mode != "global" or not self.winfo_exists() or self.state() != "normal":
+            return
+        self._global_normal_geometry = self._capture_window_geometry()
+        self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
+        self.store.save()
 
     def _ddl_canvas_height(self, item_count: int) -> int:
         return DDL_ROW_HEIGHT * min(max(0, item_count), DDL_VISIBLE_ROWS)
@@ -2939,6 +3519,8 @@ class CalendarApp(tk.Tk):
         return min(base_height, max(CLOSED_HEIGHT, work_height - 48))
 
     def _apply_window_height(self, pinned_ddl_count: int, regular_ddl_count: int) -> None:
+        if self.view_mode != "compact":
+            return
         height = self._desired_window_height(pinned_ddl_count, regular_ddl_count)
         x, y = clamp_to_work_area(
             self.winfo_x(),
@@ -3009,6 +3591,15 @@ class CalendarApp(tk.Tk):
         self._apply_dpi_change(new_dpi)
 
     def _rebuild_main_ui(self, quick_value: str, quick_was_placeholder: bool) -> None:
+        if self._global_tooltip:
+            self._global_tooltip.hide()
+            self._global_tooltip = None
+        if self._global_render_job:
+            try:
+                self.after_cancel(self._global_render_job)
+            except tk.TclError:
+                pass
+            self._global_render_job = None
         self.window_frame.destroy()
         self._configure_style()
         self._build_ui()
@@ -3017,13 +3608,27 @@ class CalendarApp(tk.Tk):
             self.quick_var.set(quick_value)
             self.quick_placeholder_active = False
             self.quick_entry.configure(fg=self.theme.text_primary)
-        self.after_idle(self._draw_header)
+        if self.view_mode == "compact":
+            self.after_idle(self._draw_header)
 
     def _apply_dpi_change(self, new_dpi: int) -> None:
         quick_value = self.quick_var.get() if hasattr(self, "quick_var") else ""
         quick_was_placeholder = self.quick_placeholder_active
         x, y = self.winfo_x(), self.winfo_y()
         old_dpi = self.dpi.dpi
+        global_was_maximized = self.view_mode == "global" and self.state() == "zoomed"
+        global_geometry = (
+            self._global_normal_geometry
+            if global_was_maximized and self._global_normal_geometry is not None
+            else WindowGeometry(
+                unscale_px(self.winfo_width(), old_dpi),
+                unscale_px(self.winfo_height(), old_dpi),
+                x,
+                y,
+            )
+            if self.view_mode == "global"
+            else None
+        )
         popup_geometries: list[tuple[tk.Toplevel, int, int, int, int]] = []
         for child in self.winfo_children():
             if not isinstance(child, tk.Toplevel) or not child.winfo_exists():
@@ -3056,22 +3661,32 @@ class CalendarApp(tk.Tk):
                 popup.geometry(
                     scaled_geometry(logical_width, logical_height, popup_x, popup_y, new_dpi)
                 )
-            pinned, regular = self.store.grouped_ddl_events()
-            height = self._desired_window_height(len(pinned), len(regular))
-            x, y = clamp_to_work_area(x, y, self.dpi.px(WINDOW_WIDTH), self.dpi.px(height))
-            self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
-            make_tool_window(self)
+            if self.view_mode == "global":
+                self.minsize(self.dpi.px(GLOBAL_MIN_WIDTH), self.dpi.px(GLOBAL_MIN_HEIGHT))
+                if global_was_maximized:
+                    self.state("normal")
+                self._global_normal_geometry = self._apply_saved_geometry(global_geometry or initial_global_geometry(self.dpi.work_area(), new_dpi))
+                if global_was_maximized:
+                    self.state("zoomed")
+                make_app_window(self)
+            else:
+                pinned, regular = self.store.grouped_ddl_events()
+                height = self._desired_window_height(len(pinned), len(regular))
+                x, y = clamp_to_work_area(x, y, self.dpi.px(WINDOW_WIDTH), self.dpi.px(height))
+                self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
+                make_tool_window(self)
         finally:
             self._dpi_rebuilding = False
         self.after(80, self.apply_window_mode)
 
     def _bind_shortcuts(self) -> None:
-        self.bind("<Control-n>", lambda _event: self.open_day_detail())
+        self.bind("<Control-n>", lambda _event: self._open_primary_action())
         self.bind("<Control-t>", lambda _event: self.go_today())
+        self.bind("<Control-g>", lambda _event: self.toggle_global_view())
         self.bind("<Home>", lambda event: self._keyboard_command(event, self.go_today))
         self.bind("<Key-t>", lambda event: self._keyboard_command(event, self.go_today))
-        self.bind("<Key-n>", lambda event: self._keyboard_command(event, self.open_day_detail))
-        self.bind("<Return>", lambda event: self._keyboard_command(event, self.open_day_detail))
+        self.bind("<Key-n>", lambda event: self._keyboard_command(event, self._open_primary_action))
+        self.bind("<Return>", lambda event: self._keyboard_command(event, self._open_primary_action))
         self.bind("<Prior>", lambda _event: self.change_month(-1))
         self.bind("<Next>", lambda _event: self.change_month(1))
         self.bind("<Left>", lambda event: self._move_selection(event, -1))
@@ -3080,9 +3695,29 @@ class CalendarApp(tk.Tk):
         self.bind("<Down>", lambda event: self._move_selection(event, 7))
         self.bind("<FocusOut>", self._on_focus_out)
         self.bind("<ButtonPress>", self._activate_desktop_session, add="+")
-        self.bind("<Escape>", lambda _event: self._end_desktop_session())
+        self.bind("<Escape>", self._handle_escape)
+
+    def _open_primary_action(self) -> None:
+        if primary_action_for_view(self.view_mode) == "create":
+            self.open_new_event()
+        else:
+            self.open_day_detail()
+
+    def _handle_escape(self, _event=None) -> str:
+        if self.view_mode == "global" and self.global_display_mode == "flow" and self._global_flow_drag_start:
+            self._cancel_flow_drag()
+        else:
+            self._end_desktop_session()
+        return "break"
 
     def render(self) -> None:
+        if self.view_mode == "global":
+            self._render_global_timeline()
+            if self.day_detail_window and self.day_detail_window.winfo_exists():
+                self.day_detail_window.refresh()
+            if self.ddl_list_window and self.ddl_list_window.winfo_exists():
+                self.ddl_list_window.refresh()
+            return
         self.header.itemconfigure(self.month_label, text=f"{self.shown_year}年 {self.shown_month}月")
         today = date.today()
         self.header.itemconfigure(self.month_hint, text=f"今天 {today.month}月{today.day}日 · {WEEKDAYS[today.weekday()]}")
@@ -3121,6 +3756,1076 @@ class CalendarApp(tk.Tk):
             self.day_detail_window.refresh()
         if self.ddl_list_window and self.ddl_list_window.winfo_exists():
             self.ddl_list_window.refresh()
+
+    def _schedule_global_render(self, _event=None) -> None:
+        if self.view_mode != "global" or self._global_render_job:
+            return
+        self._global_render_job = self.after_idle(self._finish_global_render)
+
+    def _finish_global_render(self) -> None:
+        self._global_render_job = None
+        if self.view_mode == "global" and self.winfo_exists():
+            self._draw_active_global_view()
+
+    def _render_global_timeline(self) -> None:
+        if not hasattr(self, "global_timeline_canvas") or not self.global_timeline_canvas.winfo_exists():
+            return
+        model = build_month_timeline(self.store, self.shown_year, self.shown_month)
+        self.timeline_model = model
+        self.calendar_flow_layout = build_calendar_flow_layout(model)
+        self.timeline_selection.get(model)
+        self.global_month_label.configure(text=f"{model.year}年 {model.month}月")
+        unfinished = sum(not item.completed for item in model.items)
+        ddl_count = sum(bool(item.ddl_date) and not item.completed for item in model.items)
+        self.global_summary_label.configure(text=f"本月 {len(model.items)} 项工作 · {unfinished} 项未完成 · {ddl_count} 个 DDL")
+        self._draw_active_global_view()
+
+    def set_global_display_mode(self, mode: str) -> None:
+        """Switch Global renderers in place while keeping month and selection stable."""
+        normalized = normalize_global_display_mode(mode)
+        if normalized == self.global_display_mode:
+            return
+        self._cancel_flow_drag(redraw=False)
+        self.global_display_mode = normalized
+        self.store.settings["global_display_mode"] = normalized
+        self.store.save()
+        self._update_global_display_mode_widgets()
+        self._draw_active_global_view()
+
+    def _update_global_display_mode_widgets(self) -> None:
+        if not hasattr(self, "global_timeline_shell"):
+            return
+        is_flow = self.global_display_mode == "flow"
+        if is_flow:
+            self.global_timeline_shell.grid_remove()
+            self.global_flow_shell.grid()
+        else:
+            self._global_flow_hover_item_id = None
+            self.global_flow_shell.grid_remove()
+            self.global_timeline_shell.grid()
+        if hasattr(self, "global_view_title_label"):
+            self.global_view_title_label.configure(text="月度排期" if is_flow else "全局时间轴")
+        for button, active in (
+            (getattr(self, "global_flow_mode_button", None), is_flow),
+            (getattr(self, "global_timeline_mode_button", None), not is_flow),
+        ):
+            if button is not None:
+                button.accented = active
+                button.outlined = not active
+                button.foreground = None
+                button.draw()
+
+    def _draw_active_global_view(self) -> None:
+        self._update_global_display_mode_widgets()
+        if self.global_display_mode == "flow":
+            self._draw_calendar_flow()
+        else:
+            self._draw_global_timeline()
+
+    def _on_global_workspace_configure(self, event: tk.Event) -> None:
+        logical_width = self.dpi.logical(event.width)
+        show_detail = GLOBAL_TIMELINE_LAYOUT.show_detail_panel(logical_width)
+        if show_detail != self._global_detail_visible:
+            self._global_detail_visible = show_detail
+            if show_detail:
+                self.global_detail_frame.grid()
+            else:
+                self.global_detail_frame.grid_remove()
+        if show_detail:
+            detail_width = GLOBAL_TIMELINE_LAYOUT.detail_panel_width(logical_width)
+            self.global_detail_frame.configure(width=self.dpi.px(detail_width))
+            wraplength = self.dpi.px(max(160, detail_width - 36))
+            self.global_detail_title.configure(wraplength=wraplength)
+            self.global_detail_meta.configure(wraplength=wraplength)
+            self.global_detail_notes.configure(wraplength=wraplength)
+        self._schedule_global_render()
+
+    def _draw_global_timeline(self) -> None:
+        model = self.timeline_model
+        if model is None or not hasattr(self, "global_timeline_canvas") or not self.global_timeline_canvas.winfo_exists():
+            return
+        canvas = self.global_timeline_canvas
+        date_canvas = self.global_date_canvas
+        label_canvas = self.global_label_canvas
+        corner = self.global_corner_canvas
+        x_position = canvas.xview()[0] if canvas.bbox("all") else 0.0
+        y_position = canvas.yview()[0] if canvas.bbox("all") else 0.0
+        for target in (canvas, date_canvas, label_canvas, corner):
+            target.delete("all")
+        dp = self.dpi.px
+        title_width = dp(GLOBAL_TITLE_WIDTH)
+        header_height = dp(GLOBAL_HEADER_HEIGHT)
+        row_height = dp(GLOBAL_ROW_HEIGHT)
+        viewport_width = max(1, canvas.winfo_width())
+        day_width = max(dp(GLOBAL_DAY_MIN_WIDTH), viewport_width // max(1, len(model.days)))
+        content_width = day_width * len(model.days)
+        content_height = max(canvas.winfo_height(), max(1, len(model.items)) * row_height)
+        self._global_day_width = day_width
+        self._global_content_width = content_width
+        self._global_content_height = content_height
+        theme = self.theme
+        selected = self.timeline_selection.get(model)
+
+        for index, day_meta in enumerate(model.days):
+            x1 = index * day_width
+            x2 = x1 + day_width
+            if day_meta.is_user_leave or day_meta.is_user_holiday:
+                background = blend(theme.schedule_background, theme.date_leave_indicator, 0.12)
+            elif day_meta.is_legal_holiday:
+                background = blend(theme.schedule_background, theme.ddl_due_background, 0.44)
+            elif day_meta.is_weekend and not day_meta.is_adjusted_workday:
+                background = blend(theme.schedule_background, theme.panel_secondary, 0.64)
+            else:
+                background = theme.schedule_background
+            header_background = blend(background, theme.panel_secondary, 0.24)
+            date_tag = f"timeline-day:{day_meta.date.isoformat()}"
+            date_canvas.create_rectangle(x1, 0, x2, header_height, fill=header_background, outline="", tags=(date_tag,))
+            canvas.create_rectangle(x1, 0, x2, content_height, fill=background, outline="")
+            canvas.create_line(x1, 0, x1, content_height, fill=theme.divider)
+            date_canvas.create_line(x1, 0, x1, header_height, fill=theme.divider)
+            if day_meta.is_today:
+                today_fill = blend(theme.schedule_background, theme.date_today_background, 0.18)
+                canvas.create_rectangle(x1, 0, x2, content_height, fill=today_fill, outline="")
+                canvas.create_line(x1 + dp(1), 0, x1 + dp(1), content_height, fill=theme.date_today_border, width=dp(2))
+                date_canvas.create_rectangle(
+                    x1 + dp(1),
+                    dp(1),
+                    x2 - dp(1),
+                    header_height - dp(1),
+                    fill=blend(header_background, theme.date_today_background, 0.16),
+                    outline=theme.date_today_border,
+                    width=dp(2),
+                    tags=(date_tag,),
+                )
+            if day_meta.date == self.selected:
+                date_canvas.create_rectangle(x1 + dp(3), dp(3), x2 - dp(3), header_height - dp(3), outline=theme.date_selected_border, width=dp(1), tags=(date_tag,))
+            weekday = "一二三四五六日"[day_meta.weekday]
+            date_canvas.create_text(
+                (x1 + x2) // 2,
+                dp(18),
+                text=str(day_meta.date.day),
+                fill=theme.date_weekend_text if day_meta.is_weekend else theme.text_primary,
+                font=(FONT, 8, "bold" if day_meta.is_today else "normal"),
+                tags=(date_tag,),
+            )
+            day_hint = day_meta.holiday_name if day_width >= dp(55) and day_meta.holiday_name else f"周{weekday}"
+            date_canvas.create_text(
+                (x1 + x2) // 2,
+                dp(38),
+                text=truncate(day_hint, max(2, day_width // max(1, dp(8)))),
+                fill=theme.holiday_workday if day_meta.is_adjusted_workday else theme.text_muted,
+                font=(FONT, 7),
+                tags=(date_tag,),
+            )
+            tooltip = day_meta.holiday_name or ("请假" if day_meta.is_user_leave else "自定义假期" if day_meta.is_user_holiday else f"周{weekday}")
+            date_canvas.tag_bind(date_tag, "<Enter>", lambda event, text=f"{day_meta.date:%Y-%m-%d} · {tooltip}": self._show_global_tooltip(text, event))
+            date_canvas.tag_bind(date_tag, "<Leave>", self._hide_global_tooltip)
+
+        corner.create_rectangle(0, 0, title_width, header_height, fill=theme.panel_secondary, outline="")
+        corner.create_text(dp(12), dp(18), text="事项", fill=theme.text_primary, font=(FONT, 9, "bold"), anchor="w")
+        corner.create_text(dp(12), dp(39), text="名称固定 · 时间轴可滚动", fill=theme.text_muted, font=(FONT, 7), anchor="w")
+        corner.create_line(0, header_height - 1, title_width, header_height - 1, fill=theme.divider)
+        date_canvas.create_line(0, header_height - 1, content_width, header_height - 1, fill=theme.divider)
+
+        if not model.items:
+            canvas.create_text(
+                max(viewport_width // 2, content_width // 2),
+                dp(54),
+                text="这个月还没有事项 · 双击日期即可新建",
+                fill=theme.text_muted,
+                font=(FONT, 10),
+            )
+        for row_index, item in enumerate(model.items):
+            y1 = row_index * row_height
+            y2 = y1 + row_height
+            row_tag = f"timeline-item:{item.id}"
+            if selected and selected.id == item.id:
+                canvas.create_rectangle(0, y1, content_width, y2, fill=theme.accent_soft, outline="", tags=(row_tag,))
+                label_canvas.create_rectangle(0, y1, title_width, y2, fill=theme.accent_soft, outline="", tags=(row_tag,))
+            else:
+                label_canvas.create_rectangle(0, y1, title_width, y2, fill=theme.panel_background, outline="", tags=(row_tag,))
+            canvas.create_line(0, y2, content_width, y2, fill=theme.divider)
+            label_canvas.create_line(0, y2, title_width, y2, fill=theme.divider)
+            label_canvas.create_rectangle(0, y1 + dp(6), dp(4), y2 - dp(6), fill=theme.event_done if item.completed else item.color, outline="", tags=(row_tag,))
+            title_color = theme.text_done if item.completed else theme.text_primary
+            label_canvas.create_text(
+                dp(12),
+                y1 + dp(13),
+                text=truncate(item.title, 25),
+                fill=title_color,
+                font=(FONT, 8, "overstrike" if item.completed else "normal"),
+                anchor="w",
+                tags=(row_tag,),
+            )
+            type_text = timeline_type_label(item)
+            if item.is_urgent:
+                type_text = f"! {type_text}"
+            if item.ddl_date:
+                type_text += " · DDL"
+            label_canvas.create_text(
+                dp(12),
+                y1 + dp(29),
+                text=f"{type_text} · {item.effective_days_count}天",
+                fill=theme.text_muted,
+                font=(FONT, 7),
+                anchor="w",
+                tags=(row_tag,),
+            )
+            bar_fill = blend(item.color, theme.schedule_background, 0.68) if item.completed else item.color
+            outline = (
+                theme.accent
+                if selected and selected.id == item.id
+                else theme.schedule_card_border
+            )
+            visible_segments = []
+            for segment in item.segments:
+                start_index = (segment.start_date - model.period_start).days
+                end_index = (segment.end_date - model.period_start).days
+                segment_x1 = start_index * day_width + dp(3)
+                segment_x2 = (end_index + 1) * day_width - dp(3)
+                visible_segments.append((segment_x1, segment_x2))
+                rounded_rectangle(
+                    canvas,
+                    segment_x1,
+                    y1 + dp(8),
+                    segment_x2,
+                    y2 - dp(8),
+                    dp(5),
+                    fill=bar_fill,
+                    outline=outline,
+                    width=dp(2) if selected and selected.id == item.id else dp(1),
+                    tags=(row_tag,),
+                )
+            if visible_segments:
+                label_x1, label_x2 = max(visible_segments, key=lambda bounds: bounds[1] - bounds[0])
+                label_text = timeline_bar_label(item.title, self.dpi.logical(label_x2 - label_x1))
+                if label_text:
+                    canvas.create_text(label_x1 + dp(9), (y1 + y2) // 2, text=label_text, fill=theme.text_on_accent, font=(FONT, 7), anchor="w", tags=(row_tag,))
+            if item.continues_from_previous_period:
+                x = dp(3)
+                canvas.create_polygon(x, (y1 + y2) // 2, x + dp(7), y1 + dp(12), x + dp(7), y2 - dp(12), fill=outline, tags=(row_tag,))
+            if item.continues_to_next_period:
+                x = content_width - dp(3)
+                canvas.create_polygon(x, (y1 + y2) // 2, x - dp(7), y1 + dp(12), x - dp(7), y2 - dp(12), fill=outline, tags=(row_tag,))
+            if item.is_urgent and item.segments:
+                first_index = (item.segments[0].start_date - model.period_start).days
+                marker_x = first_index * day_width + dp(9)
+                canvas.create_text(marker_x, y1 + dp(10), text="!", fill=theme.event_type_urgent, font=(FONT, 7, "bold"), tags=(row_tag,))
+            if item.ddl_date and model.period_start <= item.ddl_date <= model.period_end:
+                ddl_index = (item.ddl_date - model.period_start).days
+                center_x = ddl_index * day_width + day_width // 2
+                center_y = (y1 + y2) // 2
+                radius = dp(5)
+                canvas.create_polygon(
+                    center_x,
+                    center_y - radius,
+                    center_x + radius,
+                    center_y,
+                    center_x,
+                    center_y + radius,
+                    center_x - radius,
+                    center_y,
+                    fill=theme.event_type_ddl,
+                    outline=theme.ddl_indicator_highlight,
+                    tags=(row_tag,),
+                )
+            for target in (canvas, label_canvas):
+                target.tag_bind(row_tag, "<Button-1>", lambda _event, item_id=item.id: self.select_timeline_item(item_id))
+                target.tag_bind(row_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self.open_timeline_item(item_id))
+                target.tag_bind(row_tag, "<Button-3>", lambda event, item_id=item.id: self._show_global_event_menu(item_id, event))
+                target.tag_bind(row_tag, "<Enter>", lambda event, item_id=item.id: self._show_timeline_item_tooltip(item_id, event))
+                target.tag_bind(row_tag, "<Leave>", self._hide_global_tooltip)
+
+        date_canvas.configure(scrollregion=(0, 0, content_width, header_height))
+        canvas.configure(scrollregion=(0, 0, content_width, content_height), xscrollincrement=dp(12), yscrollincrement=row_height)
+        label_canvas.configure(scrollregion=(0, 0, title_width, content_height), yscrollincrement=row_height)
+        canvas.xview_moveto(x_position)
+        canvas.yview_moveto(y_position)
+        date_canvas.xview_moveto(x_position)
+        label_canvas.yview_moveto(y_position)
+        self._update_global_detail(selected)
+        if selected:
+            self.global_status_label.configure(
+                text=f"已选择：{selected.title} · {selected.start_date:%Y-%m-%d} → {selected.end_date:%Y-%m-%d}"
+            )
+        else:
+            self.global_status_label.configure(text="滚轮纵向浏览 · Shift + 滚轮横向浏览 · 双击日期空白新建")
+
+    def _draw_calendar_flow(self) -> None:
+        model = self.timeline_model
+        layout = self.calendar_flow_layout
+        if (
+            model is None
+            or layout is None
+            or not hasattr(self, "global_flow_canvas")
+            or not self.global_flow_canvas.winfo_exists()
+        ):
+            return
+        canvas = self.global_flow_canvas
+        header = self.global_flow_header_canvas
+        y_position = canvas.yview()[0] if canvas.bbox("all") else 0.0
+        canvas.delete("all")
+        header.delete("all")
+        dp = self.dpi.px
+        theme = self.theme
+        viewport_width = max(dp(420), canvas.winfo_width())
+        column_width = max(dp(58), viewport_width // 7)
+        content_width = column_width * 7
+        day_header_height = dp(30)
+        card_height = dp(28)
+        lane_gap = dp(3)
+        week_height = day_header_height + layout.max_visible_lanes * (card_height + lane_gap) + dp(15)
+        content_height = max(canvas.winfo_height(), len(layout.weeks) * week_height)
+        self._global_flow_column_width = column_width
+        self._global_flow_week_height = week_height
+        selected = self.timeline_selection.get(model)
+        self._global_flow_card_styles.clear()
+        day_meta = {entry.date: entry for entry in model.days}
+        today = date.today()
+        drag_bounds: Optional[tuple[date, date]] = None
+        if self._global_flow_drag_start and self._global_flow_drag_end:
+            drag_start, drag_end, _duration = normalize_flow_drag_range(
+                self._global_flow_drag_start,
+                self._global_flow_drag_end,
+            )
+            drag_bounds = (drag_start, drag_end)
+
+        for column, weekday in enumerate(("周一", "周二", "周三", "周四", "周五", "周六", "周日")):
+            x1 = column * column_width
+            x2 = x1 + column_width
+            header.create_rectangle(x1, 0, x2, dp(34), fill=theme.panel_secondary, outline=theme.divider)
+            header.create_text(
+                (x1 + x2) // 2,
+                dp(17),
+                text=weekday,
+                fill=theme.date_weekend_text if column >= 5 else theme.text_secondary,
+                font=(FONT, 8, "bold"),
+            )
+
+        for week in layout.weeks:
+            row_y1 = week.index * week_height
+            row_y2 = row_y1 + week_height
+            for column, day in enumerate(week.dates):
+                x1 = column * column_width
+                x2 = x1 + column_width
+                meta = day_meta.get(day)
+                in_month = day.month == model.month
+                background = theme.schedule_background
+                if not in_month:
+                    background = blend(theme.schedule_background, theme.panel_secondary, 0.66)
+                elif meta and (meta.is_user_leave or meta.is_user_holiday):
+                    status_color = theme.date_leave_indicator if meta.is_user_leave else theme.date_holiday_indicator
+                    background = blend(theme.schedule_background, status_color, 0.10)
+                elif meta and meta.is_legal_holiday:
+                    background = blend(theme.schedule_background, theme.event_type_ddl_background, 0.34)
+                elif column >= 5:
+                    background = blend(theme.schedule_background, theme.panel_secondary, 0.40)
+                in_drag_range = bool(drag_bounds and drag_bounds[0] <= day <= drag_bounds[1])
+                if in_drag_range:
+                    background = blend(background, theme.accent_soft, 0.58)
+                if day == today:
+                    background = blend(background, theme.date_today_background, 0.56)
+                canvas.create_rectangle(
+                    x1,
+                    row_y1,
+                    x2,
+                    row_y2,
+                    fill=background,
+                    outline=theme.date_selected_border if in_drag_range else theme.divider,
+                    width=dp(1),
+                )
+                if in_drag_range:
+                    canvas.create_line(
+                        x1 + dp(2),
+                        row_y1 + dp(1),
+                        x2 - dp(2),
+                        row_y1 + dp(1),
+                        fill=theme.accent,
+                        width=dp(2),
+                    )
+                if day == self.selected and not in_drag_range:
+                    canvas.create_rectangle(
+                        x1 + dp(2),
+                        row_y1 + dp(2),
+                        x2 - dp(2),
+                        row_y2 - dp(2),
+                        fill="",
+                        outline=theme.date_selected_border,
+                        width=dp(1),
+                    )
+                number_color = theme.date_other_month if not in_month else theme.date_weekend_text if column >= 5 else theme.date_text
+                if day == today:
+                    number_color = theme.date_today_border
+                date_tag = f"flow-date:{day.isoformat()}"
+                if day == today:
+                    draw_calendar_date_state(
+                        canvas,
+                        x1 + dp(4),
+                        row_y1 + dp(3),
+                        x1 + dp(36),
+                        row_y1 + dp(28),
+                        fill=theme.date_today_background,
+                        border=theme.date_today_border,
+                        radius=dp(theme.metrics.date_radius),
+                        top_highlight=(
+                            blend(theme.date_today_background, theme.control_highlight, 0.34)
+                            if theme.style in ("aero", "frutiger")
+                            else None
+                        ),
+                        today_ring=theme.date_today_border,
+                        tags=(date_tag,),
+                    )
+                canvas.create_text(
+                    x1 + dp(8),
+                    row_y1 + dp(8),
+                    text=f"{day.month}/{day.day}" if not in_month else str(day.day),
+                    fill=number_color,
+                    font=(FONT, 8, "bold" if day in (today, self.selected) else "normal"),
+                    anchor="nw",
+                    tags=(date_tag,),
+                )
+                if day == today and column_width >= dp(82):
+                    canvas.create_text(
+                        x1 + dp(41),
+                        row_y1 + dp(9),
+                        text="今天",
+                        fill=theme.date_today_border,
+                        font=(FONT, 7, "bold"),
+                        anchor="nw",
+                        tags=(date_tag,),
+                    )
+                if meta and meta.holiday_name and column_width >= dp(92):
+                    canvas.create_text(
+                        x2 - dp(7),
+                        row_y1 + dp(9),
+                        text=truncate(meta.holiday_name, max(3, self.dpi.logical(column_width) // 13)),
+                        fill=theme.holiday_workday if meta.is_adjusted_workday else theme.holiday_festival,
+                        font=(FONT, 7),
+                        anchor="ne",
+                        tags=(date_tag,),
+                    )
+                if meta and (meta.is_user_leave or meta.is_user_holiday):
+                    canvas.create_text(
+                        x2 - dp(7),
+                        row_y1 + dp(20) if meta.holiday_name and column_width >= dp(92) else row_y1 + dp(9),
+                        text="请假" if meta.is_user_leave else "放假",
+                        fill=theme.date_leave_indicator if meta.is_user_leave else theme.date_holiday_indicator,
+                        font=(FONT, 7),
+                        anchor="ne",
+                        tags=(date_tag,),
+                    )
+
+            for block in week.blocks:
+                if not block.visible:
+                    continue
+                item = block.item
+                item_tag = f"timeline-item:{item.id}"
+                x1 = block.start_column * column_width + dp(4)
+                x2 = (block.end_column + 1) * column_width - dp(4)
+                y1 = row_y1 + day_header_height + block.lane * (card_height + lane_gap)
+                y2 = y1 + card_height
+                stripe_color = theme.event_done if item.completed else item.color
+                is_selected = bool(selected and selected.id == item.id)
+                is_hovered = self._global_flow_hover_item_id == item.id
+                if item.completed:
+                    card_fill = blend(theme.schedule_card_background, theme.card_done_background, 0.62)
+                    outline = theme.schedule_card_border
+                elif item.native_ddl or block.ddl_date:
+                    card_fill = blend(theme.schedule_card_background, theme.event_type_ddl_background, 0.46)
+                    outline = theme.event_type_ddl_border
+                elif item.is_urgent:
+                    card_fill = blend(theme.schedule_card_background, theme.event_type_urgent_background, 0.46)
+                    outline = theme.event_type_urgent_border
+                else:
+                    card_fill = blend(theme.schedule_card_background, item.color, 0.13)
+                    outline = blend(theme.schedule_card_border, stripe_color, 0.34)
+                if is_selected:
+                    card_fill = blend(card_fill, theme.accent_soft, 0.48)
+                    outline = theme.accent
+                card_tag = f"flow-card:{item.id}"
+                card_style_tag = f"flow-card-style:{item.id}:{week.index}:{block.start_column}:{block.lane}"
+                card_width = dp(2) if is_selected else dp(1)
+                self._global_flow_card_styles.setdefault(item.id, []).append(
+                    (card_style_tag, card_fill, outline, card_width)
+                )
+                if is_hovered:
+                    card_fill = blend(card_fill, theme.schedule_card_hover, 0.56)
+                    if not is_selected:
+                        outline = blend(outline, theme.accent_hover, 0.42)
+                rounded_rectangle(
+                    canvas,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    dp(5),
+                    fill=card_fill,
+                    outline=outline,
+                    width=card_width,
+                    tags=(item_tag, card_tag, card_style_tag),
+                )
+                if theme.style in ("aero", "frutiger"):
+                    canvas.create_line(
+                        x1 + dp(7),
+                        y1 + dp(2),
+                        x2 - dp(7),
+                        y1 + dp(2),
+                        fill=blend(card_fill, theme.control_highlight, 0.58),
+                        tags=(item_tag,),
+                    )
+                canvas.create_rectangle(
+                    x1 + dp(2),
+                    y1 + dp(5),
+                    x1 + dp(5),
+                    y2 - dp(5),
+                    fill=stripe_color,
+                    outline="",
+                    tags=(item_tag,),
+                )
+                for boundary in range(block.start_column + 1, block.end_column + 1):
+                    boundary_x = boundary * column_width
+                    canvas.create_line(
+                        boundary_x,
+                        y1 + dp(4),
+                        boundary_x,
+                        y2 - dp(4),
+                        fill=blend(theme.divider, stripe_color, 0.18),
+                        tags=(item_tag,),
+                    )
+                logical_card_width = self.dpi.logical(x2 - x1)
+                detail_level = flow_card_detail_level(
+                    logical_card_width,
+                    span_columns=block.end_column - block.start_column + 1,
+                )
+                left_inset = 19 if block.continues_before else 11
+                right_reserve = 18 if block.continues_after or block.ddl_date else 8
+                available_width = max(20, logical_card_width - left_inset - right_reserve)
+                title_chars = max(2, available_width // 8)
+                title_text = truncate(f"↳ {item.title}" if block.continues_before else item.title, title_chars)
+                title_y = (y1 + y2) // 2 if detail_level == "compact" else y1 + dp(6)
+                canvas.create_text(
+                    x1 + dp(left_inset),
+                    title_y,
+                    text=title_text,
+                    fill=theme.text_done if item.completed else theme.text_primary,
+                    font=(FONT, 7, "overstrike" if item.completed else "bold"),
+                    anchor="w" if detail_level == "compact" else "nw",
+                    tags=(item_tag,),
+                )
+                type_text = timeline_type_label(item)
+                if item.is_urgent:
+                    type_text = f"! {type_text}"
+                if block.ddl_date and not item.native_ddl:
+                    type_text += " · DDL"
+                if detail_level != "compact":
+                    meta_text = type_text if detail_level == "medium" else f"{flow_date_range_text(item)} · {type_text}"
+                    meta_chars = max(2, available_width // 7)
+                    meta_color = (
+                        theme.text_done
+                        if item.completed
+                        else theme.event_type_urgent
+                        if item.is_urgent
+                        else theme.event_type_ddl
+                        if item.native_ddl or block.ddl_date
+                        else theme.text_secondary
+                    )
+                    canvas.create_text(
+                        x1 + dp(left_inset),
+                        y2 - dp(4),
+                        text=truncate(meta_text, meta_chars),
+                        fill=meta_color,
+                        font=(FONT, 6),
+                        anchor="sw",
+                        tags=(item_tag,),
+                    )
+                if block.continues_after:
+                    canvas.create_text(x2 - dp(4), (y1 + y2) // 2, text="续›", fill=stripe_color, font=(FONT, 6, "bold"), anchor="e", tags=(item_tag,))
+                if block.ddl_date:
+                    ddl_column = (block.ddl_date - week.dates[0]).days
+                    marker_x = ddl_column * column_width + column_width - dp(10)
+                    marker_y = y1 + dp(8)
+                    radius = dp(4)
+                    canvas.create_polygon(
+                        marker_x,
+                        marker_y - radius,
+                        marker_x + radius,
+                        marker_y,
+                        marker_x,
+                        marker_y + radius,
+                        marker_x - radius,
+                        marker_y,
+                        fill=theme.event_type_ddl,
+                        outline=theme.ddl_indicator_highlight,
+                        tags=(item_tag,),
+                    )
+                canvas.tag_bind(item_tag, "<Button-1>", lambda _event, item_id=item.id: self._select_flow_item(item_id))
+                canvas.tag_bind(item_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self._open_flow_item(item_id))
+                canvas.tag_bind(item_tag, "<Button-3>", lambda event, item_id=item.id: self._show_flow_item_menu(item_id, event))
+                canvas.tag_bind(item_tag, "<Enter>", lambda event, item_id=item.id: self._enter_flow_item(item_id, event))
+                canvas.tag_bind(item_tag, "<Leave>", lambda event, item_id=item.id: self._leave_flow_item(item_id, event))
+
+            for column, hidden_count in enumerate(week.hidden_counts):
+                if hidden_count <= 0:
+                    continue
+                more_tag = f"flow-more:{week.dates[column].isoformat()}"
+                x1 = column * column_width
+                canvas.create_text(
+                    x1 + dp(8),
+                    row_y2 - dp(8),
+                    text=f"+{hidden_count} 更多",
+                    fill=theme.accent,
+                    font=(FONT, 7, "bold"),
+                    anchor="sw",
+                    tags=(more_tag,),
+                )
+                canvas.tag_bind(more_tag, "<Button-1>", lambda _event, day=week.dates[column]: self._open_flow_day_detail(day))
+
+        if not model.items:
+            canvas.create_text(
+                content_width // 2,
+                dp(72),
+                text="这个月还没有事项 · 双击日期空白即可新建",
+                fill=theme.text_muted,
+                font=(FONT, 10),
+            )
+        header.configure(scrollregion=(0, 0, content_width, dp(34)))
+        canvas.configure(scrollregion=(0, 0, content_width, content_height), yscrollincrement=week_height)
+        canvas.yview_moveto(y_position)
+        self._update_global_detail(selected)
+        if selected:
+            self.global_status_label.configure(text=f"已选择：{selected.title} · {selected.start_date:%Y-%m-%d} → {selected.end_date:%Y-%m-%d}")
+        elif self._global_flow_drag_start and self._global_flow_drag_end:
+            range_start, range_end, _duration = normalize_flow_drag_range(
+                self._global_flow_drag_start,
+                self._global_flow_drag_end,
+            )
+            self.global_status_label.configure(
+                text=f"已选择日期范围：{range_start:%Y-%m-%d} 至 {range_end:%Y-%m-%d} · 右键进行操作"
+            )
+        else:
+            self.global_status_label.configure(text="一周一行 · 滚轮浏览 · 双击日期空白新建 · 双击事项编辑")
+
+    def _global_flow_mousewheel(self, event: tk.Event) -> str:
+        units = wheel_units(event.delta)
+        if units:
+            self.global_flow_canvas.yview_scroll(units, "units")
+        return "break"
+
+    def _enter_flow_item(self, item_id: str, event: tk.Event) -> None:
+        if self._global_flow_hover_item_id != item_id:
+            previous = self._global_flow_hover_item_id
+            self._global_flow_hover_item_id = item_id
+            if previous:
+                self._restore_flow_card_style(previous)
+            styles = self._global_flow_card_styles.get(item_id, ())
+            selected = self.timeline_selection.get(self.timeline_model) if self.timeline_model else None
+            for card_tag, fill, outline, width in styles:
+                self.global_flow_canvas.itemconfigure(
+                    card_tag,
+                    fill=blend(fill, self.theme.schedule_card_hover, 0.56),
+                    outline=outline if selected and selected.id == item_id else blend(outline, self.theme.accent_hover, 0.42),
+                    width=width,
+                )
+        self._show_timeline_item_tooltip(item_id, event)
+
+    def _leave_flow_item(self, item_id: str, _event: tk.Event) -> None:
+        self._hide_global_tooltip()
+        self.after_idle(lambda value=item_id: self._clear_flow_item_hover(value))
+
+    def _clear_flow_item_hover(self, item_id: str) -> None:
+        canvas = getattr(self, "global_flow_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        current = canvas.find_withtag("current")
+        if current and f"timeline-item:{item_id}" in canvas.gettags(current[0]):
+            return
+        if self._global_flow_hover_item_id == item_id:
+            self._global_flow_hover_item_id = None
+            self._restore_flow_card_style(item_id)
+
+    def _restore_flow_card_style(self, item_id: str) -> None:
+        styles = self._global_flow_card_styles.get(item_id, ())
+        canvas = getattr(self, "global_flow_canvas", None)
+        if not styles or canvas is None or not canvas.winfo_exists():
+            return
+        for card_tag, fill, outline, width in styles:
+            canvas.itemconfigure(card_tag, fill=fill, outline=outline, width=width)
+
+    def _global_flow_day_from_event(self, event: tk.Event) -> Optional[date]:
+        layout = self.calendar_flow_layout
+        if layout is None or not self._global_flow_column_width or not self._global_flow_week_height:
+            return None
+        canvas_x = event.widget.canvasx(event.x)
+        canvas_y = event.widget.canvasy(event.y)
+        return flow_day_at(
+            canvas_x,
+            canvas_y,
+            layout=layout,
+            column_width=self._global_flow_column_width,
+            week_height=self._global_flow_week_height,
+        )
+
+    def _start_flow_drag(self, event: tk.Event) -> Optional[str]:
+        if self._canvas_has_timeline_item(event.widget):
+            return None
+        selected = self._global_flow_day_from_event(event)
+        if selected is None:
+            return None
+        existing_range = self._flow_selected_range()
+        preserve_range = bool(
+            existing_range
+            and existing_range[0] != existing_range[1]
+            and existing_range[0] <= selected <= existing_range[1]
+        )
+        self._global_flow_drag_anchor = selected
+        try:
+            event.widget.grab_set()
+        except tk.TclError:
+            pass
+        if not preserve_range:
+            self._global_flow_drag_start = selected
+            self._global_flow_drag_end = selected
+        self._global_flow_drag_moved = False
+        self.timeline_selection.clear()
+        self.selected = selected
+        self._set_quick_placeholder()
+        self._draw_calendar_flow()
+        return "break"
+
+    def _update_flow_drag(self, event: tk.Event) -> Optional[str]:
+        anchor = self._global_flow_drag_anchor
+        if anchor is None:
+            return None
+        selected = self._global_flow_day_from_event(event)
+        if selected is None:
+            return "break"
+        if selected != self._global_flow_drag_end or self._global_flow_drag_start != anchor:
+            self._global_flow_drag_start = anchor
+            self._global_flow_drag_end = selected
+            self._global_flow_drag_moved = selected != anchor
+            self._draw_calendar_flow()
+        return "break"
+
+    def _finish_flow_drag(self, event: tk.Event) -> Optional[str]:
+        anchor = self._global_flow_drag_anchor
+        if anchor is None:
+            return None
+        last = self._global_flow_day_from_event(event) or self._global_flow_drag_end or anchor
+        moved = self._global_flow_drag_moved or last != anchor
+        if moved:
+            start_date, end_date, _duration_days = normalize_flow_drag_range(anchor, last)
+            self._global_flow_drag_start = start_date
+            self._global_flow_drag_end = end_date
+        elif self._global_flow_drag_start is None or self._global_flow_drag_end is None:
+            self._global_flow_drag_start = anchor
+            self._global_flow_drag_end = anchor
+        range_start, _range_end, _duration_days = normalize_flow_drag_range(
+            self._global_flow_drag_start,
+            self._global_flow_drag_end,
+        )
+        self._global_flow_drag_anchor = None
+        self._global_flow_drag_moved = False
+        try:
+            if event.widget.grab_current() is event.widget:
+                event.widget.grab_release()
+        except tk.TclError:
+            pass
+        self.selected = range_start
+        self._set_quick_placeholder()
+        self._draw_calendar_flow()
+        return "break"
+
+    def _flow_selected_range(self) -> Optional[tuple[date, date, int]]:
+        if self._global_flow_drag_start is None or self._global_flow_drag_end is None:
+            return None
+        return normalize_flow_drag_range(self._global_flow_drag_start, self._global_flow_drag_end)
+
+    def _cancel_flow_drag(self, *, redraw: bool = True) -> None:
+        had_drag = self._global_flow_drag_start is not None
+        canvas = getattr(self, "global_flow_canvas", None)
+        if canvas is not None:
+            try:
+                if canvas.grab_current() is canvas:
+                    canvas.grab_release()
+            except tk.TclError:
+                pass
+        self._global_flow_drag_start = None
+        self._global_flow_drag_end = None
+        self._global_flow_drag_anchor = None
+        self._global_flow_drag_moved = False
+        if had_drag and redraw and self.view_mode == "global" and self.global_display_mode == "flow":
+            self._draw_calendar_flow()
+
+    def _select_flow_item(self, item_id: str) -> str:
+        self._cancel_flow_drag(redraw=False)
+        self.select_timeline_item(item_id)
+        return "break"
+
+    def _open_flow_item(self, item_id: str) -> str:
+        self.open_timeline_item(item_id)
+        return "break"
+
+    def _show_flow_item_menu(self, item_id: str, event: tk.Event) -> str:
+        self._cancel_flow_drag(redraw=False)
+        item = self.select_timeline_item(item_id)
+        source = self.store.event_by_id(item.id) if item else None
+        if source:
+            menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
+            menu.add_command(label="编辑", command=lambda: self.open_editor(source))
+            menu.add_command(label="取消完成" if source.done else "完成", command=lambda: self.toggle_done(source))
+            menu.add_separator()
+            menu.add_command(label="删除", command=lambda: self._confirm_delete(source, parent=self))
+            menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _open_flow_day_detail(self, day: date) -> str:
+        self.open_day_detail(day)
+        return "break"
+
+    def _create_flow_day(self, event: tk.Event) -> str:
+        if self._canvas_has_timeline_item(event.widget):
+            return "break"
+        selected = self._global_flow_day_from_event(event)
+        if selected is not None:
+            selected_range = self._flow_selected_range()
+            if not selected_range or not selected_range[0] <= selected <= selected_range[1]:
+                selected_range = (selected, selected, 1)
+            self._open_flow_range_editor(*selected_range)
+        return "break"
+
+    def _show_flow_day_menu(self, event: tk.Event) -> str:
+        if self._canvas_has_timeline_item(event.widget):
+            return "break"
+        selected = self._global_flow_day_from_event(event)
+        if selected is not None:
+            selected_range = self._flow_selected_range()
+            if not selected_range or not selected_range[0] <= selected <= selected_range[1]:
+                self._global_flow_drag_start = selected
+                self._global_flow_drag_end = selected
+                selected_range = (selected, selected, 1)
+            self._global_flow_drag_anchor = None
+            self.selected = selected_range[0]
+            self.timeline_selection.clear()
+            self._draw_calendar_flow()
+            self._show_flow_range_menu(selected_range, event.x_root, event.y_root)
+        return "break"
+
+    def _open_flow_range_editor(self, start_date: date, _end_date: date, duration_days: int) -> None:
+        self.selected = start_date
+        self._cancel_flow_drag(redraw=False)
+        self.open_new_event(start_date, duration_days=duration_days)
+
+    def _show_flow_range_menu(self, selected_range: tuple[date, date, int], x: int, y: int) -> None:
+        start_date, end_date, duration_days = selected_range
+        menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
+        menu.add_command(
+            label="新增事项",
+            command=lambda: self._open_flow_range_editor(start_date, end_date, duration_days),
+        )
+        menu.add_command(label="新增习惯", command=self.open_routine_editor)
+        status_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        for status, label in DATE_STATUS_LABELS.items():
+            status_menu.add_command(
+                label=label,
+                command=lambda value=status: self._set_flow_range_status(start_date, end_date, value),
+            )
+        menu.add_cascade(label="设置日期状态", menu=status_menu)
+        menu.add_separator()
+        menu.add_command(label="取消选择", command=self._cancel_flow_drag)
+        menu.tk_popup(x, y)
+
+    def _set_flow_range_status(self, start_date: date, end_date: date, status: str) -> None:
+        current = start_date
+        while current <= end_date:
+            self.store.set_date_status(current, status)
+            current += timedelta(days=1)
+        self.render()
+
+    def _sync_global_xscroll(self, first: str, last: str) -> None:
+        self.global_hscroll.set(first, last)
+        self.global_date_canvas.xview_moveto(float(first))
+
+    def _sync_global_yscroll(self, first: str, last: str) -> None:
+        self.global_vscroll.set(first, last)
+        self.global_label_canvas.yview_moveto(float(first))
+
+    def _global_xview(self, *args) -> None:
+        self.global_date_canvas.xview(*args)
+        self.global_timeline_canvas.xview(*args)
+
+    def _global_yview(self, *args) -> None:
+        self.global_label_canvas.yview(*args)
+        self.global_timeline_canvas.yview(*args)
+
+    def _global_mousewheel(self, event: tk.Event) -> str:
+        units = wheel_units(event.delta)
+        if units:
+            self._global_yview("scroll", units, "units")
+        return "break"
+
+    def _global_shift_mousewheel(self, event: tk.Event) -> str:
+        units = wheel_units(event.delta)
+        if units:
+            self._global_xview("scroll", units * 3, "units")
+        return "break"
+
+    @staticmethod
+    def _canvas_has_timeline_item(canvas: tk.Canvas) -> bool:
+        current = canvas.find_withtag("current")
+        return bool(current and any(tag.startswith("timeline-item:") for tag in canvas.gettags(current[0])))
+
+    def _global_day_from_event(self, event: tk.Event) -> Optional[date]:
+        if not self.timeline_model or not self._global_day_width:
+            return None
+        canvas = event.widget
+        canvas_x = canvas.canvasx(event.x)
+        return canvas_day_at(
+            canvas_x,
+            period_start=self.timeline_model.period_start,
+            day_width=self._global_day_width,
+            day_count=len(self.timeline_model.days),
+        )
+
+    def _select_global_day(self, event: tk.Event) -> Optional[str]:
+        if self._canvas_has_timeline_item(event.widget):
+            return None
+        selected = self._global_day_from_event(event)
+        if selected is None:
+            return None
+        self.selected = selected
+        self._set_quick_placeholder()
+        self._draw_active_global_view()
+        return "break"
+
+    def _create_global_day(self, event: tk.Event) -> str:
+        if self._canvas_has_timeline_item(event.widget):
+            return "break"
+        selected = self._global_day_from_event(event)
+        if selected is not None:
+            self.selected = selected
+            self.open_new_event(selected)
+        return "break"
+
+    def _show_global_day_menu(self, event: tk.Event) -> str:
+        if self._canvas_has_timeline_item(event.widget):
+            return "break"
+        selected = self._global_day_from_event(event)
+        if selected is not None:
+            self.selected = selected
+            self._draw_active_global_view()
+            self.show_day_menu(selected, event.x_root, event.y_root)
+        return "break"
+
+    def _show_global_tooltip(self, text: str, event: tk.Event) -> None:
+        if self._global_tooltip:
+            self._global_tooltip.schedule(text, event.x_root, event.y_root)
+
+    def _show_timeline_item_tooltip(self, item_id: str, event: tk.Event) -> None:
+        if not self.timeline_model:
+            return
+        item = self.timeline_model.item_by_id(item_id)
+        if item:
+            self._show_global_tooltip(timeline_tooltip_text(item), event)
+
+    def _hide_global_tooltip(self, _event=None) -> None:
+        if self._global_tooltip:
+            self._global_tooltip.hide()
+
+    def _show_global_event_menu(self, item_id: str, event: tk.Event) -> None:
+        item = self.select_timeline_item(item_id)
+        source = self.store.event_by_id(item.id) if item else None
+        if source:
+            self.show_event_menu(source, event.x_root, event.y_root)
+
+    def _update_global_detail(self, item: Optional[TimelineItem]) -> None:
+        if not hasattr(self, "global_detail_title"):
+            return
+        if item is None:
+            total = len(self.timeline_model.items) if self.timeline_model else 0
+            self.global_detail_title.configure(text="选择一个事项查看详情")
+            self.global_detail_meta.configure(text=f"本月共 {total} 项工作\n单击事项选择，双击直接编辑")
+            self.global_detail_notes.configure(text="日期空白区域可双击新建事项。")
+            if hasattr(self, "global_detail_state_label"):
+                self.global_detail_state_label.configure(text="未选择", bg=self.theme.control_background, fg=self.theme.text_muted)
+                self.global_detail_edit_button.accented = False
+                self.global_detail_edit_button.outlined = True
+                self.global_detail_edit_button.foreground = self.theme.text_disabled
+                self.global_detail_edit_button.draw()
+                self.global_detail_toggle_button.foreground = self.theme.text_disabled
+                self.global_detail_toggle_button.draw()
+                self.global_detail_delete_button.foreground = self.theme.text_disabled
+                self.global_detail_delete_button.draw()
+            self.global_detail_toggle_button.set_text("完成")
+            return
+        date_text = f"{item.start_date:%Y-%m-%d}" if item.start_date == item.end_date else f"{item.start_date:%Y-%m-%d} → {item.end_date:%Y-%m-%d}"
+        duration = f"{item.calendar_span_days} 个自然日 · {item.effective_days_count} 个有效工作日"
+        ddl_text = f"\nDDL：{item.ddl_date:%Y-%m-%d}" if item.ddl_date else ""
+        self.global_detail_title.configure(text=item.title)
+        state_text = detail_state_text(item)
+        self.global_detail_meta.configure(
+            text=f"日期：{date_text}\n\n持续：{duration}\n\n类型：{timeline_type_label(item)}{ddl_text}\n\n状态：{state_text}"
+        )
+        self.global_detail_notes.configure(text=f"备注\n{item.notes}" if item.notes else "备注\n暂无备注")
+        if hasattr(self, "global_detail_state_label"):
+            if item.completed:
+                state_background, state_foreground = self.theme.card_done_background, self.theme.text_done
+            elif state_text == "已逾期":
+                state_background, state_foreground = self.theme.danger_soft, self.theme.danger
+            elif getattr(item, "native_ddl", False) or item.ddl_date:
+                state_background, state_foreground = self.theme.event_type_ddl_background, self.theme.event_type_ddl
+            elif getattr(item, "is_urgent", False):
+                state_background, state_foreground = self.theme.event_type_urgent_background, self.theme.event_type_urgent
+            else:
+                state_background, state_foreground = self.theme.control_background, self.theme.text_secondary
+            self.global_detail_state_label.configure(text=state_text, bg=state_background, fg=state_foreground)
+            self.global_detail_edit_button.accented = True
+            self.global_detail_edit_button.outlined = False
+            self.global_detail_edit_button.foreground = None
+            self.global_detail_edit_button.draw()
+            self.global_detail_toggle_button.foreground = None
+            self.global_detail_toggle_button.draw()
+            self.global_detail_delete_button.foreground = self.theme.danger
+            self.global_detail_delete_button.draw()
+        self.global_detail_toggle_button.set_text("取消完成" if item.completed else "完成")
+
+    def _selected_timeline_event(self) -> Optional[Event]:
+        item = self.get_selected_timeline_item()
+        return self.store.event_by_id(item.id) if item else None
+
+    def _edit_selected_timeline(self) -> None:
+        event = self._selected_timeline_event()
+        if event:
+            self.open_editor(event)
+
+    def _toggle_selected_timeline(self) -> None:
+        event = self._selected_timeline_event()
+        if event:
+            self.toggle_done(event)
+
+    def _delete_selected_timeline(self) -> None:
+        event = self._selected_timeline_event()
+        if event:
+            self._confirm_delete(event, parent=self)
+
+    def select_timeline_item(self, item_id: str) -> Optional[TimelineItem]:
+        model = self.timeline_model or build_month_timeline(self.store, self.shown_year, self.shown_month)
+        selected = self.timeline_selection.select(item_id, model)
+        self._draw_active_global_view()
+        return selected
+
+    def get_selected_timeline_item(self) -> Optional[TimelineItem]:
+        model = self.timeline_model or build_month_timeline(self.store, self.shown_year, self.shown_month)
+        return self.timeline_selection.get(model)
+
+    def clear_timeline_selection(self) -> None:
+        self.timeline_selection.clear()
+        if self.view_mode == "global":
+            self._draw_active_global_view()
+
+    def open_timeline_item(self, item_id: str) -> None:
+        event = self.store.event_by_id(item_id)
+        if event is not None:
+            self.open_editor(event)
 
     def _display_holiday(self, day: date) -> Optional[HolidayInfo]:
         custom_status = self.store.date_status(day)
@@ -3454,9 +5159,15 @@ class CalendarApp(tk.Tk):
         self.agenda_canvas.yview_scroll(int(-event.delta / 120), "units")
         return "break"
 
-    def open_editor(self, event: Optional[Event] = None, selected: Optional[date] = None) -> None:
+    def open_editor(
+        self,
+        event: Optional[Event] = None,
+        selected: Optional[date] = None,
+        *,
+        initial_duration_days: int = 1,
+    ) -> None:
         if self.editor_window and self.editor_window.winfo_exists():
-            self.present_overlay(self.editor_window)
+            self.editor_window._present()
             return
         if self._lower_job:
             try:
@@ -3465,11 +5176,17 @@ class CalendarApp(tk.Tk):
                 pass
             self._lower_job = None
         self.attributes("-topmost", False)
-        send_to_desktop(self)
-        self.editor_window = EventEditor(self, selected or (event.due_date if event else self.selected), event)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
+        self.editor_window = EventEditor(
+            self,
+            selected or (event.due_date if event else self.selected),
+            event,
+            initial_duration_days=initial_duration_days,
+        )
 
-    def open_new_event(self, selected: Optional[date] = None) -> None:
-        self.open_editor(selected=selected or self.selected)
+    def open_new_event(self, selected: Optional[date] = None, *, duration_days: int = 1) -> None:
+        self.open_editor(selected=selected or self.selected, initial_duration_days=duration_days)
 
     def open_day_detail(self, day: Optional[date] = None) -> None:
         target_day = day or self.selected
@@ -3479,7 +5196,8 @@ class CalendarApp(tk.Tk):
             self.present_overlay(self.day_detail_window)
             return
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.day_detail_window = DayDetailDialog(self, target_day)
 
     def open_routine_manager(self) -> None:
@@ -3487,7 +5205,8 @@ class CalendarApp(tk.Tk):
             self.present_overlay(self.routine_manager)
             return
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.routine_manager = RoutineManager(self)
 
     def open_ddl_list(self) -> None:
@@ -3495,7 +5214,8 @@ class CalendarApp(tk.Tk):
             self.present_overlay(self.ddl_list_window)
             return
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.ddl_list_window = DDLListDialog(self)
 
     def open_routine_editor(self, item: Optional[RoutineItem] = None) -> None:
@@ -3503,7 +5223,8 @@ class CalendarApp(tk.Tk):
             self.present_overlay(self.routine_editor)
             return
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         self.routine_editor = RoutineEditor(self, item)
 
     def present_overlay(self, window: tk.Toplevel) -> None:
@@ -3517,7 +5238,8 @@ class CalendarApp(tk.Tk):
                 add="+",
             )
         self.attributes("-topmost", False)
-        send_to_desktop(self)
+        if self.view_mode == "compact":
+            send_to_desktop(self)
         make_tool_window(window)
         window.attributes("-topmost", True)
         window.lift()
@@ -3703,14 +5425,24 @@ class CalendarApp(tk.Tk):
     def apply_window_mode(self, force_desktop: bool = False) -> None:
         if not self.winfo_exists():
             return
-        make_tool_window(self)
+        if self.view_mode == "global":
+            make_app_window(self)
+        else:
+            make_tool_window(self)
         overlays = self._active_overlays()
         if overlays:
             self.attributes("-topmost", False)
-            send_to_desktop(self)
+            if self.view_mode == "compact":
+                send_to_desktop(self)
             for overlay in overlays:
                 overlay.attributes("-topmost", True)
             bring_to_front(overlays[-1])
+            return
+        if self.view_mode == "global":
+            self.attributes("-topmost", self.window_mode == "pinned")
+            if self.window_mode == "pinned":
+                self.lift()
+            self._update_mode_badge()
             return
         if self.window_mode == "pinned":
             self.attributes("-topmost", True)
@@ -3726,6 +5458,13 @@ class CalendarApp(tk.Tk):
         self._update_mode_badge()
 
     def _update_mode_badge(self) -> None:
+        if self.view_mode == "global":
+            label = "取消置顶" if self.window_mode == "pinned" else "窗口置顶"
+            foreground = (
+                self.theme.accent if self.window_mode == "pinned" else self.theme.text_secondary
+            ) if self.theme.style != "aero" else self.theme.control_text
+            self.mode_button.set_text(label, foreground)
+            return
         if self.window_mode == "pinned":
             self.mode_button.set_text("置顶", self.theme.accent if self.theme.style != "aero" else self.theme.control_text)
         elif self.desktop_session_active:
@@ -3734,7 +5473,7 @@ class CalendarApp(tk.Tk):
             self.mode_button.set_text("桌面", self.theme.text_secondary if self.theme.style != "aero" else self.theme.control_text)
 
     def _activate_desktop_session(self, _event=None) -> None:
-        if not self._window_ready or self.window_mode != "desktop":
+        if self.view_mode != "compact" or not self._window_ready or self.window_mode != "desktop":
             return
         if self._lower_job:
             try:
@@ -3747,7 +5486,7 @@ class CalendarApp(tk.Tk):
         self._update_mode_badge()
 
     def _on_focus_out(self, _event=None) -> None:
-        if self.window_mode != "desktop" or not self.desktop_session_active:
+        if self.view_mode != "compact" or self.window_mode != "desktop" or not self.desktop_session_active:
             return
         if self._lower_job:
             try:
@@ -3758,7 +5497,7 @@ class CalendarApp(tk.Tk):
 
     def _return_to_desktop_if_inactive(self) -> None:
         self._lower_job = None
-        if self.window_mode != "desktop" or not self.desktop_session_active:
+        if self.view_mode != "compact" or self.window_mode != "desktop" or not self.desktop_session_active:
             return
         if self._active_overlays() or is_foreground_process():
             self._lower_job = self.after(900, self._return_to_desktop_if_inactive)
@@ -3766,7 +5505,7 @@ class CalendarApp(tk.Tk):
         self._end_desktop_session()
 
     def _end_desktop_session(self) -> None:
-        if self.window_mode != "desktop":
+        if self.view_mode != "compact" or self.window_mode != "desktop":
             return
         self.desktop_session_active = False
         self.apply_window_mode(force_desktop=True)
@@ -3792,8 +5531,18 @@ class CalendarApp(tk.Tk):
         self.after(150, self.apply_window_mode)
 
     def _save_window_settings(self) -> None:
-        self.store.settings["x"] = self.winfo_x()
-        self.store.settings["y"] = self.winfo_y()
+        if self.view_mode == "global":
+            if self.state() == "normal":
+                self._global_normal_geometry = self._capture_window_geometry()
+            if self._global_normal_geometry is not None:
+                self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
+        else:
+            compact_geometry = self._capture_window_geometry()
+            self.store.settings["compact_geometry"] = compact_geometry.as_dict()
+            self.store.settings["x"] = compact_geometry.x
+            self.store.settings["y"] = compact_geometry.y
+        self.store.settings["view_mode"] = self.view_mode
+        self.store.settings["global_display_mode"] = self.global_display_mode
         self.store.settings["agenda_open"] = self.agenda_open
         self.store.settings["window_mode"] = self.window_mode
         self.store.settings["theme"] = self.theme_name
@@ -3864,9 +5613,13 @@ class CalendarApp(tk.Tk):
             label="切换为桌面模式" if self.window_mode == "pinned" else "始终置顶",
             command=self.toggle_window_mode,
         )
-        menu.add_command(label="收起日程区" if self.agenda_open else "展开日程区", command=self.toggle_agenda)
+        if self.view_mode == "compact":
+            menu.add_command(label="收起日程区" if self.agenda_open else "展开日程区", command=self.toggle_agenda)
+        else:
+            menu.add_command(label="返回紧凑视图", command=self.return_to_compact_view)
         menu.add_command(label="查看未来 7 天", command=lambda: UpcomingDialog(self))
         menu.add_command(label="管理习惯清单…", command=self.open_routine_manager)
+        menu.add_command(label="查看全部 DDL…", command=self.open_ddl_list)
         menu.add_separator()
         theme_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         self.theme_var = tk.StringVar(value=self.theme_name)
@@ -4000,6 +5753,7 @@ class CalendarApp(tk.Tk):
             "方向键：移动所选日期\n"
             "Ctrl+N：打开当天事项详情\n"
             "Ctrl+T：回到今天\n"
+            "Ctrl+G：打开 / 关闭全局视图\n"
             "拖动顶部：移动挂件位置\n\n"
             "顶部横线 / Alt+F4：隐藏到通知区域，提醒继续运行\n"
             "真正退出：右键托盘图标并选择“退出桌面月历”\n\n"

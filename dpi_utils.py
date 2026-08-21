@@ -188,6 +188,28 @@ def work_area_for_window(widget: tk.Misc) -> WorkArea:
     return WorkArea(info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom)
 
 
+def work_area_for_rect(x: int, y: int, width: int, height: int) -> WorkArea:
+    """Return the work area nearest a saved device-pixel rectangle."""
+    if not IS_WINDOWS:
+        return WorkArea(x, y, x + max(1, width), y + max(1, height))
+
+    class Rect(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", Rect), ("rcWork", Rect), ("dwFlags", ctypes.c_ulong)]
+
+    user32 = ctypes.windll.user32
+    user32.MonitorFromRect.restype = ctypes.c_void_p
+    rectangle = Rect(x, y, x + max(1, width), y + max(1, height))
+    monitor = user32.MonitorFromRect(ctypes.byref(rectangle), 2)  # MONITOR_DEFAULTTONEAREST
+    info = MonitorInfo()
+    info.cbSize = ctypes.sizeof(MonitorInfo)
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return WorkArea(x, y, x + max(1, width), y + max(1, height))
+    return WorkArea(info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom)
+
+
 class DpiManager:
     def __init__(self, root: tk.Misc, dpi: Optional[int] = None) -> None:
         self.root = root

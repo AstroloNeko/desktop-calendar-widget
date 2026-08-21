@@ -30,6 +30,8 @@ class StoreTests(unittest.TestCase):
         )
         store = Store(self.data_file)
         self.assertEqual([event.id for event in store.events], ["good"])
+        self.assertEqual(store.event_by_id("good").title, "有效日程")
+        self.assertIsNone(store.event_by_id("missing"))
 
     def test_old_topmost_setting_migrates_to_desktop_mode(self):
         self.data_file.write_text(json.dumps({"events": [], "settings": {"topmost": True}}), encoding="utf-8")
@@ -43,6 +45,16 @@ class StoreTests(unittest.TestCase):
     def test_new_install_defaults_to_modern_theme(self):
         store = Store(self.data_file)
         self.assertEqual(store.settings["theme"], "modern")
+
+    def test_new_and_legacy_settings_default_to_compact_view_without_geometry(self):
+        store = Store(self.data_file)
+        self.assertEqual(store.settings["view_mode"], "compact")
+        self.assertIsNone(store.settings["compact_geometry"])
+        self.assertIsNone(store.settings["global_geometry"])
+        self.data_file.write_text(json.dumps({"events": [], "settings": {"x": 120, "y": 80}}), encoding="utf-8")
+        legacy = Store(self.data_file)
+        self.assertEqual(legacy.settings["view_mode"], "compact")
+        self.assertEqual((legacy.settings["x"], legacy.settings["y"]), (120, 80))
 
     def test_legacy_settings_without_theme_use_modern(self):
         self.data_file.write_text(json.dumps({"settings": {"agenda_open": False}}), encoding="utf-8")

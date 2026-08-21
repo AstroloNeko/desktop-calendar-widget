@@ -297,6 +297,9 @@ class DDLListGroups:
 DEFAULT_SETTINGS = {
     "theme": DEFAULT_THEME_NAME,
     "window_mode": "desktop",
+    "view_mode": "compact",
+    "compact_geometry": None,
+    "global_geometry": None,
     "agenda_open": True,
     "opacity": 1.0,
     "x": None,
@@ -403,6 +406,10 @@ class Store:
         self.events = [item for item in self.events if item.id != event_id]
         self.clear_notifications(event_id)
         self.save()
+
+    def event_by_id(self, event_id: str) -> Optional[Event]:
+        """Resolve the canonical task used by Timeline, dialogs, and editors."""
+        return next((item for item in self.events if item.id == event_id), None)
 
     def clear_notifications(self, event_id: str) -> None:
         prefix = event_id + ":"
