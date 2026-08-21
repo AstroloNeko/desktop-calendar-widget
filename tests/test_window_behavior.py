@@ -1,6 +1,7 @@
 import inspect
 import unittest
 from datetime import date, datetime
+from types import SimpleNamespace
 
 from app import (
     CalendarApp,
@@ -45,6 +46,242 @@ class _FakeCalendar:
 
 
 class WindowBehaviorTests(unittest.TestCase):
+    def test_event_editor_presents_as_modal_child(self) -> None:
+        actions: list[object] = []
+
+        class FakeMaster:
+            def present_overlay(self, window) -> None:
+                actions.append(("present", window))
+
+        class FakeEntry:
+            def focus_set(self) -> None:
+                actions.append("entry-focus")
+
+        editor = type(
+            "FakeEditor",
+            (),
+            {
+                "master_app": FakeMaster(),
+                "title_entry": FakeEntry(),
+                "winfo_exists": lambda self: True,
+                "transient": lambda self, parent: actions.append(("transient", parent)),
+                "grab_set": lambda self: actions.append("grab"),
+                "focus_set": lambda self: actions.append("focus"),
+            },
+        )()
+
+        EventEditor._present(editor)
+
+        self.assertEqual(actions[0], ("transient", editor.master_app))
+        self.assertEqual(actions[1], ("present", editor))
+        self.assertEqual(actions[2:], ["grab", "focus", "entry-focus"])
+
+    def test_event_editor_close_releases_modal_grab_before_destroy(self) -> None:
+        actions: list[str] = []
+
+        class FakeMaster:
+            editor_window = None
+            day_detail_window = None
+
+            def after(self, _delay: int, callback) -> None:
+                callback()
+
+            def apply_window_mode(self) -> None:
+                actions.append("main")
+
+        master = FakeMaster()
+        editor = type(
+            "FakeEditor",
+            (),
+            {
+                "master_app": master,
+                "grab_current": lambda self: self,
+                "grab_release": lambda self: actions.append("release"),
+                "destroy": lambda self: actions.append("destroy"),
+            },
+        )()
+        master.editor_window = editor
+
+        EventEditor.close(editor)
+
+        self.assertEqual(actions, ["release", "destroy", "main"])
+
+    def test_calendar_flow_drag_selects_range_without_opening_editor(self) -> None:
+        actions: list[str] = []
+
+        class FakeCanvas:
+            def grab_current(self):
+                return self
+
+            def grab_release(self) -> None:
+                actions.append("release")
+
+        canvas = FakeCanvas()
+        event = SimpleNamespace(widget=canvas)
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "_global_flow_drag_anchor": date(2026, 8, 28),
+                "_global_flow_drag_start": date(2026, 8, 28),
+                "_global_flow_drag_end": date(2026, 8, 28),
+                "_global_flow_drag_moved": True,
+                "selected": date(2026, 8, 28),
+                "_global_flow_day_from_event": lambda self, _event: date(2026, 8, 24),
+                "_set_quick_placeholder": lambda self: actions.append("placeholder"),
+                "_draw_calendar_flow": lambda self: actions.append("draw"),
+                "open_new_event": lambda self, *_args, **_kwargs: actions.append("unexpected-editor"),
+            },
+        )()
+
+        result = CalendarApp._finish_flow_drag(fake, event)
+
+        self.assertEqual(result, "break")
+        self.assertEqual(fake._global_flow_drag_start, date(2026, 8, 24))
+        self.assertEqual(fake._global_flow_drag_end, date(2026, 8, 28))
+        self.assertEqual(fake.selected, date(2026, 8, 24))
+        self.assertNotIn("unexpected-editor", actions)
+        self.assertEqual(actions, ["release", "placeholder", "draw"])
+
+    def test_calendar_flow_double_click_uses_selected_range(self) -> None:
+        captured: list[tuple[date, date, int]] = []
+        selected_range = (date(2026, 8, 24), date(2026, 8, 30), 7)
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "_canvas_has_timeline_item": lambda self, _widget: False,
+                "_global_flow_day_from_event": lambda self, _event: date(2026, 8, 27),
+                "_flow_selected_range": lambda self: selected_range,
+                "_open_flow_range_editor": lambda self, *values: captured.append(values),
+            },
+        )()
+
+        result = CalendarApp._create_flow_day(fake, SimpleNamespace(widget=object()))
+
+        self.assertEqual(result, "break")
+        self.assertEqual(captured, [selected_range])
+
+    def test_calendar_flow_context_menus_use_existing_crud_with_confirmed_delete(self) -> None:
+        range_menu = inspect.getsource(CalendarApp._show_flow_range_menu)
+        for label in ("新增事项", "新增习惯", "设置日期状态", "取消选择"):
+            self.assertIn(label, range_menu)
+        item_menu = inspect.getsource(CalendarApp._show_flow_item_menu)
+        for label in ("编辑", "取消完成", "完成", "删除"):
+            self.assertIn(label, item_menu)
+        self.assertIn("self._confirm_delete", item_menu)
+
+    def test_global_workspace_wires_dual_view_switch(self) -> None:
+        source = inspect.getsource(CalendarApp._build_global_ui)
+        self.assertIn("▦ 月度排期", source)
+        self.assertIn("▤ 任务时间轴", source)
+        self.assertIn('set_global_display_mode("flow")', source)
+        self.assertIn('set_global_display_mode("timeline")', source)
+
+    def test_global_quick_add_uses_enter_without_ambiguous_plus_button(self) -> None:
+        source = inspect.getsource(CalendarApp._build_global_ui)
+        self.assertIn('self.quick_entry.bind("<Return>", self.quick_add)', source)
+        self.assertNotIn('ThemeButton(quick_frame, self, "+", self.quick_add', source)
+
+    def test_global_toolbar_names_compact_return_explicitly(self) -> None:
+        source = inspect.getsource(CalendarApp._build_global_ui)
+        self.assertIn('"紧凑视图", self.return_to_compact_view', source)
+
+    def test_global_display_switch_persists_and_redraws_in_place(self) -> None:
+        actions: list[str] = []
+
+        class FakeStore:
+            settings: dict[str, str] = {}
+
+            def save(self) -> None:
+                actions.append("save")
+
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "global_display_mode": "timeline",
+                "store": FakeStore(),
+                "_cancel_flow_drag": lambda self, **_kwargs: None,
+                "_update_global_display_mode_widgets": lambda self: actions.append("widgets"),
+                "_draw_active_global_view": lambda self: actions.append("draw"),
+            },
+        )()
+        CalendarApp.set_global_display_mode(fake, "flow")
+        self.assertEqual(fake.global_display_mode, "flow")
+        self.assertEqual(fake.store.settings["global_display_mode"], "flow")
+        self.assertEqual(actions, ["save", "widgets", "draw"])
+
+    def test_global_display_mode_is_saved_with_window_settings(self) -> None:
+        source = inspect.getsource(CalendarApp._save_window_settings)
+        self.assertIn('self.store.settings["global_display_mode"]', source)
+
+    def test_calendar_flow_today_indicator_uses_theme_tokens(self) -> None:
+        source = inspect.getsource(CalendarApp._draw_calendar_flow)
+        self.assertIn('text="今天"', source)
+        self.assertIn("theme.date_today_background", source)
+        self.assertIn("theme.date_today_border", source)
+
+    def test_escape_cancels_calendar_flow_drag_without_opening_editor(self) -> None:
+        actions: list[str] = []
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "view_mode": "global",
+                "global_display_mode": "flow",
+                "_global_flow_drag_start": date(2026, 8, 3),
+                "_global_flow_drag_end": date(2026, 8, 7),
+                "_global_flow_drag_moved": True,
+                "_draw_calendar_flow": lambda self: actions.append("redraw"),
+                "_cancel_flow_drag": CalendarApp._cancel_flow_drag,
+                "_end_desktop_session": lambda self: actions.append("desktop"),
+            },
+        )()
+        self.assertEqual(CalendarApp._handle_escape(fake), "break")
+        self.assertIsNone(fake._global_flow_drag_start)
+        self.assertIsNone(fake._global_flow_drag_end)
+        self.assertFalse(fake._global_flow_drag_moved)
+        self.assertEqual(actions, ["redraw"])
+
+    def test_global_detail_keeps_existing_task_semantics(self) -> None:
+        class Capture:
+            def __init__(self) -> None:
+                self.values: dict[str, object] = {}
+
+            def configure(self, **values) -> None:
+                self.values.update(values)
+
+            def set_text(self, text: str) -> None:
+                self.values["text"] = text
+
+        fake = SimpleNamespace(
+            global_detail_title=Capture(),
+            global_detail_meta=Capture(),
+            global_detail_notes=Capture(),
+            global_detail_toggle_button=Capture(),
+        )
+        item = SimpleNamespace(
+            title="跨周交付",
+            start_date=date(2026, 8, 3),
+            end_date=date(2026, 8, 7),
+            calendar_span_days=5,
+            effective_days_count=5,
+            task_type="urgent",
+            ddl_date=date(2026, 8, 7),
+            completed=False,
+            notes="交付前复核",
+        )
+        CalendarApp._update_global_detail(fake, item)
+        self.assertEqual(fake.global_detail_title.values["text"], "跨周交付")
+        detail = str(fake.global_detail_meta.values["text"])
+        self.assertIn("2026-08-03 → 2026-08-07", detail)
+        self.assertIn("5 个自然日 · 5 个有效工作日", detail)
+        self.assertIn("类型：紧急", detail)
+        self.assertIn("DDL：2026-08-07", detail)
+        self.assertIn("状态：已逾期", detail)
+        self.assertIn("交付前复核", str(fake.global_detail_notes.values["text"]))
+
     def test_global_workspace_wires_complete_toolbar_and_quick_add(self) -> None:
         source = inspect.getsource(CalendarApp._build_global_ui)
         for command in (
@@ -351,6 +588,18 @@ class WindowBehaviorTests(unittest.TestCase):
 
         CalendarApp.open_new_event(fake)
         self.assertEqual(opened, [selected_day])
+
+    def test_drag_created_event_prefills_existing_duration_field(self) -> None:
+        captured: dict[str, object] = {}
+        selected_day = date(2026, 8, 3)
+        fake = type(
+            "FakeCalendar",
+            (),
+            {"selected": selected_day, "open_editor": lambda self, **kwargs: captured.update(kwargs)},
+        )()
+        CalendarApp.open_new_event(fake, selected_day, duration_days=5)
+        self.assertEqual(captured["selected"], selected_day)
+        self.assertEqual(captured["initial_duration_days"], 5)
 
     def test_day_detail_add_entry_opens_editor_for_detail_date(self) -> None:
         opened: list[date] = []
