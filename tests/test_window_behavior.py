@@ -174,9 +174,15 @@ class WindowBehaviorTests(unittest.TestCase):
     def test_global_workspace_wires_dual_view_switch(self) -> None:
         source = inspect.getsource(CalendarApp._build_global_ui)
         self.assertIn("▦ 月度排期", source)
-        self.assertIn("▤ 任务时间轴", source)
+        self.assertIn("▤ 时间轴", source)
         self.assertIn('set_global_display_mode("flow")', source)
         self.assertIn('set_global_display_mode("timeline")', source)
+
+    def test_global_view_switch_is_grouped_as_one_segment_control(self) -> None:
+        source = inspect.getsource(CalendarApp._build_global_ui)
+        self.assertIn("mode_switch = tk.Frame", source)
+        self.assertIn('self.global_flow_mode_button.pack(side="left")', source)
+        self.assertIn('self.global_timeline_mode_button.pack(side="left")', source)
 
     def test_global_quick_add_uses_enter_without_ambiguous_plus_button(self) -> None:
         source = inspect.getsource(CalendarApp._build_global_ui)
@@ -221,6 +227,25 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn('text="今天"', source)
         self.assertIn("theme.date_today_background", source)
         self.assertIn("theme.date_today_border", source)
+
+    def test_calendar_flow_card_states_use_semantic_theme_tokens(self) -> None:
+        source = inspect.getsource(CalendarApp._draw_calendar_flow)
+        for token in (
+            "theme.schedule_card_hover",
+            "theme.card_done_background",
+            "theme.event_type_urgent_background",
+            "theme.event_type_ddl_background",
+            "theme.accent_soft",
+        ):
+            self.assertIn(token, source)
+        self.assertNotRegex(source, r'#[0-9A-Fa-f]{6}')
+
+    def test_global_detail_uses_status_badge_and_muted_empty_actions(self) -> None:
+        build_source = inspect.getsource(CalendarApp._build_global_ui)
+        update_source = inspect.getsource(CalendarApp._update_global_detail)
+        self.assertIn("global_detail_state_label", build_source)
+        self.assertIn("theme.text_disabled", update_source)
+        self.assertIn("theme.danger_soft", update_source)
 
     def test_escape_cancels_calendar_flow_drag_without_opening_editor(self) -> None:
         actions: list[str] = []
