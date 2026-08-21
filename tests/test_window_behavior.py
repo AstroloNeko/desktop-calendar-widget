@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from datetime import date, datetime
 
@@ -44,6 +45,71 @@ class _FakeCalendar:
 
 
 class WindowBehaviorTests(unittest.TestCase):
+    def test_global_workspace_wires_complete_toolbar_and_quick_add(self) -> None:
+        source = inspect.getsource(CalendarApp._build_global_ui)
+        for command in (
+            "open_new_event",
+            "open_day_detail",
+            "open_routine_manager",
+            "open_ddl_list",
+            "toggle_window_mode",
+            "show_main_menu",
+            "return_to_compact_view",
+            "hide_to_tray",
+            "quick_add",
+            "show_quick_options",
+        ):
+            self.assertIn(command, source)
+
+    def test_global_workspace_uses_theme_tokens_instead_of_hex_colors(self) -> None:
+        source = inspect.getsource(CalendarApp._build_global_ui)
+        self.assertNotIn("#FFFFFF", source)
+        self.assertNotIn("#000000", source)
+        self.assertIn("theme.", source)
+
+    def test_global_primary_action_opens_new_event(self) -> None:
+        actions: list[str] = []
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "view_mode": "global",
+                "open_new_event": lambda self: actions.append("create"),
+                "open_day_detail": lambda self: actions.append("detail"),
+            },
+        )()
+        CalendarApp._open_primary_action(fake)
+        self.assertEqual(actions, ["create"])
+
+    def test_scroll_callbacks_keep_headers_and_labels_synchronized(self) -> None:
+        actions: list[tuple[str, float]] = []
+
+        class FakeCanvas:
+            def xview_moveto(self, value: float) -> None:
+                actions.append(("date", value))
+
+            def yview_moveto(self, value: float) -> None:
+                actions.append(("label", value))
+
+        class FakeScrollbar:
+            def set(self, first: str, _last: str) -> None:
+                actions.append(("scrollbar", float(first)))
+
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "global_hscroll": FakeScrollbar(),
+                "global_vscroll": FakeScrollbar(),
+                "global_date_canvas": FakeCanvas(),
+                "global_label_canvas": FakeCanvas(),
+            },
+        )()
+        CalendarApp._sync_global_xscroll(fake, "0.25", "0.75")
+        CalendarApp._sync_global_yscroll(fake, "0.40", "0.90")
+        self.assertIn(("date", 0.25), actions)
+        self.assertIn(("label", 0.4), actions)
+
     def test_main_ddl_entry_uses_complete_list_label(self) -> None:
         self.assertEqual(DDL_LIST_ENTRY_LABEL, "DDL列表")
 
