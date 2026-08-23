@@ -7,7 +7,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Collection, Optional
 
 from holiday_data import is_workday as system_is_workday
 from ui_theme import DEFAULT_THEME_NAME, normalize_theme_name
@@ -72,6 +72,7 @@ REMINDERS = {
 }
 WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 ROUTINE_KINDS = ("habit", "todo")
+EVENT_COLOR_MODES = ("inherit", "override")
 
 
 def normalize_event_type(value: object) -> str:
@@ -97,6 +98,50 @@ def normalize_reminder_time(value: object) -> Optional[str]:
     return parsed.strftime("%H:%M")
 
 
+def normalize_event_color_mode(value: object, category_id: Optional[str]) -> str:
+    if category_id is None:
+        return "override"
+    return value if isinstance(value, str) and value in EVENT_COLOR_MODES else "override"
+
+
+def normalize_category_id(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+@dataclass
+class EventCategory:
+    id: str
+    name: str
+    color: str = "#6687F2"
+    sort_order: int = 0
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        self.id = str(self.id).strip()
+        self.name = str(self.name).strip()
+        if not self.id or not self.name:
+            raise ValueError("category id and name are required")
+        if not isinstance(self.color, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", self.color):
+            self.color = COLORS["海盐蓝"]
+        try:
+            self.sort_order = int(self.sort_order)
+        except (TypeError, ValueError):
+            self.sort_order = 0
+        if not self.created_at:
+            self.created_at = datetime.now().isoformat(timespec="seconds")
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "EventCategory":
+        if not isinstance(raw, dict):
+            raise TypeError("category payload must be an object")
+        allowed = {item.name for item in fields(cls)}
+        data = {key: value for key, value in raw.items() if key in allowed}
+        return cls(**data)
+
+
 @dataclass
 class Event:
     id: str
@@ -113,11 +158,15 @@ class Event:
     duration_days: int = 1
     skip_non_working_days: bool = False
     end_as_ddl: bool = False
+    category_id: Optional[str] = None
+    color_mode: str = "override"
 
     def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = datetime.now().isoformat(timespec="seconds")
         self.event_type = normalize_event_type(self.event_type)
+        self.category_id = normalize_category_id(self.category_id)
+        self.color_mode = normalize_event_color_mode(self.color_mode, self.category_id)
         if not isinstance(self.color, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", self.color):
             self.color = COLORS["海盐蓝"]
         self.has_time = bool(self.has_time)
@@ -191,6 +240,8 @@ class Event:
         if raw.get("is_ddl") is True:
             raw_type = "ddl"
         data["event_type"] = normalize_event_type(raw_type)
+        data["category_id"] = normalize_category_id(raw.get("category_id"))
+        data["color_mode"] = normalize_event_color_mode(raw.get("color_mode"), data["category_id"])
         if not isinstance(data.get("id"), str) or not data["id"]:
             raise ValueError("invalid event id")
         if not isinstance(data.get("title"), str) or not data["title"].strip():
@@ -315,6 +366,7 @@ class Store:
     def __init__(self, data_file: Optional[Path] = None) -> None:
         self.data_file = data_file or DATA_FILE
         self.events: list[Event] = []
+        self.categories: list[EventCategory] = []
         self.routines: list[RoutineItem] = []
         self.date_states: dict[str, str] = {}
         self.settings = dict(DEFAULT_SETTINGS)
@@ -325,6 +377,21 @@ class Store:
     def load(self) -> None:
         try:
             raw = json.loads(self.data_file.read_text(encoding="utf-8"))
+            categories: list[EventCategory] = []
+            seen_category_ids: set[str] = set()
+            category_payload = raw.get("categories", [])
+            if not isinstance(category_payload, list):
+                category_payload = []
+            for item in category_payload:
+                try:
+                    category = EventCategory.from_dict(item)
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if category.id in seen_category_ids:
+                    continue
+                seen_category_ids.add(category.id)
+                categories.append(category)
+            self.categories = categories
             loaded: list[Event] = []
             for item in raw.get("events", []):
                 try:
@@ -332,6 +399,16 @@ class Store:
                 except (TypeError, ValueError, KeyError):
                     continue
             self.events = loaded
+            valid_categories = {category.id: category for category in self.categories}
+            for event in self.events:
+                category = valid_categories.get(event.category_id or "")
+                if category is None:
+                    event.category_id = None
+                    event.color_mode = "override"
+                elif event.color_mode == "inherit":
+                    # Keep the legacy color field as a persisted fallback so
+                    # every older renderer and exported backup remains stable.
+                    event.color = category.color
             routines: list[RoutineItem] = []
             for item in raw.get("routines", []):
                 try:
@@ -373,8 +450,9 @@ class Store:
         notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
         self.notified = set(notification_history)
         payload = {
-            "version": 6,
+            "version": 7,
             "events": [asdict(event) for event in self.events],
+            "categories": [asdict(category) for category in self.sorted_categories()],
             "routines": [asdict(item) for item in self.routines],
             "date_states": self.date_states,
             "settings": self.settings,
@@ -385,6 +463,12 @@ class Store:
         temporary.replace(self.data_file)
 
     def upsert(self, event: Event) -> None:
+        category = self.category_by_id(event.category_id)
+        if category is None:
+            event.category_id = None
+            event.color_mode = "override"
+        elif event.color_mode == "inherit":
+            event.color = category.color
         previous = next((item for item in self.events if item.id == event.id), None)
         if previous is None:
             self.events.append(event)
@@ -401,6 +485,72 @@ class Store:
         ):
             self.clear_notifications(event.id)
         self.save()
+
+    def sorted_categories(self) -> list[EventCategory]:
+        return sorted(self.categories, key=lambda item: (item.sort_order, item.created_at, item.id))
+
+    def category_by_id(self, category_id: Optional[str]) -> Optional[EventCategory]:
+        if category_id is None:
+            return None
+        return next((item for item in self.categories if item.id == category_id), None)
+
+    def create_category(self, name: str, color: str, *, sort_order: Optional[int] = None) -> EventCategory:
+        cleaned_name = str(name).strip()
+        if not cleaned_name:
+            raise ValueError("category name is required")
+        if sort_order is None:
+            sort_order = max((item.sort_order for item in self.categories), default=-1) + 1
+        category = EventCategory(
+            id=str(uuid.uuid4()),
+            name=cleaned_name,
+            color=color,
+            sort_order=sort_order,
+        )
+        self.categories.append(category)
+        self.save()
+        return category
+
+    def upsert_category(self, category: EventCategory) -> None:
+        previous = self.category_by_id(category.id)
+        if previous is None:
+            self.categories.append(category)
+        else:
+            self.categories[self.categories.index(previous)] = category
+        for event in self.events:
+            if event.category_id == category.id and event.color_mode == "inherit":
+                event.color = category.color
+        self.save()
+
+    def delete_category(self, category_id: str) -> None:
+        category = self.category_by_id(category_id)
+        if category is None:
+            return
+        for event in self.events:
+            if event.category_id != category_id:
+                continue
+            event.color = self.effective_event_color(event)
+            event.category_id = None
+            event.color_mode = "override"
+        self.categories = [item for item in self.categories if item.id != category_id]
+        self.save()
+
+    def effective_event_color(self, event: Event) -> str:
+        if event.color_mode == "inherit":
+            category = self.category_by_id(event.category_id)
+            if category is not None:
+                return category.color
+        return event.color if re.fullmatch(r"#[0-9A-Fa-f]{6}", event.color) else COLORS["海盐蓝"]
+
+    def event_matches_category_filter(
+        self,
+        event: Event,
+        category_ids: Optional[Collection[str]],
+        *,
+        include_uncategorized: bool = True,
+    ) -> bool:
+        if event.category_id is None:
+            return include_uncategorized
+        return category_ids is None or event.category_id in category_ids
 
     def delete(self, event_id: str) -> None:
         self.events = [item for item in self.events if item.id != event_id]

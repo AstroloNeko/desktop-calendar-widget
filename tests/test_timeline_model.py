@@ -24,6 +24,50 @@ class TimelineModelTests(unittest.TestCase):
         self.assertEqual(model.items, ())
         self.assertEqual((model.days[0].date, model.days[-1].date), (date(2026, 8, 1), date(2026, 8, 31)))
 
+    def test_timeline_uses_effective_category_color(self) -> None:
+        category = self.store.create_category("绘画", "#8B70D6")
+        self.store.events = [
+            Event("drawing", "画稿", "2026-08-03T10:00", category_id=category.id, color_mode="inherit")
+        ]
+        item = self.build().items[0]
+        self.assertEqual(item.color, "#8B70D6")
+        self.assertEqual(item.category_id, category.id)
+        self.assertEqual(item.category_name, "绘画")
+
+    def test_global_category_filter_supports_multiple_and_uncategorized(self) -> None:
+        drawing = self.store.create_category("绘画", "#8B70D6")
+        video = self.store.create_category("视频", "#52B788")
+        self.store.events = [
+            Event("drawing", "画稿", "2026-08-03T10:00", category_id=drawing.id, color_mode="inherit"),
+            Event("video", "剪辑", "2026-08-04T10:00", category_id=video.id, color_mode="inherit"),
+            Event("none", "杂事", "2026-08-05T10:00"),
+        ]
+        selected = build_month_timeline(
+            self.store,
+            2026,
+            8,
+            category_ids={drawing.id, video.id},
+            include_uncategorized=False,
+        )
+        self.assertEqual({item.id for item in selected.items}, {"drawing", "video"})
+        with_uncategorized = build_month_timeline(
+            self.store,
+            2026,
+            8,
+            category_ids={drawing.id},
+            include_uncategorized=True,
+        )
+        self.assertEqual({item.id for item in with_uncategorized.items}, {"drawing", "none"})
+
+    def test_active_ddl_dates_are_unique_and_ignore_completed_items(self) -> None:
+        self.store.events = [
+            Event("ddl-one", "DDL 一", "2026-08-06T10:00", event_type="ddl"),
+            Event("ddl-two", "DDL 二", "2026-08-06T12:00", event_type="ddl"),
+            Event("done", "已完成", "2026-08-07T10:00", event_type="ddl", done=True),
+            Event("span", "持续事项", "2026-08-08T10:00", duration_days=3),
+        ]
+        self.assertEqual(self.build().active_ddl_dates, frozenset({date(2026, 8, 6)}))
+
     def test_single_general_urgent_and_native_ddl_keep_type_and_color(self) -> None:
         self.store.events = [
             Event("general", "一般", "2026-08-03T10:00", color="#52B788", created_at="1"),

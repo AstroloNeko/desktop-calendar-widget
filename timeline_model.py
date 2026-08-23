@@ -3,7 +3,7 @@ from __future__ import annotations
 import calendar
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Optional
+from typing import Collection, Optional
 
 from calendar_core import EVENT_TYPE_RANK, Event, Store
 from holiday_data import holiday_for
@@ -61,6 +61,8 @@ class TimelineItem:
     effective_days_count: int
     created_at: str
     notes: str
+    category_id: Optional[str] = None
+    category_name: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,14 @@ class TimelineMonth:
 
     def item_by_id(self, item_id: str) -> Optional[TimelineItem]:
         return next((item for item in self.items if item.id == item_id), None)
+
+    @property
+    def active_ddl_dates(self) -> frozenset[date]:
+        return frozenset(
+            item.ddl_date
+            for item in self.items
+            if item.ddl_date is not None and not item.completed
+        )
 
 
 class TimelineSelection:
@@ -146,10 +156,11 @@ def _timeline_item(store: Store, event: Event, period_start: date, period_end: d
         if start_date + timedelta(days=offset) not in effective_set
     )
     has_deadline = store.event_has_deadline(event)
+    category = store.category_by_id(event.category_id)
     return TimelineItem(
         id=event.id,
         title=event.title,
-        color=event.color,
+        color=store.effective_event_color(event),
         task_type=event.event_type,
         completed=event.done,
         start_date=start_date,
@@ -171,6 +182,8 @@ def _timeline_item(store: Store, event: Event, period_start: date, period_end: d
         effective_days_count=len(effective_dates),
         created_at=event.created_at,
         notes=event.notes,
+        category_id=event.category_id,
+        category_name=category.name if category else None,
     )
 
 
@@ -180,6 +193,8 @@ def build_month_timeline(
     month: int,
     *,
     today: Optional[date] = None,
+    category_ids: Optional[Collection[str]] = None,
+    include_uncategorized: bool = True,
 ) -> TimelineMonth:
     """Build one immutable month model from the same facts used by Compact View."""
     last_day = calendar.monthrange(year, month)[1]
@@ -195,6 +210,11 @@ def build_month_timeline(
         for item in (
             _timeline_item(store, event, period_start, period_end)
             for event in store.events
+            if store.event_matches_category_filter(
+                event,
+                None if category_ids is None else frozenset(category_ids),
+                include_uncategorized=include_uncategorized,
+            )
         )
         if item is not None
     )
