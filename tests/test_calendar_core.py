@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from calendar_core import COLORS, Event, RoutineItem, Store
+from calendar_core import COLORS, Event, EventCategory, RoutineItem, Store
 
 
 class StoreTests(unittest.TestCase):
@@ -14,6 +14,105 @@ class StoreTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_legacy_event_migrates_to_uncategorized_override_without_color_change(self):
+        self.data_file.write_text(
+            json.dumps(
+                {
+                    "version": 6,
+                    "events": [
+                        {
+                            "id": "legacy",
+                            "title": "旧事项",
+                            "due": "2026-08-04T10:00",
+                            "color": "#F05252",
+                            "event_type": "urgent",
+                            "duration_days": 3,
+                            "skip_non_working_days": True,
+                            "end_as_ddl": True,
+                        }
+                    ],
+                    "routines": [
+                        {
+                            "id": "legacy-habit",
+                            "title": "旧习惯",
+                            "kind": "habit",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        store = Store(self.data_file)
+        event = store.events[0]
+        self.assertIsNone(event.category_id)
+        self.assertEqual(event.color_mode, "override")
+        self.assertEqual(store.effective_event_color(event), "#F05252")
+        self.assertEqual(event.event_type, "urgent")
+        self.assertEqual(event.duration_days, 3)
+        self.assertTrue(event.skip_non_working_days)
+        self.assertTrue(event.end_as_ddl)
+        self.assertEqual([item.id for item in store.routines], ["legacy-habit"])
+
+    def test_category_create_update_and_persistence(self):
+        store = Store(self.data_file)
+        category = store.create_category("绘画", "#52B788")
+        store.upsert_category(EventCategory(category.id, "插画", "#8B70D6", category.sort_order, category.created_at))
+        loaded = Store(self.data_file)
+        self.assertEqual(len(loaded.categories), 1)
+        self.assertEqual(loaded.categories[0].name, "插画")
+        self.assertEqual(loaded.categories[0].color, "#8B70D6")
+
+    def test_invalid_category_payload_does_not_block_existing_events(self):
+        self.data_file.write_text(
+            json.dumps(
+                {
+                    "version": 7,
+                    "categories": [None, "bad", {"id": "", "name": ""}],
+                    "events": [{"id": "safe", "title": "仍可读取", "due": "2026-08-04T10:00", "color": "#52B788"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        store = Store(self.data_file)
+        self.assertEqual(store.categories, [])
+        self.assertEqual([item.id for item in store.events], ["safe"])
+        self.assertIsNone(store.load_error)
+
+    def test_inherited_category_color_updates_but_override_stays_fixed(self):
+        store = Store(self.data_file)
+        category = store.create_category("视频", "#52B788")
+        inherited = Event("inherit", "跟随", "2026-08-04T10:00", category_id=category.id, color_mode="inherit")
+        overridden = Event("override", "覆盖", "2026-08-05T10:00", color="#E65D67", category_id=category.id, color_mode="override")
+        store.upsert(inherited)
+        store.upsert(overridden)
+        store.upsert_category(EventCategory(category.id, category.name, "#8B70D6", category.sort_order, category.created_at))
+        self.assertEqual(store.effective_event_color(inherited), "#8B70D6")
+        self.assertEqual(inherited.color, "#8B70D6")
+        self.assertEqual(store.effective_event_color(overridden), "#E65D67")
+
+    def test_delete_category_keeps_events_and_freezes_effective_color(self):
+        store = Store(self.data_file)
+        category = store.create_category("商务", "#E5A927")
+        inherited = Event("business", "报价", "2026-08-04T10:00", category_id=category.id, color_mode="inherit")
+        overridden = Event(
+            "business-override",
+            "蓝色报价",
+            "2026-08-05T10:00",
+            color="#6687F2",
+            category_id=category.id,
+            color_mode="override",
+        )
+        store.upsert(inherited)
+        store.upsert(overridden)
+        store.delete_category(category.id)
+        self.assertEqual([item.id for item in store.events], ["business", "business-override"])
+        self.assertIsNone(inherited.category_id)
+        self.assertEqual(inherited.color_mode, "override")
+        self.assertEqual(inherited.color, "#E5A927")
+        self.assertIsNone(overridden.category_id)
+        self.assertEqual(overridden.color_mode, "override")
+        self.assertEqual(overridden.color, "#6687F2")
 
     def test_bad_event_does_not_hide_good_events(self):
         self.data_file.write_text(

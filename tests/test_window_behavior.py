@@ -2,9 +2,12 @@ import inspect
 import unittest
 from datetime import date, datetime
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app import (
     CalendarApp,
+    CategoryEditor,
+    CategoryManager,
     DDL_LIST_ENTRY_LABEL,
     DDLListDialog,
     DayCell,
@@ -17,6 +20,7 @@ from app import (
     ddl_relative_label,
     event_stripe_color,
     main_region_visibility,
+    owned_messagebox,
     parse_event_due,
 )
 from calendar_core import Event, RoutineItem
@@ -46,15 +50,164 @@ class _FakeCalendar:
 
 
 class WindowBehaviorTests(unittest.TestCase):
+    def test_owned_messagebox_temporarily_transfers_and_restores_grab(self) -> None:
+        actions: list[object] = []
+
+        class Owner:
+            def grab_current(self):
+                return self
+
+            def grab_release(self) -> None:
+                actions.append("release")
+
+            def grab_set(self) -> None:
+                actions.append("grab")
+
+            def lift(self) -> None:
+                actions.append("lift")
+
+            def focus_force(self) -> None:
+                actions.append("focus")
+
+            def update_idletasks(self) -> None:
+                actions.append("update")
+
+            def winfo_exists(self) -> bool:
+                return True
+
+        owner = Owner()
+
+        def dialog(title, message, *, parent):
+            actions.append((title, message, parent))
+            return True
+
+        self.assertTrue(owned_messagebox(owner, dialog, "标题", "内容"))
+        self.assertEqual(actions[0], "release")
+        self.assertIn(("标题", "内容", owner), actions)
+        self.assertEqual(actions[-1], "grab")
+
+    def test_empty_category_name_uses_owned_dialog_and_returns_focus(self) -> None:
+        actions: list[str] = []
+
+        class Variable:
+            def get(self) -> str:
+                return ""
+
+        editor = type(
+            "FakeCategoryEditor",
+            (),
+            {
+                "name_var": Variable(),
+                "name_entry": SimpleNamespace(focus_set=lambda: actions.append("entry-focus")),
+                "grab_current": lambda self: self,
+                "grab_release": lambda self: actions.append("release"),
+                "grab_set": lambda self: actions.append("grab"),
+                "lift": lambda self: actions.append("lift"),
+                "focus_force": lambda self: actions.append("owner-focus"),
+                "update_idletasks": lambda self: None,
+                "winfo_exists": lambda self: True,
+            },
+        )()
+        with patch("app.messagebox.showinfo", side_effect=lambda *_args, parent=None, **_kwargs: actions.append("dialog")):
+            CategoryEditor.save(editor)
+        self.assertEqual(actions.count("dialog"), 1)
+        self.assertEqual(actions[-1], "entry-focus")
+        self.assertIn("release", actions)
+        self.assertIn("grab", actions)
+
+    def test_category_editor_uses_transient_modal_without_permanent_topmost(self) -> None:
+        init_source = inspect.getsource(CategoryEditor.__init__)
+        present_source = inspect.getsource(CategoryEditor._present)
+        modal_source = inspect.getsource(CalendarApp.present_modal)
+        self.assertNotIn('attributes("-topmost", True)', init_source)
+        self.assertNotIn("after_idle(self._present)", init_source)
+        self.assertIn("present_modal", present_source)
+        self.assertIn("grab_set", present_source)
+        self.assertIn("focus_force", present_source)
+        self.assertIn("window.transient(parent)", modal_source)
+        self.assertIn('window.attributes("-topmost", False)', modal_source)
+        self.assertNotIn('window.attributes("-topmost", True)', modal_source)
+
+    def test_category_editor_close_is_idempotent_and_restores_legal_manager_grab(self) -> None:
+        actions: list[str] = []
+
+        class Manager:
+            def winfo_exists(self) -> bool:
+                return True
+
+            def refresh(self) -> None:
+                actions.append("refresh")
+
+            def _present(self) -> None:
+                actions.append("manager-present")
+
+        manager = Manager()
+        master = SimpleNamespace(
+            category_editor=None,
+            category_manager=manager,
+            after_idle=lambda callback: callback(),
+        )
+        editor = type(
+            "FakeCategoryEditor",
+            (),
+            {
+                "_closing": False,
+                "master_app": master,
+                "grab_current": lambda self: self,
+                "grab_release": lambda self: actions.append("release"),
+                "destroy": lambda self: actions.append("destroy"),
+            },
+        )()
+        master.category_editor = editor
+        CategoryEditor.close(editor)
+        CategoryEditor.close(editor)
+        self.assertIsNone(master.category_editor)
+        self.assertEqual(actions, ["release", "destroy", "refresh", "manager-present"])
+
+    def test_category_editor_all_close_routes_share_cleanup(self) -> None:
+        source = inspect.getsource(CategoryEditor.__init__)
+        self.assertIn('button_label(header, "×", self.close', source)
+        self.assertIn('ThemeButton(actions, master, "取消", self.close', source)
+        self.assertIn('self.bind("<Escape>", lambda _event: self.close())', source)
+        self.assertIn('self.protocol("WM_DELETE_WINDOW", self.close)', source)
+        save_source = inspect.getsource(CategoryEditor.save)
+        self.assertIn("self.close()", save_source)
+
+    def test_open_category_editor_assigns_new_instance_before_synchronous_present(self) -> None:
+        actions: list[str] = []
+        owner = SimpleNamespace(category_editor=None)
+
+        class FakeEditor:
+            def __init__(self, master, _category) -> None:
+                self.master = master
+
+            def _present(self) -> None:
+                self.master.category_editor is self or self.fail()
+                actions.append("present")
+
+            @staticmethod
+            def fail() -> None:
+                raise AssertionError("editor reference must be assigned before modal presentation")
+
+            def winfo_exists(self) -> bool:
+                return True
+
+        with patch("app.CategoryEditor", FakeEditor):
+            CalendarApp.open_category_editor(owner)
+            first = owner.category_editor
+            CalendarApp.open_category_editor(owner)
+        self.assertIs(owner.category_editor, first)
+        self.assertEqual(actions, ["present", "present"])
+
     def test_event_editor_presents_as_modal_child(self) -> None:
         actions: list[object] = []
 
         class FakeMaster:
-            def present_overlay(self, window) -> None:
-                actions.append(("present", window))
+            def present_modal(self, window, parent) -> None:
+                actions.append(("present", window, parent))
 
         class FakeEntry:
-            def focus_set(self) -> None:
+            def focus_force(self) -> None:
                 actions.append("entry-focus")
 
         editor = type(
@@ -64,17 +217,60 @@ class WindowBehaviorTests(unittest.TestCase):
                 "master_app": FakeMaster(),
                 "title_entry": FakeEntry(),
                 "winfo_exists": lambda self: True,
-                "transient": lambda self, parent: actions.append(("transient", parent)),
                 "grab_set": lambda self: actions.append("grab"),
-                "focus_set": lambda self: actions.append("focus"),
+                "lift": lambda self: actions.append("lift"),
             },
         )()
 
         EventEditor._present(editor)
 
-        self.assertEqual(actions[0], ("transient", editor.master_app))
-        self.assertEqual(actions[1], ("present", editor))
-        self.assertEqual(actions[2:], ["grab", "focus", "entry-focus"])
+        self.assertEqual(actions[0], ("present", editor, editor.master_app))
+        self.assertEqual(actions[1:], ["grab", "lift", "entry-focus"])
+
+    def test_event_editor_is_not_permanently_topmost_or_represented_on_timers(self) -> None:
+        init_source = inspect.getsource(EventEditor.__init__)
+        present_source = inspect.getsource(EventEditor._present)
+        editor_source = inspect.getsource(EventEditor)
+        self.assertNotIn('attributes("-topmost", True)', init_source)
+        self.assertNotIn("after_idle(self._present)", init_source)
+        self.assertNotIn("after(80, self._present)", init_source)
+        self.assertNotIn("after(260, self._present)", init_source)
+        self.assertIn("present_modal", present_source)
+        self.assertNotIn("present_overlay", present_source)
+        self.assertNotIn("transparentcolor", editor_source)
+        self.assertNotIn('attributes("-alpha"', editor_source)
+        self.assertIn("owned_messagebox", inspect.getsource(EventEditor.save))
+        self.assertIn("owned_messagebox", inspect.getsource(EventEditor.delete))
+
+    def test_open_editor_assigns_reference_before_synchronous_modal_presentation(self) -> None:
+        actions: list[str] = []
+
+        class FakeEditor:
+            def __init__(self, owner, *_args, **_kwargs) -> None:
+                self.owner = owner
+
+            def _present(self) -> None:
+                self.owner.editor_window is self or self.fail()
+                actions.append("present")
+
+            @staticmethod
+            def fail() -> None:
+                raise AssertionError("editor reference must be assigned before modal presentation")
+
+        owner = type(
+            "FakeCalendar",
+            (),
+            {
+                "editor_window": None,
+                "_lower_job": None,
+                "view_mode": "global",
+                "selected": date(2026, 8, 24),
+                "attributes": lambda self, *_args: None,
+            },
+        )()
+        with patch("app.EventEditor", FakeEditor):
+            CalendarApp.open_editor(owner)
+        self.assertEqual(actions, ["present"])
 
     def test_event_editor_close_releases_modal_grab_before_destroy(self) -> None:
         actions: list[str] = []
@@ -86,7 +282,7 @@ class WindowBehaviorTests(unittest.TestCase):
             def after(self, _delay: int, callback) -> None:
                 callback()
 
-            def apply_window_mode(self) -> None:
+            def restore_window_mode_if_idle(self) -> None:
                 actions.append("main")
 
         master = FakeMaster()
@@ -105,6 +301,48 @@ class WindowBehaviorTests(unittest.TestCase):
         EventEditor.close(editor)
 
         self.assertEqual(actions, ["release", "destroy", "main"])
+
+    def test_delayed_window_mode_restore_does_not_compete_with_a_new_modal(self) -> None:
+        actions: list[str] = []
+        modal = object()
+        fake = SimpleNamespace(
+            grab_current=lambda: modal,
+            apply_window_mode=lambda: actions.append("restore"),
+        )
+        CalendarApp.restore_window_mode_if_idle(fake)
+        self.assertEqual(actions, [])
+        fake.grab_current = lambda: None
+        CalendarApp.restore_window_mode_if_idle(fake)
+        self.assertEqual(actions, ["restore"])
+
+    def test_apply_window_mode_keeps_grabbed_modal_out_of_topmost_band(self) -> None:
+        actions: list[object] = []
+
+        class Modal:
+            def attributes(self, *values) -> None:
+                actions.append(("modal-attributes", values))
+
+            def lift(self) -> None:
+                actions.append("modal-lift")
+
+        modal = Modal()
+        fake = SimpleNamespace(
+            view_mode="global",
+            window_mode="pinned",
+            winfo_exists=lambda: True,
+            attributes=lambda *values: actions.append(("root-attributes", values)),
+            _active_overlays=lambda: [modal],
+            grab_current=lambda: modal,
+        )
+        with (
+            patch("app.make_app_window", side_effect=lambda owner: actions.append(("app-window", owner))),
+            patch("app.raise_for_interaction", side_effect=lambda owner: actions.append(("raise", owner))),
+            patch("app.bring_to_front", side_effect=lambda owner: actions.append(("topmost", owner))),
+        ):
+            CalendarApp.apply_window_mode(fake)
+        self.assertIn(("modal-attributes", ("-topmost", False)), actions)
+        self.assertIn(("raise", modal), actions)
+        self.assertNotIn(("topmost", modal), actions)
 
     def test_calendar_flow_drag_selects_range_without_opening_editor(self) -> None:
         actions: list[str] = []
@@ -170,6 +408,38 @@ class WindowBehaviorTests(unittest.TestCase):
         for label in ("编辑", "取消完成", "完成", "删除"):
             self.assertIn(label, item_menu)
         self.assertIn("self._confirm_delete", item_menu)
+        self.assertIn("_queue_context_menu_action", item_menu)
+
+    def test_calendar_flow_context_action_waits_for_menu_cleanup(self) -> None:
+        actions: list[str] = []
+
+        class FakeMenu:
+            def unpost(self) -> None:
+                actions.append("unpost")
+
+            def grab_current(self):
+                return self
+
+            def grab_release(self) -> None:
+                actions.append("release")
+
+            def destroy(self) -> None:
+                actions.append("destroy")
+
+        callbacks: list[object] = []
+        owner = SimpleNamespace(after_idle=lambda callback: callbacks.append(callback))
+        menu = FakeMenu()
+        CalendarApp._queue_context_menu_action(owner, menu, lambda: actions.append("editor"))
+        self.assertEqual(actions, [])
+        callbacks.pop()()
+        self.assertEqual(actions, ["unpost", "release", "destroy", "editor"])
+
+    def test_global_renderers_do_not_share_an_editor_canvas_target(self) -> None:
+        flow_source = inspect.getsource(CalendarApp._draw_calendar_flow)
+        timeline_source = inspect.getsource(CalendarApp._draw_global_timeline)
+        self.assertIn("self.global_flow_canvas", flow_source)
+        self.assertNotIn("editor_canvas", flow_source)
+        self.assertNotIn("editor_canvas", timeline_source)
 
     def test_global_workspace_wires_dual_view_switch(self) -> None:
         source = inspect.getsource(CalendarApp._build_global_ui)
@@ -228,6 +498,188 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn("theme.date_today_background", source)
         self.assertIn("theme.date_today_border", source)
 
+    def test_calendar_flow_ddl_date_outline_uses_real_deadlines_and_theme_token(self) -> None:
+        source = inspect.getsource(CalendarApp._draw_calendar_flow)
+        self.assertIn("model.active_ddl_dates", source)
+        self.assertIn("theme.ddl_indicator_highlight", source)
+        self.assertIn("if day in ddl_dates", source)
+        self.assertNotRegex(source, r'#[0-9A-Fa-f]{6}')
+
+    def test_global_category_filter_is_shared_by_both_renderers(self) -> None:
+        build_source = inspect.getsource(CalendarApp._build_global_ui)
+        render_source = inspect.getsource(CalendarApp._render_global_timeline)
+        self.assertIn("global_category_sidebar", build_source)
+        self.assertIn("category_ids=self._global_category_filter_ids", render_source)
+        self.assertIn("include_uncategorized=self._global_include_uncategorized", render_source)
+
+    def test_global_category_sidebar_supports_toggle_all_none_and_uncategorized(self) -> None:
+        actions: list[str] = []
+        categories = [SimpleNamespace(id="drawing"), SimpleNamespace(id="video")]
+        fake = SimpleNamespace(
+            store=SimpleNamespace(categories=categories),
+            _global_category_filter_ids=None,
+            _global_include_uncategorized=True,
+            _render_global_timeline=lambda: actions.append("render"),
+        )
+        CalendarApp._toggle_global_category(fake, "drawing")
+        self.assertEqual(fake._global_category_filter_ids, {"video"})
+        CalendarApp._toggle_global_category(fake, "drawing")
+        self.assertIsNone(fake._global_category_filter_ids)
+        CalendarApp._clear_all_global_categories(fake)
+        self.assertEqual(fake._global_category_filter_ids, set())
+        self.assertFalse(fake._global_include_uncategorized)
+        CalendarApp._select_all_global_categories(fake)
+        self.assertIsNone(fake._global_category_filter_ids)
+        self.assertTrue(fake._global_include_uncategorized)
+        CalendarApp._toggle_global_uncategorized(fake)
+        self.assertFalse(fake._global_include_uncategorized)
+        self.assertEqual(actions, ["render"] * 5)
+
+    def test_deleted_category_is_pruned_from_runtime_filter(self) -> None:
+        fake = SimpleNamespace(
+            store=SimpleNamespace(categories=[SimpleNamespace(id="remaining")]),
+            _global_category_filter_ids={"deleted", "remaining"},
+        )
+        CalendarApp._prune_global_category_filter(fake)
+        self.assertEqual(fake._global_category_filter_ids, {"remaining"})
+
+    def test_global_filter_is_runtime_only_and_sidebar_refreshes_on_category_change(self) -> None:
+        save_source = inspect.getsource(CalendarApp._save_window_settings)
+        change_source = inspect.getsource(CalendarApp.category_data_changed)
+        init_source = inspect.getsource(CalendarApp.__init__)
+        self.assertNotIn("category_filter", save_source)
+        self.assertIn("self._global_category_filter_ids: Optional[set[str]] = None", init_source)
+        self.assertIn("self._global_include_uncategorized = True", init_source)
+        self.assertIn("self.render()", change_source)
+        self.assertIn("_refresh_global_category_sidebar", inspect.getsource(CalendarApp._render_global_timeline))
+
+    def test_global_sidebar_uses_category_color_and_dpi_scaling(self) -> None:
+        source = inspect.getsource(CalendarApp._refresh_global_category_sidebar)
+        self.assertIn("category.color", source)
+        self.assertIn("self.dpi.px", source)
+        self.assertIn("管理分类", source)
+        self.assertIn("_global_category_sidebar_open", source)
+
+    def test_global_sidebar_is_a_readable_scrolling_filter_panel(self) -> None:
+        refresh_source = inspect.getsource(CalendarApp._refresh_global_category_sidebar)
+        row_source = inspect.getsource(CalendarApp._build_global_category_filter_row)
+        self.assertIn("152 if self._global_category_sidebar_open else 38", refresh_source)
+        self.assertIn('text="事项分类"', refresh_source)
+        self.assertIn('"全不选"', refresh_source)
+        self.assertIn('style="Global.Vertical.TScrollbar"', refresh_source)
+        self.assertIn("truncate(name, 12)", row_source)
+        self.assertIn('widget.bind("<Enter>"', row_source)
+
+    def test_category_delete_confirmation_uses_manager_as_owned_modal(self) -> None:
+        source = inspect.getsource(CategoryManager._delete)
+        self.assertIn("owned_messagebox", source)
+        self.assertIn("self,", source)
+
+    def test_initial_foreground_pulse_restores_desktop_without_changing_preference(self) -> None:
+        actions: list[object] = []
+        callbacks: list[object] = []
+        fake = type(
+            "FakeCalendar",
+            (),
+            {
+                "_startup_foreground_done": False,
+                "_startup_foreground_active": False,
+                "_startup_foreground_restore_job": None,
+                "window_mode": "desktop",
+                "desktop_session_active": False,
+                "winfo_exists": lambda self: True,
+                "deiconify": lambda self: actions.append("show"),
+                "attributes": lambda self, *values: actions.append(("attributes", values)),
+                "lift": lambda self: actions.append("lift"),
+                "focus_force": lambda self: actions.append("focus"),
+                "after": lambda self, delay, callback: callbacks.append((delay, callback)) or "job",
+                "_update_mode_badge": lambda self: actions.append("badge"),
+                "_restore_after_initial_foreground": CalendarApp._restore_after_initial_foreground,
+            },
+        )()
+        with patch("app.bring_to_front", side_effect=lambda owner: actions.append(("front", owner))):
+            CalendarApp._present_initial_foreground(fake)
+            CalendarApp._present_initial_foreground(fake)
+        self.assertEqual(callbacks[0][0], 360)
+        self.assertEqual(actions.count("show"), 1)
+        with patch("app.raise_for_interaction", side_effect=lambda owner: actions.append(("normal-front", owner))):
+            CalendarApp._restore_after_initial_foreground(fake)
+        self.assertEqual(fake.window_mode, "desktop")
+        self.assertTrue(fake.desktop_session_active)
+        self.assertIn(("attributes", ("-topmost", False)), actions)
+
+    def test_initial_foreground_keeps_saved_pinned_mode(self) -> None:
+        actions: list[object] = []
+        fake = SimpleNamespace(
+            _startup_foreground_restore_job="job",
+            _startup_foreground_active=True,
+            window_mode="pinned",
+            winfo_exists=lambda: True,
+            attributes=lambda *values: actions.append(values),
+            lift=lambda: actions.append("lift"),
+            _update_mode_badge=lambda: actions.append("badge"),
+        )
+        CalendarApp._restore_after_initial_foreground(fake)
+        self.assertIn(("-topmost", True), actions)
+        self.assertEqual(fake.window_mode, "pinned")
+
+    def test_initial_foreground_does_not_steal_an_existing_modal_grab(self) -> None:
+        modal = object()
+        actions: list[str] = []
+        fake = SimpleNamespace(
+            _startup_foreground_done=False,
+            _startup_foreground_active=False,
+            winfo_exists=lambda: True,
+            grab_current=lambda: modal,
+            deiconify=lambda: actions.append("show"),
+            attributes=lambda *_values: actions.append("topmost"),
+            lift=lambda: actions.append("lift"),
+            focus_force=lambda: actions.append("focus"),
+        )
+        CalendarApp._present_initial_foreground(fake)
+        self.assertTrue(fake._startup_foreground_done)
+        self.assertFalse(fake._startup_foreground_active)
+        self.assertEqual(actions, [])
+
+    def test_initial_foreground_restore_leaves_modal_in_charge_of_z_order(self) -> None:
+        modal = object()
+        actions: list[object] = []
+        fake = SimpleNamespace(
+            _startup_foreground_restore_job="job",
+            _startup_foreground_active=True,
+            window_mode="pinned",
+            winfo_exists=lambda: True,
+            grab_current=lambda: modal,
+            attributes=lambda *values: actions.append(values),
+            lift=lambda: actions.append("lift"),
+            _update_mode_badge=lambda: actions.append("badge"),
+        )
+        CalendarApp._restore_after_initial_foreground(fake)
+        self.assertFalse(fake._startup_foreground_active)
+        self.assertEqual(actions, [("-topmost", False), "badge"])
+
+    def test_event_editor_distinguishes_category_from_task_type_and_color_override(self) -> None:
+        source = inspect.getsource(EventEditor)
+        self.assertIn('self._field_label(category_col, "事项分类")', source)
+        self.assertIn('self._field_label(shell, "事项类型")', source)
+        self.assertIn('self.color_mode_var.set("inherit")', source)
+        self.assertIn('self.color_mode_var.set("override")', source)
+        self.assertIn("category_id=", source)
+
+    def test_event_editor_explains_category_color_source_without_technical_terms(self) -> None:
+        source = inspect.getsource(EventEditor)
+        self.assertIn("category_color_preview", source)
+        self.assertIn('source_text = f"● 跟随“{category.name}”"', source)
+        self.assertIn('source_text = "● 自定义颜色"', source)
+        self.assertIn('button_text = "恢复跟随"', source)
+        self.assertIn('Tooltip(custom_color, "选择自定义颜色")', source)
+
+    def test_compact_event_color_uses_store_effective_color(self) -> None:
+        card_source = inspect.getsource(CalendarApp._build_event_card)
+        calendar_source = inspect.getsource(CalendarApp.render)
+        self.assertIn("self.store.effective_event_color(item)", card_source)
+        self.assertIn("self.store.effective_event_color(event)", calendar_source)
+
     def test_calendar_flow_card_states_use_semantic_theme_tokens(self) -> None:
         source = inspect.getsource(CalendarApp._draw_calendar_flow)
         for token in (
@@ -240,12 +692,28 @@ class WindowBehaviorTests(unittest.TestCase):
             self.assertIn(token, source)
         self.assertNotRegex(source, r'#[0-9A-Fa-f]{6}')
 
+    def test_calendar_flow_ddl_outline_is_rounded_and_keeps_category_stripe(self) -> None:
+        source = inspect.getsource(CalendarApp._draw_calendar_flow)
+        self.assertIn("rounded_rectangle", source)
+        self.assertIn("outline=theme.ddl_indicator", source)
+        self.assertIn("fill=stripe_color", source)
+        self.assertIn("theme.ddl_indicator_highlight", source)
+
     def test_global_detail_uses_status_badge_and_muted_empty_actions(self) -> None:
         build_source = inspect.getsource(CalendarApp._build_global_ui)
         update_source = inspect.getsource(CalendarApp._update_global_detail)
         self.assertIn("global_detail_state_label", build_source)
         self.assertIn("theme.text_disabled", update_source)
         self.assertIn("theme.danger_soft", update_source)
+
+    def test_global_detail_presents_category_and_color_source_as_user_language(self) -> None:
+        build_source = inspect.getsource(CalendarApp._build_global_ui)
+        update_source = inspect.getsource(CalendarApp._update_global_detail)
+        self.assertIn("global_detail_category_dot", build_source)
+        self.assertIn("global_detail_category_label", build_source)
+        self.assertIn('"跟随分类"', update_source)
+        self.assertIn('"自定义颜色"', update_source)
+        self.assertNotIn('text="category_id"', build_source)
 
     def test_escape_cancels_calendar_flow_drag_without_opening_editor(self) -> None:
         actions: list[str] = []
@@ -302,7 +770,8 @@ class WindowBehaviorTests(unittest.TestCase):
         detail = str(fake.global_detail_meta.values["text"])
         self.assertIn("2026-08-03 → 2026-08-07", detail)
         self.assertIn("5 个自然日 · 5 个有效工作日", detail)
-        self.assertIn("类型：紧急", detail)
+        self.assertIn("事项性质：紧急", detail)
+        self.assertIn("事项分类：无分类", detail)
         self.assertIn("DDL：2026-08-07", detail)
         self.assertIn("状态：已逾期", detail)
         self.assertIn("交付前复核", str(fake.global_detail_notes.values["text"]))
@@ -675,7 +1144,7 @@ class WindowBehaviorTests(unittest.TestCase):
             def after(self, _delay: int, callback) -> None:
                 callback()
 
-            def apply_window_mode(self) -> None:
+            def restore_window_mode_if_idle(self) -> None:
                 actions.append("main")
 
         master = FakeMaster()
