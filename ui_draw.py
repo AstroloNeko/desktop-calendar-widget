@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import math
 import tkinter as tk
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    from ui_theme import Theme
 
 
 def _rgb(color: str) -> tuple[int, int, int]:
@@ -16,6 +19,31 @@ def blend(first: str, second: str, amount: float) -> str:
     b = _rgb(second)
     values = tuple(round(left + (right - left) * amount) for left, right in zip(a, b))
     return "#" + "".join(f"{value:02X}" for value in values)
+
+
+def draw_color_swatch(
+    canvas: tk.Canvas,
+    color: str,
+    *,
+    selected: bool,
+    hovered: bool,
+    theme: "Theme",
+    font_family: str,
+) -> None:
+    """Draw a palette dot whose selected state is visible beyond its hue."""
+    canvas.delete("all")
+    outer_fill = (
+        blend(theme.panel_secondary, color, 0.16)
+        if selected
+        else theme.control_hover
+        if hovered
+        else theme.schedule_card_background
+    )
+    outer_border = theme.accent if selected else theme.control_border if hovered else outer_fill
+    canvas.create_oval(2, 2, 26, 26, fill=outer_fill, outline=outer_border, width=1)
+    canvas.create_oval(6, 6, 22, 22, fill=color, outline=blend(color, theme.text_primary, 0.18))
+    if selected:
+        canvas.create_text(14, 14, text="✓", fill=theme.text_on_accent, font=(font_family, 7, "bold"))
 
 
 def vertical_gradient(

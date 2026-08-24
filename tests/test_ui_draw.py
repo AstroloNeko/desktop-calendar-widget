@@ -1,6 +1,7 @@
 import unittest
 
-from ui_draw import draw_calendar_date_ring, draw_calendar_date_state
+from ui_draw import draw_calendar_date_ring, draw_calendar_date_state, draw_color_swatch
+from ui_theme import get_theme
 
 
 class _RecordingCanvas:
@@ -15,8 +16,37 @@ class _RecordingCanvas:
         self.calls.append(("line", tuple(coords), kwargs))
         return len(self.calls)
 
+    def create_oval(self, *coords, **kwargs):
+        self.calls.append(("oval", tuple(coords), kwargs))
+        return len(self.calls)
+
+    def create_text(self, *coords, **kwargs):
+        self.calls.append(("text", tuple(coords), kwargs))
+        return len(self.calls)
+
+    def delete(self, *tags):
+        self.calls.append(("delete", tuple(tags), {}))
+
 
 class CalendarDateDrawingTests(unittest.TestCase):
+    def test_selected_color_swatch_uses_checkmark_and_theme_tokens(self) -> None:
+        canvas = _RecordingCanvas()
+        theme = get_theme("paper")
+        draw_color_swatch(
+            canvas,
+            "#8B70D6",
+            selected=True,
+            hovered=False,
+            theme=theme,
+            font_family="Segoe UI",
+        )
+
+        text_calls = [kwargs for kind, _coords, kwargs in canvas.calls if kind == "text"]
+        self.assertEqual(text_calls[0]["text"], "✓")
+        self.assertEqual(text_calls[0]["fill"], theme.text_on_accent)
+        outer = next(kwargs for kind, _coords, kwargs in canvas.calls if kind == "oval")
+        self.assertEqual(outer["outline"], theme.accent)
+
     def test_flat_state_uses_one_shared_body_box(self) -> None:
         canvas = _RecordingCanvas()
         draw_calendar_date_state(
