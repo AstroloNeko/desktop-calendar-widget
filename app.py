@@ -88,6 +88,7 @@ from ui_draw import (
     draw_calendar_date_ring,
     draw_calendar_date_state,
     draw_calendar_today_accent,
+    draw_color_swatch,
     draw_ecology_horizon,
     glossy_control,
     rounded_rectangle,
@@ -971,6 +972,7 @@ class EventEditor(tk.Toplevel):
         self.reminder_var = tk.StringVar(value=reminder_label)
         self._drag_origin: Optional[tuple[int, int, int, int]] = None
         self.color_canvases: list[tuple[tk.Canvas, str]] = []
+        self._hover_color: Optional[str] = None
         self.event_type_radios: list[tuple[tk.Radiobutton, str]] = []
 
         shell = tk.Frame(self, bg=CARD, padx=20, pady=0)
@@ -1114,14 +1116,26 @@ class EventEditor(tk.Toplevel):
         category_col = tk.Frame(category_row, bg=CARD)
         category_col.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._field_label(category_col, "事项分类")
+        category_select = tk.Frame(category_col, bg=CARD)
+        category_select.pack(fill="x", pady=(4, 0))
+        self.category_color_preview = LogicalCanvas(
+            category_select,
+            dpi=master.dpi,
+            width=28,
+            height=28,
+            bg=FIELD_BACKGROUND,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.category_color_preview.pack(side="left", padx=(0, master.dpi.px(5)))
         self.category_box = ttk.Combobox(
-            category_col,
+            category_select,
             textvariable=self.category_var,
             values=("无分类", *(category.name for category in self.categories)),
             state="readonly",
             font=(FONT, 9),
         )
-        self.category_box.pack(fill="x", pady=(4, 0))
+        self.category_box.pack(side="left", fill="x", expand=True)
         self.category_box.bind("<<ComboboxSelected>>", self._category_changed)
         manage_categories = ThemeButton(
             category_row,
@@ -1150,7 +1164,18 @@ class EventEditor(tk.Toplevel):
         )
         reminder_box.pack(fill="x", pady=(4, 0))
 
-        self._field_label(shell, "颜色")
+        color_heading = tk.Frame(shell, bg=CARD)
+        color_heading.pack(fill="x")
+        tk.Label(color_heading, text="事项颜色", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(side="left")
+        self.color_source_label = tk.Label(
+            color_heading,
+            text="",
+            bg=CARD,
+            fg=SUBTLE,
+            font=(FONT, 8),
+            anchor="e",
+        )
+        self.color_source_label.pack(side="right")
         color_row = tk.Frame(shell, bg=CARD)
         color_row.pack(fill="x", pady=(3, 9))
         color_values = list(COLORS.values())
@@ -1169,19 +1194,22 @@ class EventEditor(tk.Toplevel):
             )
             swatch.pack(side="left", padx=(0, 8))
             swatch.bind("<Button-1>", lambda _event, value=color: self._choose_color(value))
+            swatch.bind("<Enter>", lambda _event, value=color: self._set_color_hover(value))
+            swatch.bind("<Leave>", lambda _event: self._set_color_hover(None))
             self.color_canvases.append((swatch, color))
         custom_color = ThemeButton(
             color_row,
             master,
-            "调色盘",
+            "＋",
             self._choose_custom_color,
-            width=58,
+            width=28,
             height=28,
-            font_size=8,
+            font_size=10,
             surface_background=CARD,
             outlined=True,
         )
         custom_color.pack(side="left", padx=(0, 6))
+        Tooltip(custom_color, "选择自定义颜色")
         self.follow_category_button = ThemeButton(
             color_row,
             master,
@@ -1277,6 +1305,10 @@ class EventEditor(tk.Toplevel):
         self._draw_colors()
         self._update_color_source_controls()
 
+    def _set_color_hover(self, color: Optional[str]) -> None:
+        self._hover_color = color
+        self._draw_colors()
+
     def _choose_custom_color(self) -> None:
         _rgb, color = run_owned_modal(
             self,
@@ -1329,9 +1361,44 @@ class EventEditor(tk.Toplevel):
     def _update_color_source_controls(self) -> None:
         category = self._selected_category()
         follows = bool(category and self.color_mode_var.get() == "inherit")
-        self.follow_category_button.set_text("正在跟随" if follows else "跟随分类")
-        self.follow_category_button.foreground = self.master_app.theme.text_disabled if not category else None
+        if follows:
+            source_text = f"● 跟随“{category.name}”"
+            source_color = category.color
+            button_text = "已跟随"
+        elif category:
+            source_text = "● 自定义颜色"
+            source_color = self.color_var.get()
+            button_text = "恢复跟随"
+        else:
+            source_text = "○ 无分类 · 单独颜色"
+            source_color = self.master_app.theme.text_muted
+            button_text = "跟随分类"
+        self.color_source_label.configure(text=source_text, fg=source_color)
+        self.follow_category_button.set_text(button_text)
+        self.follow_category_button.foreground = (
+            self.master_app.theme.text_disabled
+            if not category
+            else self.master_app.theme.accent
+            if not follows
+            else self.master_app.theme.text_secondary
+        )
         self.follow_category_button.draw()
+        self._draw_category_preview()
+
+    def _draw_category_preview(self) -> None:
+        canvas = self.category_color_preview
+        canvas.delete("all")
+        category = self._selected_category()
+        color = category.color if category else self.master_app.theme.text_muted
+        canvas.create_oval(
+            7,
+            7,
+            21,
+            21,
+            fill=color if category else self.master_app.theme.input_background,
+            outline=color,
+            width=2,
+        )
 
     def _draw_event_type_controls(self) -> None:
         selected = self.event_type_var.get()
@@ -1371,12 +1438,14 @@ class EventEditor(tk.Toplevel):
     def _draw_colors(self) -> None:
         selected = self.color_var.get()
         for canvas, color in self.color_canvases:
-            canvas.delete("all")
-            if color == selected:
-                canvas.create_oval(2, 2, 26, 26, outline=INK, width=1.5)
-                canvas.create_oval(6, 6, 22, 22, fill=color, outline="")
-            else:
-                canvas.create_oval(5, 5, 23, 23, fill=color, outline="")
+            draw_color_swatch(
+                canvas,
+                color,
+                selected=color == selected,
+                hovered=color == self._hover_color,
+                theme=self.master_app.theme,
+                font_family=FONT,
+            )
 
     def _center_near_master(self) -> None:
         center_toplevel(self, self.master_app, self.WIDTH, self.HEIGHT, y_offset=10)
@@ -1805,6 +1874,7 @@ class CategoryEditor(tk.Toplevel):
         self.name_var = tk.StringVar(value=category.name if category else "")
         self.color_var = tk.StringVar(value=category.color if category else COLORS["海盐蓝"])
         self.color_canvases: list[tuple[tk.Canvas, str]] = []
+        self._hover_color: Optional[str] = None
 
         shell = tk.Frame(self, bg=CARD, padx=20)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
@@ -1845,8 +1915,12 @@ class CategoryEditor(tk.Toplevel):
             swatch = LogicalCanvas(color_row, dpi=master.dpi, width=28, height=28, bg=CARD, bd=0, highlightthickness=0, cursor="hand2")
             swatch.pack(side="left", padx=(0, 7))
             swatch.bind("<Button-1>", lambda _event, value=color: self._choose_color(value))
+            swatch.bind("<Enter>", lambda _event, value=color: self._set_color_hover(value))
+            swatch.bind("<Leave>", lambda _event: self._set_color_hover(None))
             self.color_canvases.append((swatch, color))
-        ThemeButton(color_row, master, "调色盘", self._choose_custom_color, width=58, height=28, font_size=8, surface_background=CARD, outlined=True).pack(side="left")
+        custom_color = ThemeButton(color_row, master, "＋", self._choose_custom_color, width=28, height=28, font_size=10, surface_background=CARD, outlined=True)
+        custom_color.pack(side="left")
+        Tooltip(custom_color, "选择自定义颜色")
         self._draw_colors()
 
         actions = tk.Frame(shell, bg=CARD)
@@ -1876,6 +1950,10 @@ class CategoryEditor(tk.Toplevel):
         self.color_var.set(color)
         self._draw_colors()
 
+    def _set_color_hover(self, color: Optional[str]) -> None:
+        self._hover_color = color
+        self._draw_colors()
+
     def _choose_custom_color(self) -> None:
         _rgb, color = run_owned_modal(
             self,
@@ -1887,9 +1965,14 @@ class CategoryEditor(tk.Toplevel):
     def _draw_colors(self) -> None:
         selected = self.color_var.get()
         for canvas, color in self.color_canvases:
-            canvas.delete("all")
-            canvas.create_oval(2, 2, 26, 26, outline=INK if color == selected else CARD, width=2)
-            canvas.create_oval(6, 6, 22, 22, fill=color, outline="")
+            draw_color_swatch(
+                canvas,
+                color,
+                selected=color == selected,
+                hovered=color == self._hover_color,
+                theme=self.master_app.theme,
+                font_family=FONT,
+            )
 
     def save(self) -> None:
         name = self.name_var.get().strip()
@@ -2011,15 +2094,18 @@ class CategoryManager(tk.Toplevel):
             if event.category_id in counts:
                 counts[event.category_id] += 1
         for category in categories:
-            row = tk.Frame(self.list_inner, bg=CARD_MUTED, highlightthickness=1, highlightbackground=CARD_BORDER)
-            row.pack(fill="x", pady=(0, 7), padx=1)
-            tk.Frame(row, bg=category.color, width=5).pack(side="left", fill="y")
-            content = tk.Frame(row, bg=CARD_MUTED, padx=10, pady=8)
+            row = tk.Frame(self.list_inner, bg=CARD)
+            row.pack(fill="x", padx=1)
+            marker = LogicalCanvas(row, dpi=self.master_app.dpi, width=28, height=42, bg=CARD, bd=0, highlightthickness=0)
+            marker.pack(side="left", padx=(4, 2))
+            marker.create_oval(8, 13, 20, 25, fill=category.color, outline=blend(category.color, INK, 0.18))
+            content = tk.Frame(row, bg=CARD, padx=6, pady=8)
             content.pack(side="left", fill="both", expand=True)
-            tk.Label(content, text=category.name, bg=CARD_MUTED, fg=INK, font=(FONT, 9, "bold"), anchor="w").pack(fill="x")
-            tk.Label(content, text=f"{counts[category.id]} 个事项", bg=CARD_MUTED, fg=SUBTLE, font=(FONT, 8), anchor="w").pack(fill="x", pady=(2, 0))
-            ThemeButton(row, self.master_app, "删除", lambda item=category: self._delete(item), width=48, height=29, font_size=8, foreground=DANGER, surface_background=CARD_MUTED, outlined=True).pack(side="right", padx=(4, 7))
-            ThemeButton(row, self.master_app, "编辑", lambda item=category: self.master_app.open_category_editor(item), width=48, height=29, font_size=8, surface_background=CARD_MUTED, outlined=True).pack(side="right")
+            tk.Label(content, text=category.name, bg=CARD, fg=INK, font=(FONT, 9, "bold"), anchor="w").pack(fill="x")
+            tk.Label(content, text=f"{counts[category.id]} 个事项", bg=CARD, fg=SUBTLE, font=(FONT, 8), anchor="w").pack(fill="x", pady=(2, 0))
+            ThemeButton(row, self.master_app, "删除", lambda item=category: self._delete(item), width=42, height=27, font_size=8, foreground=DANGER, surface_background=CARD).pack(side="right", padx=(2, 6))
+            ThemeButton(row, self.master_app, "编辑", lambda item=category: self.master_app.open_category_editor(item), width=42, height=27, font_size=8, surface_background=CARD).pack(side="right")
+            tk.Frame(self.list_inner, bg=BORDER, height=1).pack(fill="x", padx=(32, 6))
 
     def _delete(self, category: EventCategory) -> None:
         if not owned_messagebox(
@@ -3505,6 +3591,36 @@ class CalendarApp(tk.Tk):
             wraplength=dp(220),
         )
         self.global_detail_title.pack(fill="x", pady=(dp(12), dp(8)))
+        detail_identity = tk.Frame(self.global_detail_frame, bg=theme.panel_secondary)
+        detail_identity.pack(fill="x", pady=(0, dp(9)))
+        self.global_detail_category_dot = LogicalCanvas(
+            detail_identity,
+            dpi=self.dpi,
+            width=18,
+            height=18,
+            bg=theme.panel_secondary,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.global_detail_category_dot.pack(side="left", padx=(0, dp(4)))
+        self.global_detail_category_label = tk.Label(
+            detail_identity,
+            text="无分类",
+            bg=theme.panel_secondary,
+            fg=theme.text_secondary,
+            font=(FONT, 8, "bold"),
+            anchor="w",
+        )
+        self.global_detail_category_label.pack(side="left", fill="x", expand=True)
+        self.global_detail_color_label = tk.Label(
+            detail_identity,
+            text="",
+            bg=theme.panel_secondary,
+            fg=theme.text_muted,
+            font=(FONT, 7),
+            anchor="e",
+        )
+        self.global_detail_color_label.pack(side="right")
         self.global_detail_meta = tk.Label(self.global_detail_frame, text="", bg=theme.panel_secondary, fg=theme.text_secondary, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
         self.global_detail_meta.pack(fill="x")
         self.global_detail_notes = tk.Label(self.global_detail_frame, text="", bg=theme.panel_secondary, fg=theme.text_muted, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
@@ -4667,22 +4783,34 @@ class CalendarApp(tk.Tk):
                         width=dp(2),
                     )
                 if day in ddl_dates:
-                    canvas.create_rectangle(
+                    rounded_rectangle(
+                        canvas,
                         x1 + dp(3),
                         row_y1 + dp(3),
                         x2 - dp(3),
                         row_y2 - dp(3),
+                        dp(6),
                         fill="",
-                        outline=theme.ddl_indicator_highlight,
-                        width=dp(2),
+                        outline=theme.ddl_indicator,
+                        width=dp(1),
+                    )
+                    canvas.create_line(
+                        x1 + dp(10),
+                        row_y1 + dp(4),
+                        x2 - dp(10),
+                        row_y1 + dp(4),
+                        fill=theme.ddl_indicator_highlight,
+                        width=dp(1),
                     )
                 if day == self.selected and not in_drag_range:
                     selected_inset = dp(7) if day in ddl_dates else dp(2)
-                    canvas.create_rectangle(
+                    rounded_rectangle(
+                        canvas,
                         x1 + selected_inset,
                         row_y1 + selected_inset,
                         x2 - selected_inset,
                         row_y2 - selected_inset,
+                        dp(5),
                         fill="",
                         outline=theme.date_selected_border,
                         width=dp(1),
@@ -4765,13 +4893,13 @@ class CalendarApp(tk.Tk):
                     card_fill = blend(theme.schedule_card_background, theme.card_done_background, 0.62)
                     outline = theme.schedule_card_border
                 elif item.native_ddl or block.ddl_date:
-                    card_fill = blend(theme.schedule_card_background, theme.event_type_ddl_background, 0.46)
+                    card_fill = blend(theme.schedule_card_background, theme.event_type_ddl_background, 0.20)
                     outline = theme.event_type_ddl_border
                 elif item.is_urgent:
-                    card_fill = blend(theme.schedule_card_background, theme.event_type_urgent_background, 0.46)
+                    card_fill = blend(theme.schedule_card_background, theme.event_type_urgent_background, 0.20)
                     outline = theme.event_type_urgent_border
                 else:
-                    card_fill = blend(theme.schedule_card_background, item.color, 0.13)
+                    card_fill = blend(theme.schedule_card_background, item.color, 0.09)
                     outline = blend(theme.schedule_card_border, stripe_color, 0.34)
                 if is_selected:
                     card_fill = blend(card_fill, theme.accent_soft, 0.48)
@@ -5309,6 +5437,19 @@ class CalendarApp(tk.Tk):
             self.global_detail_title.configure(text="选择一个事项查看详情")
             self.global_detail_meta.configure(text=f"本月共 {total} 项工作\n单击事项选择，双击直接编辑")
             self.global_detail_notes.configure(text="日期空白区域可双击新建事项。")
+            if hasattr(self, "global_detail_category_dot"):
+                self.global_detail_category_dot.delete("all")
+                self.global_detail_category_dot.create_oval(
+                    4,
+                    4,
+                    14,
+                    14,
+                    fill=self.theme.panel_secondary,
+                    outline=self.theme.text_muted,
+                    width=1,
+                )
+                self.global_detail_category_label.configure(text="无分类", fg=self.theme.text_muted)
+                self.global_detail_color_label.configure(text="")
             if hasattr(self, "global_detail_state_label"):
                 self.global_detail_state_label.configure(text="未选择", bg=self.theme.control_background, fg=self.theme.text_muted)
                 self.global_detail_edit_button.accented = False
@@ -5325,12 +5466,37 @@ class CalendarApp(tk.Tk):
         duration = f"{item.calendar_span_days} 个自然日 · {item.effective_days_count} 个有效工作日"
         ddl_text = f"\nDDL：{item.ddl_date:%Y-%m-%d}" if item.ddl_date else ""
         category_text = getattr(item, "category_name", None) or "无分类"
+        source_event = None
+        store = getattr(self, "store", None)
+        if store is not None and hasattr(store, "event_by_id"):
+            source_event = store.event_by_id(item.id)
         self.global_detail_title.configure(text=item.title)
         state_text = detail_state_text(item)
         self.global_detail_meta.configure(
             text=f"日期：{date_text}\n\n持续：{duration}\n\n事项性质：{timeline_type_label(item)}\n\n事项分类：{category_text}{ddl_text}\n\n状态：{state_text}"
         )
         self.global_detail_notes.configure(text=f"备注\n{item.notes}" if item.notes else "备注\n暂无备注")
+        if hasattr(self, "global_detail_category_dot"):
+            category_color = getattr(item, "color", self.theme.text_muted)
+            self.global_detail_category_dot.delete("all")
+            self.global_detail_category_dot.create_oval(
+                4,
+                4,
+                14,
+                14,
+                fill=category_color if category_text != "无分类" else self.theme.panel_secondary,
+                outline=category_color,
+                width=2 if category_text == "无分类" else 1,
+            )
+            self.global_detail_category_label.configure(text=category_text, fg=self.theme.text_primary)
+            color_source = (
+                "跟随分类"
+                if source_event is not None and source_event.color_mode == "inherit"
+                else "自定义颜色"
+                if source_event is not None and source_event.category_id
+                else "单独颜色"
+            )
+            self.global_detail_color_label.configure(text=color_source)
         if hasattr(self, "global_detail_state_label"):
             if item.completed:
                 state_background, state_foreground = self.theme.card_done_background, self.theme.text_done
@@ -5842,7 +6008,7 @@ class CalendarApp(tk.Tk):
             child.destroy()
         theme = self.theme
         dp = self.dpi.px
-        sidebar.configure(width=dp(88 if self._global_category_sidebar_open else 38))
+        sidebar.configure(width=dp(152 if self._global_category_sidebar_open else 38))
         if not self._global_category_sidebar_open:
             ThemeButton(
                 sidebar,
@@ -5855,29 +6021,45 @@ class CalendarApp(tk.Tk):
                 surface_background=theme.panel_secondary,
                 outlined=True,
             ).pack(pady=(dp(8), dp(6)))
-            for category in self.store.sorted_categories():
+            for category in self.store.sorted_categories()[:8]:
                 dot = LogicalCanvas(sidebar, dpi=self.dpi, width=26, height=22, bg=theme.panel_secondary, bd=0, highlightthickness=0, cursor="hand2")
                 dot.pack(pady=dp(1))
                 dot.create_oval(7, 5, 19, 17, fill=category.color if self._category_filter_enabled(category.id) else theme.panel_secondary, outline=category.color, width=2)
                 dot.bind("<Button-1>", lambda _event, category_id=category.id: self._toggle_global_category(category_id))
+                Tooltip(dot, category.name)
+            uncategorized = LogicalCanvas(sidebar, dpi=self.dpi, width=26, height=22, bg=theme.panel_secondary, bd=0, highlightthickness=0, cursor="hand2")
+            uncategorized.pack(pady=dp(1))
+            uncategorized.create_oval(7, 5, 19, 17, fill=theme.panel_secondary, outline=theme.text_muted, width=2)
+            if self._global_include_uncategorized:
+                uncategorized.create_text(13, 11, text="✓", fill=theme.accent, font=(FONT, 6, "bold"))
+            uncategorized.bind("<Button-1>", lambda _event: self._toggle_global_uncategorized())
+            Tooltip(uncategorized, "无分类")
             return
 
         header = tk.Frame(sidebar, bg=theme.panel_secondary, padx=dp(6), pady=dp(8))
         header.pack(fill="x")
-        tk.Label(header, text="分类", bg=theme.panel_secondary, fg=theme.text_primary, font=(FONT, 8, "bold")).pack(side="left")
+        tk.Label(header, text="事项分类", bg=theme.panel_secondary, fg=theme.text_primary, font=(FONT, 8, "bold")).pack(side="left")
         ThemeButton(header, self, "‹", self._toggle_global_category_sidebar, width=23, height=23, font_size=10, surface_background=theme.panel_secondary).pack(side="right")
 
         actions = tk.Frame(sidebar, bg=theme.panel_secondary, padx=dp(5))
         actions.pack(fill="x", pady=(0, dp(7)))
-        ThemeButton(actions, self, "全选", self._select_all_global_categories, width=35, height=23, font_size=7, surface_background=theme.panel_secondary, outlined=True).pack(side="left")
-        ThemeButton(actions, self, "清空", self._clear_all_global_categories, width=35, height=23, font_size=7, surface_background=theme.panel_secondary, outlined=True).pack(side="right")
+        ThemeButton(actions, self, "全部", self._select_all_global_categories, width=58, height=23, font_size=7, surface_background=theme.panel_secondary, outlined=True).pack(side="left")
+        ThemeButton(actions, self, "全不选", self._clear_all_global_categories, width=58, height=23, font_size=7, surface_background=theme.panel_secondary, outlined=True).pack(side="right")
 
         list_shell = tk.Frame(sidebar, bg=theme.panel_secondary)
         list_shell.pack(fill="both", expand=True)
         canvas = tk.Canvas(list_shell, bg=theme.panel_secondary, bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(
+            list_shell,
+            orient="vertical",
+            command=canvas.yview,
+            style="Global.Vertical.TScrollbar",
+        )
         inner = tk.Frame(canvas, bg=theme.panel_secondary)
         window = canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.pack(fill="both", expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
         inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
         canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(int(-event.delta / 120), "units"))
@@ -5903,7 +6085,7 @@ class CalendarApp(tk.Tk):
 
         footer = tk.Frame(sidebar, bg=theme.panel_secondary, padx=dp(5), pady=dp(8))
         footer.pack(fill="x", side="bottom")
-        ThemeButton(footer, self, "管理分类", self.open_category_manager, width=68, height=26, font_size=7, surface_background=theme.panel_secondary, outlined=True).pack(fill="x")
+        ThemeButton(footer, self, "管理分类…", self.open_category_manager, width=126, height=26, font_size=7, surface_background=theme.panel_secondary).pack(fill="x")
 
     def _build_global_category_filter_row(
         self,
@@ -5918,19 +6100,28 @@ class CalendarApp(tk.Tk):
     ) -> None:
         theme = self.theme
         dp = self.dpi.px
-        background = theme.control_hover if enabled else theme.panel_secondary
+        background = blend(theme.panel_secondary, theme.accent_soft, 0.28) if enabled else theme.panel_secondary
+        hover_background = theme.control_hover
         row = tk.Frame(parent, bg=background, padx=dp(4), pady=dp(6), cursor="hand2")
         row.pack(fill="x", padx=dp(3), pady=(0, dp(2)))
         dot = LogicalCanvas(row, dpi=self.dpi, width=16, height=18, bg=background, bd=0, highlightthickness=0, cursor="hand2")
         dot.pack(side="left", padx=(0, dp(2)))
-        dot.create_oval(3, 4, 13, 14, fill=background if hollow else color, outline=color, width=2)
-        label = tk.Label(row, text=truncate(name, 5), bg=background, fg=theme.text_primary if enabled else theme.text_secondary, font=(FONT, 7), anchor="w", cursor="hand2")
+        dot.create_oval(3, 4, 13, 14, fill=background if hollow or not enabled else color, outline=color, width=2)
+        label = tk.Label(row, text=truncate(name, 12), bg=background, fg=theme.text_primary if enabled else theme.text_secondary, font=(FONT, 8), anchor="w", cursor="hand2")
         label.pack(side="left", fill="x", expand=True)
         check = tk.Label(row, text="✓" if enabled else "", bg=background, fg=theme.accent, font=(FONT, 8, "bold"), cursor="hand2", width=1)
         check.pack(side="right")
-        for widget in (row, dot, label, check):
+        widgets = (row, dot, label, check)
+
+        def set_background(value: str) -> None:
+            for widget in widgets:
+                widget.configure(bg=value)
+
+        for widget in widgets:
             widget.bind("<Button-1>", lambda _event: command())
             widget.bind("<MouseWheel>", lambda event: scroll_canvas.yview_scroll(int(-event.delta / 120), "units"))
+            widget.bind("<Enter>", lambda _event: set_background(hover_background))
+            widget.bind("<Leave>", lambda _event: set_background(background))
 
     def _toggle_global_category_sidebar(self) -> None:
         self._global_category_sidebar_open = not self._global_category_sidebar_open

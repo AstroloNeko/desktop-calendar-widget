@@ -560,6 +560,16 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn("管理分类", source)
         self.assertIn("_global_category_sidebar_open", source)
 
+    def test_global_sidebar_is_a_readable_scrolling_filter_panel(self) -> None:
+        refresh_source = inspect.getsource(CalendarApp._refresh_global_category_sidebar)
+        row_source = inspect.getsource(CalendarApp._build_global_category_filter_row)
+        self.assertIn("152 if self._global_category_sidebar_open else 38", refresh_source)
+        self.assertIn('text="事项分类"', refresh_source)
+        self.assertIn('"全不选"', refresh_source)
+        self.assertIn('style="Global.Vertical.TScrollbar"', refresh_source)
+        self.assertIn("truncate(name, 12)", row_source)
+        self.assertIn('widget.bind("<Enter>"', row_source)
+
     def test_category_delete_confirmation_uses_manager_as_owned_modal(self) -> None:
         source = inspect.getsource(CategoryManager._delete)
         self.assertIn("owned_messagebox", source)
@@ -656,6 +666,14 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn('self.color_mode_var.set("override")', source)
         self.assertIn("category_id=", source)
 
+    def test_event_editor_explains_category_color_source_without_technical_terms(self) -> None:
+        source = inspect.getsource(EventEditor)
+        self.assertIn("category_color_preview", source)
+        self.assertIn('source_text = f"● 跟随“{category.name}”"', source)
+        self.assertIn('source_text = "● 自定义颜色"', source)
+        self.assertIn('button_text = "恢复跟随"', source)
+        self.assertIn('Tooltip(custom_color, "选择自定义颜色")', source)
+
     def test_compact_event_color_uses_store_effective_color(self) -> None:
         card_source = inspect.getsource(CalendarApp._build_event_card)
         calendar_source = inspect.getsource(CalendarApp.render)
@@ -674,12 +692,28 @@ class WindowBehaviorTests(unittest.TestCase):
             self.assertIn(token, source)
         self.assertNotRegex(source, r'#[0-9A-Fa-f]{6}')
 
+    def test_calendar_flow_ddl_outline_is_rounded_and_keeps_category_stripe(self) -> None:
+        source = inspect.getsource(CalendarApp._draw_calendar_flow)
+        self.assertIn("rounded_rectangle", source)
+        self.assertIn("outline=theme.ddl_indicator", source)
+        self.assertIn("fill=stripe_color", source)
+        self.assertIn("theme.ddl_indicator_highlight", source)
+
     def test_global_detail_uses_status_badge_and_muted_empty_actions(self) -> None:
         build_source = inspect.getsource(CalendarApp._build_global_ui)
         update_source = inspect.getsource(CalendarApp._update_global_detail)
         self.assertIn("global_detail_state_label", build_source)
         self.assertIn("theme.text_disabled", update_source)
         self.assertIn("theme.danger_soft", update_source)
+
+    def test_global_detail_presents_category_and_color_source_as_user_language(self) -> None:
+        build_source = inspect.getsource(CalendarApp._build_global_ui)
+        update_source = inspect.getsource(CalendarApp._update_global_detail)
+        self.assertIn("global_detail_category_dot", build_source)
+        self.assertIn("global_detail_category_label", build_source)
+        self.assertIn('"跟随分类"', update_source)
+        self.assertIn('"自定义颜色"', update_source)
+        self.assertNotIn('text="category_id"', build_source)
 
     def test_escape_cancels_calendar_flow_drag_without_opening_editor(self) -> None:
         actions: list[str] = []
