@@ -40,6 +40,61 @@ def window_handle(widget) -> Optional[int]:
     return int(root or child)
 
 
+def is_window_topmost(widget) -> bool:
+    """Read the native TOPMOST band instead of trusting only Tk's cached attribute."""
+    if not IS_WINDOWS:
+        try:
+            return bool(widget.attributes("-topmost"))
+        except Exception:
+            return False
+    try:
+        hwnd = window_handle(widget)
+    except Exception:
+        return False
+    if not hwnd:
+        return False
+    user32 = ctypes.windll.user32
+    get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    get_long.restype = ctypes.c_ssize_t
+    return bool(get_long(hwnd, -20) & 0x00000008)  # GWL_EXSTYLE / WS_EX_TOPMOST
+
+
+def set_window_topmost(widget, enabled: bool) -> None:
+    """Move a window into or out of the native TOPMOST band without activating it."""
+    try:
+        widget.attributes("-topmost", bool(enabled))
+    except Exception:
+        pass
+    if not IS_WINDOWS:
+        return
+    try:
+        hwnd = window_handle(widget)
+    except Exception:
+        return
+    if not hwnd:
+        return
+    flags = 0x0001 | 0x0002 | 0x0010 | 0x0200  # NOSIZE | NOMOVE | NOACTIVATE | NOOWNERZORDER
+    ctypes.windll.user32.SetWindowPos(hwnd, -1 if enabled else -2, 0, 0, 0, 0, flags)
+
+
+def set_window_owner(widget, owner) -> None:
+    """Mirror Tk's transient relationship onto the native top-level HWND owner."""
+    if not IS_WINDOWS:
+        return
+    try:
+        hwnd = window_handle(widget)
+        owner_hwnd = window_handle(owner)
+    except Exception:
+        return
+    if not hwnd or not owner_hwnd or hwnd == owner_hwnd:
+        return
+    user32 = ctypes.windll.user32
+    set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+    set_long.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    set_long.restype = ctypes.c_ssize_t
+    set_long(hwnd, -8, owner_hwnd)  # GWLP_HWNDPARENT sets the owner for a top-level popup.
+
+
 def make_tool_window(widget) -> None:
     if not IS_WINDOWS:
         return
