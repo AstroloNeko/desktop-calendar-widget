@@ -63,10 +63,13 @@ from win_integration import (
     clamp_to_work_area,
     is_autostart_enabled,
     is_foreground_process,
+    is_window_topmost,
     make_app_window,
     make_tool_window,
     raise_for_interaction,
     send_to_desktop,
+    set_window_owner,
+    set_window_topmost,
     set_autostart,
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
@@ -941,9 +944,11 @@ class EventEditor(tk.Toplevel):
         event: Optional[Event] = None,
         *,
         initial_duration_days: int = 1,
+        modal_parent: Optional[tk.Misc] = None,
     ) -> None:
         super().__init__(master)
         self.master_app = master
+        self.modal_parent = modal_parent or master
         self.event = event
         self.title("编辑日程" if event else "新建日程")
         self.configure(bg=master.theme.window_border_outer)
@@ -1264,7 +1269,13 @@ class EventEditor(tk.Toplevel):
     def _present(self) -> None:
         if getattr(self, "_closing", False) or not self.winfo_exists():
             return
-        self.master_app.present_modal(self, self.master_app)
+        parent = self.modal_parent
+        try:
+            if not parent.winfo_exists():
+                parent = self.master_app
+        except (AttributeError, tk.TclError):
+            parent = self.master_app
+        self.master_app.present_modal(self, parent)
         try:
             self.grab_set()
         except tk.TclError:
@@ -1524,11 +1535,12 @@ class EventEditor(tk.Toplevel):
                 self.grab_release()
         except (AttributeError, tk.TclError):
             pass
+        self.master_app._leave_modal(self)
         self.destroy()
         detail = self.master_app.day_detail_window
         if detail and detail.winfo_exists():
             detail.refresh()
-            self.master_app.after(60, lambda: self.master_app.present_overlay(detail))
+            self.master_app.after(60, detail._present)
         else:
             self.master_app.after(120, self.master_app.restore_window_mode_if_idle)
 
@@ -1756,7 +1768,7 @@ class RoutineEditor(tk.Toplevel):
         elif self.master_app.day_detail_window and self.master_app.day_detail_window.winfo_exists():
             detail = self.master_app.day_detail_window
             detail.refresh()
-            self.master_app.after(60, lambda: self.master_app.present_overlay(detail))
+            self.master_app.after(60, detail._present)
         else:
             self.master_app.after(120, self.master_app.apply_window_mode)
 
@@ -1853,7 +1865,7 @@ class RoutineManager(tk.Toplevel):
         detail = self.master_app.day_detail_window
         if detail and detail.winfo_exists():
             detail.refresh()
-            self.master_app.after(60, lambda: self.master_app.present_overlay(detail))
+            self.master_app.after(60, detail._present)
         else:
             self.master_app.after(120, self.master_app.apply_window_mode)
 
@@ -2014,6 +2026,7 @@ class CategoryEditor(tk.Toplevel):
                 self.grab_release()
         except (AttributeError, tk.TclError):
             pass
+        self.master_app._leave_modal(self)
         self.destroy()
         manager = self.master_app.category_manager
         if manager and manager.winfo_exists():
@@ -2132,6 +2145,7 @@ class CategoryManager(tk.Toplevel):
                 self.grab_release()
         except (AttributeError, tk.TclError):
             pass
+        self.master_app._leave_modal(self)
         self.destroy()
         editor = self.master_app.editor_window
         if editor and editor.winfo_exists():
@@ -2152,7 +2166,7 @@ class DayDetailDialog(tk.Toplevel):
         self.title("单日事项详情")
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
-        self.attributes("-topmost", True)
+        self._closing = False
         self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
         self.status_var = tk.StringVar(value=master.store.date_status(day))
 
@@ -2226,7 +2240,7 @@ class DayDetailDialog(tk.Toplevel):
             footer,
             self.master_app,
             "习惯清单",
-            self.master_app.open_routine_manager,
+            self._open_routine_manager,
             width=73,
             height=30,
             font_size=8,
@@ -2238,14 +2252,41 @@ class DayDetailDialog(tk.Toplevel):
         self.refresh()
         self.update_idletasks()
         center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=12)
-        self.after_idle(lambda: master.present_overlay(self))
+        self.after_idle(self._present)
+
+    def _present(self) -> None:
+        if self._closing or not self.winfo_exists():
+            return
+        self.master_app.present_modal(self, self.master_app)
+        try:
+            self.grab_set()
+        except tk.TclError:
+            return
+        self.lift()
+        self.focus_force()
 
     def set_day(self, day: date) -> None:
         self.day = day
         self.refresh()
 
     def _add_event(self) -> None:
-        self.master_app.open_new_event(self.day)
+        self.master_app.open_new_event(self.day, parent=self)
+
+    def _open_routine_manager(self) -> None:
+        self._suspend_for_legacy_child()
+        self.master_app.open_routine_manager()
+
+    def _open_routine_editor(self, item: RoutineItem) -> None:
+        self._suspend_for_legacy_child()
+        self.master_app.open_routine_editor(item)
+
+    def _suspend_for_legacy_child(self) -> None:
+        """Transfer interaction to an older topmost child until it returns."""
+        try:
+            if self.grab_current() is self:
+                self.grab_release()
+        except (AttributeError, tk.TclError):
+            pass
 
     def refresh(self) -> None:
         if not self.winfo_exists():
@@ -2369,7 +2410,7 @@ class DayDetailDialog(tk.Toplevel):
         if badge:
             interactive_widgets.append(badge)
         for widget in interactive_widgets:
-            widget.bind("<Button-1>", lambda _event: self.master_app.open_editor(item))
+            widget.bind("<Button-1>", lambda _event: self.master_app.open_editor(item, parent=self))
         delete.bind("<Button-1>", lambda _event: self.master_app._confirm_delete(item, parent=self))
 
     def _build_routine_row(self, item: RoutineItem) -> None:
@@ -2396,7 +2437,7 @@ class DayDetailDialog(tk.Toplevel):
         edit = tk.Label(row, text="编辑", bg=background, fg=current_theme().text_secondary, font=(FONT, 8), cursor="hand2", padx=8)
         edit.pack(side="right", fill="y")
         for widget in (row, content, title, edit):
-            widget.bind("<Button-1>", lambda _event: self.master_app.open_routine_editor(item))
+            widget.bind("<Button-1>", lambda _event: self._open_routine_editor(item))
 
     def _save_status(self) -> None:
         self.master_app.store.set_date_status(self.day, self.status_var.get())
@@ -2412,10 +2453,19 @@ class DayDetailDialog(tk.Toplevel):
             self.scrollbar.pack_forget()
 
     def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         if self.master_app.day_detail_window is self:
             self.master_app.day_detail_window = None
+        try:
+            if self.grab_current() is self:
+                self.grab_release()
+        except (AttributeError, tk.TclError):
+            pass
+        self.master_app._leave_modal(self)
         self.destroy()
-        self.master_app.after(120, self.master_app.apply_window_mode)
+        self.master_app.after(120, self.master_app.restore_window_mode_if_idle)
 
 
 class DDLListDialog(tk.Toplevel):
@@ -2992,6 +3042,10 @@ class CalendarApp(tk.Tk):
         self._lower_job: Optional[str] = None
         self.notification_windows: list[tk.Toplevel] = []
         self.overlay_windows: list[tk.Toplevel] = []
+        self._modal_stack: list[tk.Toplevel] = []
+        self._modal_state_saved = False
+        self._modal_parent_was_topmost = False
+        self._modal_restore_topmost = False
         self.editor_window: Optional[EventEditor] = None
         self.routine_manager: Optional[RoutineManager] = None
         self.routine_editor: Optional[RoutineEditor] = None
@@ -4155,6 +4209,10 @@ class CalendarApp(tk.Tk):
         """Give a normal launch one foreground pulse without changing preferences."""
         if self._startup_foreground_done or not self.winfo_exists():
             return
+        if self._active_modal_window() is not None:
+            self._startup_foreground_done = True
+            self._suspend_main_topmost()
+            return
         try:
             active_grab = self.grab_current()
         except (AttributeError, tk.TclError):
@@ -4167,7 +4225,7 @@ class CalendarApp(tk.Tk):
         self._startup_foreground_done = True
         self._startup_foreground_active = True
         self.deiconify()
-        self.attributes("-topmost", True)
+        set_window_topmost(self, True)
         self.lift()
         self.focus_force()
         bring_to_front(self)
@@ -4178,6 +4236,10 @@ class CalendarApp(tk.Tk):
         self._startup_foreground_active = False
         if not self.winfo_exists():
             return
+        if self._active_modal_window() is not None:
+            self._suspend_main_topmost()
+            self._update_mode_badge()
+            return
         try:
             active_grab = self.grab_current()
         except (AttributeError, tk.TclError):
@@ -4185,14 +4247,14 @@ class CalendarApp(tk.Tk):
         if active_grab is not None and active_grab is not self:
             # The modal owns the foreground now.  Its close path restores the
             # saved desktop/pinned mode without competing for Z-order here.
-            self.attributes("-topmost", False)
+            set_window_topmost(self, False)
             self._update_mode_badge()
             return
         if self.window_mode == "pinned":
-            self.attributes("-topmost", True)
+            set_window_topmost(self, True)
             self.lift()
         else:
-            self.attributes("-topmost", False)
+            set_window_topmost(self, False)
             self.desktop_session_active = True
             raise_for_interaction(self)
         self._update_mode_badge()
@@ -5900,6 +5962,7 @@ class CalendarApp(tk.Tk):
         selected: Optional[date] = None,
         *,
         initial_duration_days: int = 1,
+        parent: Optional[tk.Misc] = None,
     ) -> None:
         if self.editor_window and self.editor_window.winfo_exists():
             self.editor_window._present()
@@ -5910,7 +5973,7 @@ class CalendarApp(tk.Tk):
             except tk.TclError:
                 pass
             self._lower_job = None
-        self.attributes("-topmost", False)
+        self._prepare_modal_open()
         if self.view_mode == "compact":
             send_to_desktop(self)
         editor = EventEditor(
@@ -5918,21 +5981,32 @@ class CalendarApp(tk.Tk):
             selected or (event.due_date if event else self.selected),
             event,
             initial_duration_days=initial_duration_days,
+            modal_parent=parent,
         )
         self.editor_window = editor
         editor._present()
 
-    def open_new_event(self, selected: Optional[date] = None, *, duration_days: int = 1) -> None:
-        self.open_editor(selected=selected or self.selected, initial_duration_days=duration_days)
+    def open_new_event(
+        self,
+        selected: Optional[date] = None,
+        *,
+        duration_days: int = 1,
+        parent: Optional[tk.Misc] = None,
+    ) -> None:
+        self.open_editor(
+            selected=selected or self.selected,
+            initial_duration_days=duration_days,
+            parent=parent,
+        )
 
     def open_day_detail(self, day: Optional[date] = None) -> None:
         target_day = day or self.selected
         self.select_day(target_day)
         if self.day_detail_window and self.day_detail_window.winfo_exists():
             self.day_detail_window.set_day(target_day)
-            self.present_overlay(self.day_detail_window)
+            self.day_detail_window._present()
             return
-        self.attributes("-topmost", False)
+        self._prepare_modal_open()
         if self.view_mode == "compact":
             send_to_desktop(self)
         self.day_detail_window = DayDetailDialog(self, target_day)
@@ -5941,7 +6015,7 @@ class CalendarApp(tk.Tk):
         if self.routine_manager and self.routine_manager.winfo_exists():
             self.present_overlay(self.routine_manager)
             return
-        self.attributes("-topmost", False)
+        self._suspend_main_topmost()
         if self.view_mode == "compact":
             send_to_desktop(self)
         self.routine_manager = RoutineManager(self)
@@ -5953,7 +6027,7 @@ class CalendarApp(tk.Tk):
         if self.category_manager and self.category_manager.winfo_exists():
             self.category_manager._present()
             return
-        self.attributes("-topmost", False)
+        self._prepare_modal_open()
         if self.view_mode == "compact":
             send_to_desktop(self)
         self.category_manager = CategoryManager(self)
@@ -6166,7 +6240,7 @@ class CalendarApp(tk.Tk):
         if self.ddl_list_window and self.ddl_list_window.winfo_exists():
             self.present_overlay(self.ddl_list_window)
             return
-        self.attributes("-topmost", False)
+        self._suspend_main_topmost()
         if self.view_mode == "compact":
             send_to_desktop(self)
         self.ddl_list_window = DDLListDialog(self)
@@ -6175,7 +6249,7 @@ class CalendarApp(tk.Tk):
         if self.routine_editor and self.routine_editor.winfo_exists():
             self.present_overlay(self.routine_editor)
             return
-        self.attributes("-topmost", False)
+        self._suspend_main_topmost()
         if self.view_mode == "compact":
             send_to_desktop(self)
         self.routine_editor = RoutineEditor(self, item)
@@ -6184,7 +6258,19 @@ class CalendarApp(tk.Tk):
         if not window.winfo_exists():
             return
         self._register_overlay(window)
-        self.attributes("-topmost", False)
+        try:
+            active_grab = self.grab_current()
+        except (AttributeError, tk.TclError):
+            active_grab = None
+        if active_grab is not None and active_grab is not self and active_grab is not window:
+            try:
+                if active_grab in self._active_overlays() and active_grab.winfo_exists():
+                    active_grab.lift()
+                    raise_for_interaction(active_grab)
+                    return
+            except (AttributeError, tk.TclError):
+                pass
+        self._suspend_main_topmost()
         if self.view_mode == "compact":
             send_to_desktop(self)
         make_tool_window(window)
@@ -6193,25 +6279,89 @@ class CalendarApp(tk.Tk):
         bring_to_front(window)
 
     def present_modal(self, window: tk.Toplevel, parent: tk.Misc) -> None:
-        """Present a transient modal without leaving it in the topmost band."""
+        """Enter the shared modal stack and present a normal-band child."""
         if not window.winfo_exists():
             return
         self._register_overlay(window)
-        self.attributes("-topmost", False)
+        self._enter_modal(window)
+        self._suspend_main_topmost()
         try:
-            parent.attributes("-topmost", False)
+            set_window_topmost(parent, False)
         except (AttributeError, tk.TclError):
             pass
         window.transient(parent)
         make_tool_window(window)
-        window.attributes("-topmost", False)
+        set_window_owner(window, parent)
+        set_window_topmost(window, False)
         window.deiconify()
         window.lift()
         raise_for_interaction(window)
         window.focus_force()
 
+    @property
+    def modal_depth(self) -> int:
+        self._prune_modal_stack()
+        return len(self._modal_stack)
+
+    def _prune_modal_stack(self) -> None:
+        active: list[tk.Toplevel] = []
+        for window in self._modal_stack:
+            try:
+                if window.winfo_exists():
+                    active.append(window)
+            except (AttributeError, tk.TclError):
+                continue
+        self._modal_stack = active
+
+    def _active_modal_window(self) -> Optional[tk.Toplevel]:
+        self._prune_modal_stack()
+        return self._modal_stack[-1] if self._modal_stack else None
+
+    def _enter_modal(self, window: tk.Toplevel) -> None:
+        self._prune_modal_stack()
+        if window in self._modal_stack:
+            return
+        if not self._modal_stack and not self._modal_state_saved:
+            try:
+                tk_topmost = bool(self.attributes("-topmost"))
+            except tk.TclError:
+                tk_topmost = False
+            self._modal_parent_was_topmost = tk_topmost or is_window_topmost(self)
+            # A startup foreground pulse is temporary; the saved user mode is
+            # the authoritative state to restore after the last modal closes.
+            self._modal_restore_topmost = self.window_mode == "pinned"
+            self._modal_state_saved = True
+        self._modal_stack.append(window)
+
+    def _leave_modal(self, window: tk.Toplevel) -> None:
+        self._modal_stack = [item for item in self._modal_stack if item is not window]
+        self._prune_modal_stack()
+        if self._modal_stack:
+            self._suspend_main_topmost()
+            return
+
+    def _suspend_main_topmost(self) -> None:
+        """Keep the app owner out of TOPMOST while any modal owns interaction."""
+        set_window_topmost(self, False)
+
+    def _prepare_modal_open(self) -> None:
+        """Save the owner band before demoting it for the first modal."""
+        self._prune_modal_stack()
+        if not self._modal_stack and not self._modal_state_saved:
+            try:
+                tk_topmost = bool(self.attributes("-topmost"))
+            except tk.TclError:
+                tk_topmost = False
+            self._modal_parent_was_topmost = tk_topmost or is_window_topmost(self)
+            self._modal_restore_topmost = self.window_mode == "pinned"
+            self._modal_state_saved = True
+        self._suspend_main_topmost()
+
     def restore_window_mode_if_idle(self) -> None:
         """Restore the main Z-order only when no newer modal owns interaction."""
+        if self._active_modal_window() is not None:
+            self._suspend_main_topmost()
+            return
         try:
             active_grab = self.grab_current()
         except (AttributeError, tk.TclError):
@@ -6219,6 +6369,9 @@ class CalendarApp(tk.Tk):
         if active_grab is not None and active_grab is not self:
             return
         self.apply_window_mode()
+        self._modal_state_saved = False
+        self._modal_parent_was_topmost = False
+        self._modal_restore_topmost = False
 
     def _register_overlay(self, window: tk.Toplevel) -> None:
         if window in self.overlay_windows:
@@ -6233,10 +6386,11 @@ class CalendarApp(tk.Tk):
     def _overlay_destroyed(self, event: tk.Event, window: tk.Toplevel) -> None:
         if event.widget is not window:
             return
+        self._leave_modal(window)
         if window in self.overlay_windows:
             self.overlay_windows.remove(window)
         if self.winfo_exists() and not self._active_overlays():
-            self.after(80, self.apply_window_mode)
+            self.after(80, self.restore_window_mode_if_idle)
 
     def _active_overlays(self) -> list[tk.Toplevel]:
         active: list[tk.Toplevel] = []
@@ -6414,9 +6568,13 @@ class CalendarApp(tk.Tk):
             make_app_window(self)
         else:
             make_tool_window(self)
+        if self._active_modal_window() is not None:
+            self._suspend_main_topmost()
+            self._update_mode_badge()
+            return
         overlays = self._active_overlays()
         if overlays:
-            self.attributes("-topmost", False)
+            self._suspend_main_topmost()
             if self.view_mode == "compact":
                 send_to_desktop(self)
             try:
@@ -6436,16 +6594,16 @@ class CalendarApp(tk.Tk):
             bring_to_front(overlays[-1])
             return
         if self.view_mode == "global":
-            self.attributes("-topmost", self.window_mode == "pinned")
+            set_window_topmost(self, self.window_mode == "pinned")
             if self.window_mode == "pinned":
                 self.lift()
             self._update_mode_badge()
             return
         if self.window_mode == "pinned":
-            self.attributes("-topmost", True)
+            set_window_topmost(self, True)
             self.lift()
         else:
-            self.attributes("-topmost", False)
+            set_window_topmost(self, False)
             if force_desktop:
                 self.desktop_session_active = False
             if self.desktop_session_active:
@@ -6570,7 +6728,8 @@ class CalendarApp(tk.Tk):
         menu.tk_popup(x, y)
 
     def _confirm_delete(self, event: Event, parent: Optional[tk.Widget] = None) -> None:
-        if messagebox.askyesno(APP_NAME, f"确定删除“{event.title}”？", parent=parent or self):
+        owner = (parent or self).winfo_toplevel()
+        if owned_messagebox(owner, messagebox.askyesno, APP_NAME, f"确定删除“{event.title}”？"):
             self.delete_event(event.id)
 
     def defer_to_tomorrow(self, event: Event) -> None:
