@@ -125,7 +125,9 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn("grab_set", present_source)
         self.assertIn("focus_force", present_source)
         self.assertIn("window.transient(parent)", modal_source)
-        self.assertIn('window.attributes("-topmost", False)', modal_source)
+        self.assertIn("self._enter_modal(window)", modal_source)
+        self.assertIn("set_window_owner(window, parent)", modal_source)
+        self.assertIn("set_window_topmost(window, False)", modal_source)
         self.assertNotIn('window.attributes("-topmost", True)', modal_source)
 
     def test_category_editor_close_is_idempotent_and_restores_legal_manager_grab(self) -> None:
@@ -146,6 +148,7 @@ class WindowBehaviorTests(unittest.TestCase):
             category_editor=None,
             category_manager=manager,
             after_idle=lambda callback: callback(),
+            _leave_modal=lambda window: actions.append("leave"),
         )
         editor = type(
             "FakeCategoryEditor",
@@ -162,7 +165,7 @@ class WindowBehaviorTests(unittest.TestCase):
         CategoryEditor.close(editor)
         CategoryEditor.close(editor)
         self.assertIsNone(master.category_editor)
-        self.assertEqual(actions, ["release", "destroy", "refresh", "manager-present"])
+        self.assertEqual(actions, ["release", "leave", "destroy", "refresh", "manager-present"])
 
     def test_category_editor_all_close_routes_share_cleanup(self) -> None:
         source = inspect.getsource(CategoryEditor.__init__)
@@ -215,17 +218,44 @@ class WindowBehaviorTests(unittest.TestCase):
             (),
             {
                 "master_app": FakeMaster(),
+                "modal_parent": None,
                 "title_entry": FakeEntry(),
                 "winfo_exists": lambda self: True,
                 "grab_set": lambda self: actions.append("grab"),
                 "lift": lambda self: actions.append("lift"),
             },
         )()
+        editor.modal_parent = editor.master_app
 
         EventEditor._present(editor)
 
         self.assertEqual(actions[0], ("present", editor, editor.master_app))
         self.assertEqual(actions[1:], ["grab", "lift", "entry-focus"])
+
+    def test_event_editor_uses_explicit_detail_as_modal_parent(self) -> None:
+        actions: list[object] = []
+
+        class FakeMaster:
+            def present_modal(self, window, parent) -> None:
+                actions.append((window, parent))
+
+        parent = SimpleNamespace(winfo_exists=lambda: True)
+        editor = type(
+            "FakeEditor",
+            (),
+            {
+                "master_app": FakeMaster(),
+                "modal_parent": parent,
+                "title_entry": SimpleNamespace(focus_force=lambda: None),
+                "winfo_exists": lambda self: True,
+                "grab_set": lambda self: None,
+                "lift": lambda self: None,
+            },
+        )()
+
+        EventEditor._present(editor)
+
+        self.assertEqual(actions, [(editor, parent)])
 
     def test_event_editor_is_not_permanently_topmost_or_represented_on_timers(self) -> None:
         init_source = inspect.getsource(EventEditor.__init__)
@@ -266,6 +296,7 @@ class WindowBehaviorTests(unittest.TestCase):
                 "view_mode": "global",
                 "selected": date(2026, 8, 24),
                 "attributes": lambda self, *_args: None,
+                "_prepare_modal_open": lambda self: None,
             },
         )()
         with patch("app.EventEditor", FakeEditor):
@@ -285,6 +316,9 @@ class WindowBehaviorTests(unittest.TestCase):
             def restore_window_mode_if_idle(self) -> None:
                 actions.append("main")
 
+            def _leave_modal(self, _window) -> None:
+                actions.append("leave")
+
         master = FakeMaster()
         editor = type(
             "FakeEditor",
@@ -300,13 +334,14 @@ class WindowBehaviorTests(unittest.TestCase):
 
         EventEditor.close(editor)
 
-        self.assertEqual(actions, ["release", "destroy", "main"])
+        self.assertEqual(actions, ["release", "leave", "destroy", "main"])
 
     def test_delayed_window_mode_restore_does_not_compete_with_a_new_modal(self) -> None:
         actions: list[str] = []
         modal = object()
         fake = SimpleNamespace(
             grab_current=lambda: modal,
+            _active_modal_window=lambda: None,
             apply_window_mode=lambda: actions.append("restore"),
         )
         CalendarApp.restore_window_mode_if_idle(fake)
@@ -331,6 +366,8 @@ class WindowBehaviorTests(unittest.TestCase):
             window_mode="pinned",
             winfo_exists=lambda: True,
             attributes=lambda *values: actions.append(("root-attributes", values)),
+            _active_modal_window=lambda: None,
+            _suspend_main_topmost=lambda: actions.append("root-suspended"),
             _active_overlays=lambda: [modal],
             grab_current=lambda: modal,
         )
@@ -343,6 +380,131 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn(("modal-attributes", ("-topmost", False)), actions)
         self.assertIn(("raise", modal), actions)
         self.assertNotIn(("topmost", modal), actions)
+
+    def test_present_overlay_never_raises_parent_over_active_modal(self) -> None:
+        actions: list[object] = []
+
+        class Window:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def winfo_exists(self) -> bool:
+                return True
+
+            def lift(self) -> None:
+                actions.append(("lift", self.name))
+
+        parent = Window("detail")
+        modal = Window("editor")
+        fake = SimpleNamespace(
+            grab_current=lambda: modal,
+            _register_overlay=lambda window: actions.append(("register", window.name)),
+            _active_overlays=lambda: [parent, modal],
+        )
+        with patch("app.raise_for_interaction", side_effect=lambda window: actions.append(("raise", window.name))):
+            CalendarApp.present_overlay(fake, parent)
+
+        self.assertEqual(actions, [("register", "detail"), ("lift", "editor"), ("raise", "editor")])
+
+    def test_modal_stack_suspends_owner_until_last_modal_leaves(self) -> None:
+        actions: list[str] = []
+
+        class Window:
+            def winfo_exists(self) -> bool:
+                return True
+
+        class FakeCalendar:
+            _prune_modal_stack = CalendarApp._prune_modal_stack
+            _enter_modal = CalendarApp._enter_modal
+            _leave_modal = CalendarApp._leave_modal
+            window_mode = "pinned"
+
+            def __init__(self) -> None:
+                self._modal_stack = []
+                self._modal_state_saved = False
+                self._modal_parent_was_topmost = False
+                self._modal_restore_topmost = False
+
+            def attributes(self, *_values):
+                return 1
+
+            def _suspend_main_topmost(self) -> None:
+                actions.append("suspend")
+
+        fake = FakeCalendar()
+        detail = Window()
+        editor = Window()
+
+        fake._enter_modal(detail)
+        fake._enter_modal(editor)
+        self.assertEqual(fake._modal_stack, [detail, editor])
+        self.assertTrue(fake._modal_parent_was_topmost)
+        self.assertTrue(fake._modal_restore_topmost)
+
+        fake._leave_modal(editor)
+        self.assertEqual(fake._modal_stack, [detail])
+        self.assertEqual(actions, ["suspend"])
+        fake._leave_modal(detail)
+        self.assertEqual(fake._modal_stack, [])
+        self.assertTrue(fake._modal_restore_topmost)
+
+    def test_prepare_modal_open_records_owner_band_before_demoting_it(self) -> None:
+        actions: list[str] = []
+        fake = SimpleNamespace(
+            _modal_stack=[],
+            _modal_state_saved=False,
+            _modal_parent_was_topmost=False,
+            _modal_restore_topmost=False,
+            window_mode="pinned",
+            _prune_modal_stack=lambda: None,
+            attributes=lambda *_args: True,
+            _suspend_main_topmost=lambda: actions.append("suspend"),
+        )
+        with patch("app.is_window_topmost", return_value=True):
+            CalendarApp._prepare_modal_open(fake)
+
+        self.assertTrue(fake._modal_state_saved)
+        self.assertTrue(fake._modal_parent_was_topmost)
+        self.assertTrue(fake._modal_restore_topmost)
+        self.assertEqual(actions, ["suspend"])
+
+    def test_apply_window_mode_modal_stack_guard_only_suspends_owner(self) -> None:
+        actions: list[str] = []
+        modal = object()
+        fake = SimpleNamespace(
+            view_mode="compact",
+            window_mode="pinned",
+            winfo_exists=lambda: True,
+            _active_modal_window=lambda: modal,
+            _suspend_main_topmost=lambda: actions.append("suspend"),
+            _update_mode_badge=lambda: actions.append("badge"),
+        )
+        with (
+            patch("app.make_tool_window", side_effect=lambda _window: actions.append("tool")),
+            patch("app.set_window_topmost", side_effect=lambda *_args: actions.append("unexpected-topmost")),
+        ):
+            CalendarApp.apply_window_mode(fake)
+
+        self.assertEqual(actions, ["tool", "suspend", "badge"])
+
+    def test_startup_foreground_modal_stack_guard_never_pulses_owner(self) -> None:
+        actions: list[str] = []
+        modal = object()
+        fake = SimpleNamespace(
+            _startup_foreground_done=False,
+            _startup_foreground_active=False,
+            winfo_exists=lambda: True,
+            _active_modal_window=lambda: modal,
+            _suspend_main_topmost=lambda: actions.append("suspend"),
+            deiconify=lambda: actions.append("show"),
+            lift=lambda: actions.append("lift"),
+            focus_force=lambda: actions.append("focus"),
+        )
+
+        CalendarApp._present_initial_foreground(fake)
+
+        self.assertTrue(fake._startup_foreground_done)
+        self.assertEqual(actions, ["suspend"])
 
     def test_calendar_flow_drag_selects_range_without_opening_editor(self) -> None:
         actions: list[str] = []
@@ -587,6 +749,7 @@ class WindowBehaviorTests(unittest.TestCase):
                 "_startup_foreground_restore_job": None,
                 "window_mode": "desktop",
                 "desktop_session_active": False,
+                "_active_modal_window": lambda self: None,
                 "winfo_exists": lambda self: True,
                 "deiconify": lambda self: actions.append("show"),
                 "attributes": lambda self, *values: actions.append(("attributes", values)),
@@ -614,6 +777,7 @@ class WindowBehaviorTests(unittest.TestCase):
             _startup_foreground_restore_job="job",
             _startup_foreground_active=True,
             window_mode="pinned",
+            _active_modal_window=lambda: None,
             winfo_exists=lambda: True,
             attributes=lambda *values: actions.append(values),
             lift=lambda: actions.append("lift"),
@@ -629,6 +793,7 @@ class WindowBehaviorTests(unittest.TestCase):
         fake = SimpleNamespace(
             _startup_foreground_done=False,
             _startup_foreground_active=False,
+            _active_modal_window=lambda: None,
             winfo_exists=lambda: True,
             grab_current=lambda: modal,
             deiconify=lambda: actions.append("show"),
@@ -648,6 +813,7 @@ class WindowBehaviorTests(unittest.TestCase):
             _startup_foreground_restore_job="job",
             _startup_foreground_active=True,
             window_mode="pinned",
+            _active_modal_window=lambda: None,
             winfo_exists=lambda: True,
             grab_current=lambda: modal,
             attributes=lambda *values: actions.append(values),
@@ -1096,14 +1262,73 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertEqual(captured["initial_duration_days"], 5)
 
     def test_day_detail_add_entry_opens_editor_for_detail_date(self) -> None:
-        opened: list[date] = []
+        opened: list[tuple[date, object]] = []
         detail_day = date(2026, 8, 8)
 
-        master = type("FakeCalendar", (), {"open_new_event": lambda self, day: opened.append(day)})()
+        master = type(
+            "FakeCalendar",
+            (),
+            {"open_new_event": lambda self, day, *, parent=None: opened.append((day, parent))},
+        )()
         detail = type("FakeDetail", (), {"master_app": master, "day": detail_day})()
 
         DayDetailDialog._add_event(detail)
-        self.assertEqual(opened, [detail_day])
+        self.assertEqual(opened, [(detail_day, detail)])
+
+    def test_day_detail_is_a_transient_grabbed_modal(self) -> None:
+        actions: list[object] = []
+        master = SimpleNamespace(present_modal=lambda window, parent: actions.append(("present", window, parent)))
+        detail = type(
+            "FakeDetail",
+            (),
+            {
+                "_closing": False,
+                "master_app": master,
+                "winfo_exists": lambda self: True,
+                "grab_set": lambda self: actions.append("grab"),
+                "lift": lambda self: actions.append("lift"),
+                "focus_force": lambda self: actions.append("focus"),
+            },
+        )()
+
+        DayDetailDialog._present(detail)
+
+        self.assertEqual(actions, [("present", detail, master), "grab", "lift", "focus"])
+
+    def test_day_detail_close_releases_grab_and_restores_main_when_idle(self) -> None:
+        actions: list[str] = []
+
+        class Master:
+            day_detail_window = None
+
+            def after(self, _delay: int, callback) -> None:
+                callback()
+
+            def restore_window_mode_if_idle(self) -> None:
+                actions.append("restore")
+
+            def _leave_modal(self, _window) -> None:
+                actions.append("leave")
+
+        master = Master()
+        detail = type(
+            "FakeDetail",
+            (),
+            {
+                "_closing": False,
+                "master_app": master,
+                "grab_current": lambda self: self,
+                "grab_release": lambda self: actions.append("release"),
+                "destroy": lambda self: actions.append("destroy"),
+            },
+        )()
+        master.day_detail_window = detail
+
+        DayDetailDialog.close(detail)
+        DayDetailDialog.close(detail)
+
+        self.assertIsNone(master.day_detail_window)
+        self.assertEqual(actions, ["release", "leave", "destroy", "restore"])
 
     def test_editor_close_refreshes_existing_day_detail(self) -> None:
         actions: list[str] = []
@@ -1115,6 +1340,9 @@ class WindowBehaviorTests(unittest.TestCase):
             def refresh(self) -> None:
                 actions.append("refresh")
 
+            def _present(self) -> None:
+                actions.append("present")
+
         class FakeMaster:
             editor_window = None
             day_detail_window = FakeDetail()
@@ -1122,8 +1350,8 @@ class WindowBehaviorTests(unittest.TestCase):
             def after(self, _delay: int, callback) -> None:
                 callback()
 
-            def present_overlay(self, _window) -> None:
-                actions.append("present")
+            def _leave_modal(self, _window) -> None:
+                actions.append("leave")
 
         master = FakeMaster()
         editor = type("FakeEditor", (), {"master_app": master, "destroy": lambda self: actions.append("destroy")})()
@@ -1132,7 +1360,7 @@ class WindowBehaviorTests(unittest.TestCase):
         EventEditor.close(editor)
 
         self.assertIsNone(master.editor_window)
-        self.assertEqual(actions, ["destroy", "refresh", "present"])
+        self.assertEqual(actions, ["leave", "destroy", "refresh", "present"])
 
     def test_editor_cancel_without_detail_only_returns_to_main_window(self) -> None:
         actions: list[str] = []
@@ -1147,6 +1375,9 @@ class WindowBehaviorTests(unittest.TestCase):
             def restore_window_mode_if_idle(self) -> None:
                 actions.append("main")
 
+            def _leave_modal(self, _window) -> None:
+                actions.append("leave")
+
         master = FakeMaster()
         editor = type("FakeEditor", (), {"master_app": master, "destroy": lambda self: actions.append("destroy")})()
         master.editor_window = editor
@@ -1154,7 +1385,7 @@ class WindowBehaviorTests(unittest.TestCase):
         EventEditor.close(editor)
 
         self.assertIsNone(master.editor_window)
-        self.assertEqual(actions, ["destroy", "main"])
+        self.assertEqual(actions, ["leave", "destroy", "main"])
 
     def test_event_stripe_uses_item_color_independently_from_type(self) -> None:
         theme = type("FakeTheme", (), {"event_done": "#A0A0A0"})()
