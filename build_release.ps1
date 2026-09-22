@@ -62,11 +62,31 @@ $updaterBuildArguments = @(
 )
 Invoke-PythonBuild -Arguments $updaterBuildArguments -FailureMessage "DesktopCalendarUpdater build failed"
 
+$repairBuildArguments = @(
+    "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--onefile",
+    "--name", "DesktopCalendarRepair",
+    "--icon", (Join-Path $projectDir "assets\calendar.ico"),
+    "--manifest", $manifestPath,
+    "--distpath", (Join-Path $buildDir "repair-dist"),
+    "--workpath", (Join-Path $buildDir "repair"),
+    "--specpath", (Join-Path $buildDir "spec"),
+    "repair_launcher.py"
+)
+Invoke-PythonBuild -Arguments $repairBuildArguments -FailureMessage "DesktopCalendarRepair build failed"
+
 Copy-Item (Join-Path $buildDir "updater-dist\DesktopCalendarUpdater.exe") $appDir -Force
+Copy-Item (Join-Path $buildDir "repair-dist\DesktopCalendarRepair.exe") $appDir -Force
 Copy-Item (Join-Path $projectDir "README.md") $appDir -Force
 Copy-Item (Join-Path $projectDir "LICENSE") $appDir -Force
 
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+$repairAsset = Join-Path $releaseDir "DesktopCalendarRepair.exe"
+Copy-Item (Join-Path $buildDir "repair-dist\DesktopCalendarRepair.exe") $repairAsset -Force
+$repairHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $repairAsset).Hash.ToLowerInvariant()
+"$repairHash  DesktopCalendarRepair.exe" | Set-Content `
+    -LiteralPath (Join-Path $releaseDir "DesktopCalendarRepair.exe.sha256") `
+    -Encoding ascii
+
 $archive = Join-Path $releaseDir "DesktopCalendar-win64.zip"
 if (Test-Path $archive) {
     Remove-Item -LiteralPath $archive -Force

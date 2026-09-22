@@ -12,7 +12,7 @@
 
 点击右上角横线或按 `Alt+F4` 只会把月历隐藏到系统通知区域，日程提醒和习惯清单仍会继续运行；需要完全退出时，请右键托盘图标选择“退出桌面月历”。
 
-不要只把 EXE 单独移出解压目录；程序旁边的 `_internal` 和 `DesktopCalendarUpdater.exe` 都是运行、更新所需文件。
+不要只把 EXE 单独移出解压目录；程序旁边的 `_internal`、`DesktopCalendarUpdater.exe` 和 `DesktopCalendarRepair.exe` 都应保留。
 
 ## 功能
 
@@ -52,6 +52,12 @@
 4. 覆盖程序文件并自动重启。
 
 源码模式只检查版本，不会覆盖源码；自动安装仅在打包后的发布版中启用。
+
+### 主程序无法启动时
+
+双击 `DesktopCalendarRepair.exe`，点击“检查并修复”。它可以放在月历安装文件夹内；若单独下载到别处，启动时按提示选择原来的月历安装文件夹。它不依赖月历主窗口，可以下载并校验最新正式包；即使最新版本与当前版本相同，也能重新安装程序文件。修复前请先从通知区域完全退出仍在运行的月历。个人事项、习惯与设置保存在 `%APPDATA%\DesktopCalendar\calendar_data.json`，修复程序不会删除这个文件。
+
+如果旧安装包没有 `DesktopCalendarRepair.exe`，可从后续 [GitHub Releases](https://github.com/AstroloNeko/desktop-calendar-widget/releases) 单独下载此修复程序，或下载新版 ZIP 并解压。当前 v0.8.2 发布包尚不包含此工具。
 
 ## 常用操作
 
@@ -93,7 +99,7 @@ py -3 -m pip install pyinstaller
 powershell -ExecutionPolicy Bypass -File .\build_release.ps1
 ```
 
-生成结果位于 `release/`。发布 Release 时必须同时上传 ZIP 和对应的 `.sha256` 文件，否则客户端会拒绝自动安装。
+生成结果位于 `release/`。发布 Release 时必须同时上传 ZIP 和对应的 `.sha256` 文件，否则客户端会拒绝自动安装；另外上传独立的 `DesktopCalendarRepair.exe` 及其 `.sha256`，供主程序无法启动时单独下载。
 
 ## 测试
 
