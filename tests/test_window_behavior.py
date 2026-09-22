@@ -24,6 +24,7 @@ from app import (
     parse_event_due,
 )
 from calendar_core import Event, RoutineItem
+from dpi_utils import WorkArea
 
 
 class _AvailableTray:
@@ -50,6 +51,52 @@ class _FakeCalendar:
 
 
 class WindowBehaviorTests(unittest.TestCase):
+    def test_startup_geometry_falls_back_from_corrupt_compact_and_legacy_values(self) -> None:
+        geometries = []
+        fake = SimpleNamespace(
+            store=SimpleNamespace(
+                grouped_ddl_events=lambda: ([], []),
+                settings={
+                    "compact_geometry": {"width": 372, "height": 10**30, "x": 10**30, "y": 0},
+                    "x": 10**30,
+                    "y": -10**30,
+                },
+            ),
+            dpi=SimpleNamespace(
+                work_area=lambda: WorkArea(0, 0, 2880, 1620),
+                px=lambda value: value * 2,
+                logical=lambda value: value // 2,
+            ),
+            _desired_window_height=lambda *_args: 548,
+            update_idletasks=lambda: None,
+            geometry=lambda value: geometries.append(value),
+        )
+        with patch("app.clamp_to_work_area", side_effect=lambda x, y, *_args: (x, y)), \
+             patch("app.geometry_at", side_effect=lambda *args: args):
+            CalendarApp._set_initial_geometry(fake)
+        self.assertEqual(geometries, [(372, 548, 2084, 88)])
+
+    def test_startup_geometry_keeps_valid_negative_multimonitor_position(self) -> None:
+        geometries = []
+        fake = SimpleNamespace(
+            store=SimpleNamespace(
+                grouped_ddl_events=lambda: ([], []),
+                settings={"compact_geometry": {"width": 372, "height": 548, "x": -1800, "y": -100}},
+            ),
+            dpi=SimpleNamespace(
+                work_area=lambda: WorkArea(-1920, -200, 0, 880),
+                px=lambda value: value,
+                logical=lambda value: value,
+            ),
+            _desired_window_height=lambda *_args: 548,
+            update_idletasks=lambda: None,
+            geometry=lambda value: geometries.append(value),
+        )
+        with patch("app.clamp_to_work_area", side_effect=lambda x, y, *_args: (x, y)), \
+             patch("app.geometry_at", side_effect=lambda *args: args):
+            CalendarApp._set_initial_geometry(fake)
+        self.assertEqual(geometries, [(372, 548, -1800, -100)])
+
     def test_owned_messagebox_temporarily_transfers_and_restores_grab(self) -> None:
         actions: list[object] = []
 

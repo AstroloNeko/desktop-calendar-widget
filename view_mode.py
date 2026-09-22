@@ -7,6 +7,21 @@ from dpi_utils import WorkArea, scale_px, unscale_px
 
 
 VIEW_MODES = ("compact", "global")
+MAX_SAVED_DIMENSION = 16384
+MAX_SAVED_COORDINATE = 1_000_000
+
+
+def saved_window_coordinate(value: object) -> Optional[int]:
+    """Accept a signed device-pixel position without permitting corrupt Win32 coordinates."""
+    if isinstance(value, bool):
+        return None
+    try:
+        coordinate = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if isinstance(value, float) and coordinate != value:
+        return None
+    return coordinate if -MAX_SAVED_COORDINATE <= coordinate <= MAX_SAVED_COORDINATE else None
 
 
 def normalize_view_mode(value: object) -> str:
@@ -36,15 +51,21 @@ class WindowGeometry:
         if not isinstance(value, Mapping):
             return None
         try:
-            geometry = cls(
-                width=int(value["width"]),
-                height=int(value["height"]),
-                x=int(value["x"]),
-                y=int(value["y"]),
-            )
+            x = saved_window_coordinate(value["x"])
+            y = saved_window_coordinate(value["y"])
+            width = saved_window_coordinate(value["width"])
+            height = saved_window_coordinate(value["height"])
+            if x is None or y is None or width is None or height is None:
+                return None
+            geometry = cls(width=width, height=height, x=x, y=y)
         except (KeyError, TypeError, ValueError, OverflowError):
             return None
-        if geometry.width < minimum_width or geometry.height < minimum_height:
+        if (
+            geometry.width < minimum_width
+            or geometry.height < minimum_height
+            or geometry.width > MAX_SAVED_DIMENSION
+            or geometry.height > MAX_SAVED_DIMENSION
+        ):
             return None
         return geometry
 

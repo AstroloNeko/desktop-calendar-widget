@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from dpi_utils import enable_dpi_awareness
+from dpi_utils import enable_dpi_awareness, work_area_for_rect
 
 
 IS_WINDOWS = os.name == "nt"
@@ -245,28 +245,9 @@ def clamp_to_work_area(x: int, y: int, width: int, height: int) -> tuple[int, in
     if not IS_WINDOWS:
         return max(4, x), max(4, y)
 
-    class Rect(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-    class MonitorInfo(ctypes.Structure):
-        _fields_ = [
-            ("cbSize", ctypes.c_ulong),
-            ("rcMonitor", Rect),
-            ("rcWork", Rect),
-            ("dwFlags", ctypes.c_ulong),
-        ]
-
-    user32 = ctypes.windll.user32
-    user32.MonitorFromRect.restype = ctypes.c_void_p
-    rectangle = Rect(x, y, x + width, y + height)
-    monitor = user32.MonitorFromRect(ctypes.byref(rectangle), 2)  # MONITOR_DEFAULTTONEAREST
-    if not monitor:
+    work = work_area_for_rect(x, y, width, height)
+    if (work.left, work.top, work.right, work.bottom) == (x, y, x + width, y + height):
         return x, y
-    info = MonitorInfo()
-    info.cbSize = ctypes.sizeof(MonitorInfo)
-    if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
-        return x, y
-    work = info.rcWork
     max_x = max(work.left, work.right - width)
     max_y = max(work.top, work.bottom - height)
     return max(work.left + 4, min(x, max_x - 4)), max(work.top + 4, min(y, max_y - 4))

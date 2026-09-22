@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import math
 import os
 import tkinter as tk
@@ -13,8 +14,26 @@ BASE_DPI = 96
 IS_WINDOWS = os.name == "nt"
 PER_MONITOR_AWARE_V2 = -4
 PROCESS_PER_MONITOR_DPI_AWARE = 2
+MAX_WORK_AREA_COORDINATE = 1_000_000
+MAX_WORK_AREA_DIMENSION = 65_536
 
 _active_dpi = BASE_DPI
+
+
+class MonitorInfo(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+def _win32_function(function, argtypes: list[type], restype: type):
+    """Declare the full Win32 signature before passing Python integers as handles."""
+    function.argtypes = argtypes
+    function.restype = restype
+    return function
 
 
 def _context_matches(value: int) -> bool:
@@ -22,9 +41,13 @@ def _context_matches(value: int) -> bool:
         return False
     try:
         user32 = ctypes.windll.user32
-        user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
-        context = user32.GetThreadDpiAwarenessContext()
-        return bool(user32.AreDpiAwarenessContextsEqual(ctypes.c_void_p(context), ctypes.c_void_p(value)))
+        get_context = _win32_function(user32.GetThreadDpiAwarenessContext, [], wintypes.HANDLE)
+        contexts_equal = _win32_function(
+            user32.AreDpiAwarenessContextsEqual,
+            [wintypes.HANDLE, wintypes.HANDLE],
+            wintypes.BOOL,
+        )
+        return bool(contexts_equal(get_context(), wintypes.HANDLE(value)))
     except (AttributeError, OSError):
         return False
 
@@ -53,12 +76,22 @@ def enable_dpi_awareness() -> str:
     if current in ("per_monitor_v2", "per_monitor_v1"):
         return current
     try:
-        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(PER_MONITOR_AWARE_V2)):
+        set_context = _win32_function(
+            ctypes.windll.user32.SetProcessDpiAwarenessContext,
+            [wintypes.HANDLE],
+            wintypes.BOOL,
+        )
+        if set_context(wintypes.HANDLE(PER_MONITOR_AWARE_V2)):
             return "per_monitor_v2"
     except (AttributeError, OSError):
         pass
     try:
-        result = ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE)
+        set_awareness = _win32_function(
+            ctypes.windll.shcore.SetProcessDpiAwareness,
+            [ctypes.c_int],
+            ctypes.c_long,
+        )
+        result = set_awareness(PROCESS_PER_MONITOR_DPI_AWARE)
         if result in (0, -2147024891):  # S_OK or E_ACCESSDENIED (manifest/already configured)
             current = dpi_awareness_mode()
             if current != "unknown":
@@ -66,7 +99,8 @@ def enable_dpi_awareness() -> str:
     except (AttributeError, OSError):
         pass
     try:
-        if ctypes.windll.user32.SetProcessDPIAware():
+        set_aware = _win32_function(ctypes.windll.user32.SetProcessDPIAware, [], wintypes.BOOL)
+        if set_aware():
             return "system_aware"
     except (AttributeError, OSError):
         pass
@@ -115,8 +149,8 @@ def window_handle(widget: tk.Misc) -> Optional[int]:
         widget.update_idletasks()
         child = int(widget.winfo_id())
         user32 = ctypes.windll.user32
-        user32.GetAncestor.restype = ctypes.c_void_p
-        root = user32.GetAncestor(child, 2)  # GA_ROOT
+        get_ancestor = _win32_function(user32.GetAncestor, [wintypes.HWND, wintypes.UINT], wintypes.HWND)
+        root = get_ancestor(wintypes.HWND(child), 2)  # GA_ROOT
         return int(root or child)
     except (AttributeError, OSError, tk.TclError, ValueError):
         return None
@@ -129,8 +163,8 @@ def dpi_for_window(widget: tk.Misc, fallback: int = BASE_DPI) -> int:
     if hwnd:
         try:
             user32 = ctypes.windll.user32
-            user32.GetDpiForWindow.restype = ctypes.c_uint
-            dpi = int(user32.GetDpiForWindow(hwnd))
+            get_dpi = _win32_function(user32.GetDpiForWindow, [wintypes.HWND], wintypes.UINT)
+            dpi = int(get_dpi(wintypes.HWND(hwnd)))
             if dpi:
                 return dpi
         except (AttributeError, OSError):
@@ -143,8 +177,8 @@ def system_dpi(fallback: int = BASE_DPI) -> int:
         return fallback
     try:
         user32 = ctypes.windll.user32
-        user32.GetDpiForSystem.restype = ctypes.c_uint
-        return int(user32.GetDpiForSystem()) or fallback
+        get_dpi = _win32_function(user32.GetDpiForSystem, [], wintypes.UINT)
+        return int(get_dpi()) or fallback
     except (AttributeError, OSError):
         return fallback
 
@@ -168,24 +202,41 @@ class WorkArea:
 def work_area_for_window(widget: tk.Misc) -> WorkArea:
     if not IS_WINDOWS:
         return WorkArea(0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
-
-    class Rect(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-    class MonitorInfo(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", Rect), ("rcWork", Rect), ("dwFlags", ctypes.c_ulong)]
-
+    fallback = WorkArea(0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
     hwnd = window_handle(widget)
     if not hwnd:
-        return WorkArea(0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
+        return fallback
     user32 = ctypes.windll.user32
-    user32.MonitorFromWindow.restype = ctypes.c_void_p
-    monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+    monitor_from_window = _win32_function(
+        user32.MonitorFromWindow, [wintypes.HWND, wintypes.DWORD], wintypes.HANDLE
+    )
+    monitor = monitor_from_window(wintypes.HWND(hwnd), 2)  # MONITOR_DEFAULTTONEAREST
+    return _monitor_work_area(user32, monitor, fallback)
+
+
+def _monitor_work_area(user32, monitor: int | None, fallback: WorkArea) -> WorkArea:
+    if not monitor:
+        return fallback
+    get_monitor_info = _win32_function(
+        user32.GetMonitorInfoW,
+        [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)],
+        wintypes.BOOL,
+    )
     info = MonitorInfo()
     info.cbSize = ctypes.sizeof(MonitorInfo)
-    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
-        return WorkArea(0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
-    return WorkArea(info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom)
+    if not get_monitor_info(wintypes.HANDLE(monitor), ctypes.byref(info)):
+        return fallback
+    work = info.rcWork
+    if (
+        not all(
+            -MAX_WORK_AREA_COORDINATE <= edge <= MAX_WORK_AREA_COORDINATE
+            for edge in (work.left, work.top, work.right, work.bottom)
+        )
+        or not 0 < work.right - work.left <= MAX_WORK_AREA_DIMENSION
+        or not 0 < work.bottom - work.top <= MAX_WORK_AREA_DIMENSION
+    ):
+        return fallback
+    return WorkArea(work.left, work.top, work.right, work.bottom)
 
 
 def work_area_for_rect(x: int, y: int, width: int, height: int) -> WorkArea:
@@ -193,21 +244,14 @@ def work_area_for_rect(x: int, y: int, width: int, height: int) -> WorkArea:
     if not IS_WINDOWS:
         return WorkArea(x, y, x + max(1, width), y + max(1, height))
 
-    class Rect(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-    class MonitorInfo(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", Rect), ("rcWork", Rect), ("dwFlags", ctypes.c_ulong)]
-
     user32 = ctypes.windll.user32
-    user32.MonitorFromRect.restype = ctypes.c_void_p
-    rectangle = Rect(x, y, x + max(1, width), y + max(1, height))
-    monitor = user32.MonitorFromRect(ctypes.byref(rectangle), 2)  # MONITOR_DEFAULTTONEAREST
-    info = MonitorInfo()
-    info.cbSize = ctypes.sizeof(MonitorInfo)
-    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
-        return WorkArea(x, y, x + max(1, width), y + max(1, height))
-    return WorkArea(info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom)
+    rectangle = wintypes.RECT(x, y, x + max(1, width), y + max(1, height))
+    fallback = WorkArea(rectangle.left, rectangle.top, rectangle.right, rectangle.bottom)
+    monitor_from_rect = _win32_function(
+        user32.MonitorFromRect, [ctypes.POINTER(wintypes.RECT), wintypes.DWORD], wintypes.HANDLE
+    )
+    monitor = monitor_from_rect(ctypes.byref(rectangle), 2)  # MONITOR_DEFAULTTONEAREST
+    return _monitor_work_area(user32, monitor, fallback)
 
 
 class DpiManager:

@@ -73,7 +73,7 @@ from win_integration import (
     set_autostart,
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
-from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry
+from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
 from update_manager import (
     UpdateError,
     UpdateInfo,
@@ -4007,18 +4007,20 @@ class CalendarApp(tk.Tk):
         self.update_idletasks()
         area = self.dpi.work_area()
         window_width = self.dpi.px(WINDOW_WIDTH)
-        saved = WindowGeometry.from_mapping(self.store.settings.get("compact_geometry"))
-        if saved is not None:
+        saved = WindowGeometry.from_mapping(
+            self.store.settings.get("compact_geometry"), minimum_height=CLOSED_HEIGHT
+        )
+        maximum_height = max(CLOSED_HEIGHT, self.dpi.logical(area.height) - 48)
+        if saved is not None and saved.height <= maximum_height:
             height = saved.height
             x, y = saved.x, saved.y
         else:
-            saved_x = self.store.settings.get("x")
-            saved_y = self.store.settings.get("y")
-            try:
-                x = int(saved_x) if saved_x is not None else area.right - window_width - self.dpi.px(26)
-                y = int(saved_y) if saved_y is not None else area.top + self.dpi.px(44)
-            except (TypeError, ValueError):
+            saved_x = saved_window_coordinate(self.store.settings.get("x"))
+            saved_y = saved_window_coordinate(self.store.settings.get("y"))
+            if saved_x is None or saved_y is None:
                 x, y = area.right - window_width - self.dpi.px(26), area.top + self.dpi.px(44)
+            else:
+                x, y = saved_x, saved_y
         window_height = self.dpi.px(height)
         x, y = clamp_to_work_area(x, y, window_width, window_height)
         self.geometry(geometry_at(WINDOW_WIDTH, height, x, y))
