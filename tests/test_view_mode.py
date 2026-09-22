@@ -23,6 +23,27 @@ class ViewModeTests(unittest.TestCase):
         self.assertIsNone(WindowGeometry.from_mapping(None))
         self.assertIsNone(WindowGeometry.from_mapping({"width": "bad", "height": 600, "x": 0, "y": 0}))
         self.assertIsNone(WindowGeometry.from_mapping({"width": 0, "height": 600, "x": 0, "y": 0}))
+        for field in ("width", "height", "x", "y"):
+            with self.subTest(field=field):
+                saved = {"width": 372, "height": 666, "x": 100, "y": 50}
+                saved[field] = 10**30
+                self.assertIsNone(WindowGeometry.from_mapping(saved))
+        self.assertIsNone(WindowGeometry.from_mapping({"width": 372.5, "height": 666, "x": 100, "y": 50}))
+        self.assertIsNone(WindowGeometry.from_mapping({"width": True, "height": 666, "x": 100, "y": 50}))
+
+    def test_saved_negative_multimonitor_geometry_fits_at_common_dpis(self) -> None:
+        area = WorkArea(-3840, -200, -1920, 1080)
+        saved = {"width": 372, "height": 548, "x": -3800, "y": -100}
+        for dpi in (96, 120, 144, 168, 192):
+            with self.subTest(dpi=dpi):
+                geometry = WindowGeometry.from_mapping(saved)
+                self.assertIsNotNone(geometry)
+                fitted = fit_geometry_to_work_area(geometry, area, dpi)
+                self.assertLess(fitted.x, 0)
+                self.assertGreaterEqual(fitted.x, area.left)
+                self.assertGreaterEqual(fitted.y, area.top)
+                self.assertLessEqual(fitted.x + scale_px(fitted.width, dpi), area.right)
+                self.assertLessEqual(fitted.y + scale_px(fitted.height, dpi), area.bottom)
 
     def test_initial_global_geometry_uses_current_monitor_and_dpi(self) -> None:
         for dpi in (96, 120, 144, 168, 192):
