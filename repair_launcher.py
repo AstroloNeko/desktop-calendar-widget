@@ -32,6 +32,16 @@ class RepairError(RuntimeError):
     pass
 
 
+def repair_window_size(dpi: float, requested_width: int, requested_height: int) -> tuple[int, int]:
+    """Leave enough room for native controls at the current Windows scaling."""
+    scale = max(1.0, dpi / 96.0)
+    margin = round(24 * scale)
+    return (
+        max(round(410 * scale), requested_width + margin),
+        max(round(220 * scale), requested_height + margin),
+    )
+
+
 def repair_action(latest_version: str, installed_version: str = __version__) -> str:
     """The current release may be reinstalled, but never downgrade to an older one."""
     latest = version_tuple(latest_version)
@@ -127,18 +137,25 @@ class RepairWindow(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("桌面月历 · 修复与更新")
-        self.geometry("410x220")
         self.resizable(False, False)
+        scale = max(1.0, self.winfo_fpixels("1i") / 96.0)
+        dp = lambda value: round(value * scale)
         self.install_dir: Path | None = None
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.status = tk.StringVar(value="主程序无法打开时，可在这里检查更新或重新安装。")
         self.progress = tk.IntVar(value=0)
-        self.button = ttk.Button(self, text="检查并修复", command=self.start_check)
-        ttk.Label(self, text="桌面月历修复与更新", font=("Microsoft YaHei UI", 15, "bold")).pack(pady=(20, 9))
-        ttk.Label(self, textvariable=self.status, wraplength=360, justify="center").pack(pady=5)
-        ttk.Progressbar(self, variable=self.progress, maximum=100, length=340).pack(pady=10)
-        self.button.pack(pady=5)
-        ttk.Button(self, text="打开 GitHub 下载页", command=lambda: webbrowser.open(RELEASES_URL)).pack()
+        content = ttk.Frame(self, padding=(dp(18), dp(12)))
+        content.pack(fill="both", expand=True)
+        self.button = ttk.Button(content, text="检查并修复", command=self.start_check)
+        ttk.Label(content, text="桌面月历修复与更新", font=("Microsoft YaHei UI", 15, "bold")).pack(pady=(dp(8), dp(9)))
+        ttk.Label(content, textvariable=self.status, wraplength=dp(360), justify="center").pack(pady=dp(5))
+        ttk.Progressbar(content, variable=self.progress, maximum=100, length=dp(340)).pack(pady=dp(10))
+        self.button.pack(pady=dp(5))
+        self.download_button = ttk.Button(content, text="打开 GitHub 下载页", command=lambda: webbrowser.open(RELEASES_URL))
+        self.download_button.pack()
+        self.update_idletasks()
+        width, height = repair_window_size(self.winfo_fpixels("1i"), self.winfo_reqwidth(), self.winfo_reqheight())
+        self.geometry(f"{width}x{height}")
         self.after(80, self._poll_messages)
 
     def _busy(self, value: bool) -> None:

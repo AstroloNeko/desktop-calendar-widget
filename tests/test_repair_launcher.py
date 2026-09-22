@@ -9,6 +9,15 @@ import repair_launcher
 
 
 class RepairLauncherTests(unittest.TestCase):
+    def test_repair_window_reserves_space_for_controls_at_common_dpis(self) -> None:
+        for dpi in (96, 120, 144, 168, 192):
+            with self.subTest(dpi=dpi):
+                width, height = repair_launcher.repair_window_size(dpi, 500, 260)
+                self.assertGreaterEqual(width, round(410 * dpi / 96))
+                self.assertGreaterEqual(height, round(220 * dpi / 96))
+                self.assertGreaterEqual(width, 500 + round(24 * dpi / 96))
+                self.assertGreaterEqual(height, 260 + round(24 * dpi / 96))
+
     def test_can_update_or_reinstall_but_not_downgrade(self) -> None:
         self.assertEqual(repair_launcher.repair_action("0.8.3", "0.8.2"), "更新")
         self.assertEqual(repair_launcher.repair_action("0.8.2", "0.8.2"), "重新安装")
