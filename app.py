@@ -74,6 +74,8 @@ from win_integration import (
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
 from event_commands import EventChange, EventCommandHistory, EventPreview
+from schedule_drag import ScheduleHit
+from global_drag_ui import GlobalDragMixin
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
 from update_manager import (
     UpdateError,
@@ -2994,12 +2996,14 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.configure(value=value)
 
 
-class CalendarApp(tk.Tk):
+class CalendarApp(GlobalDragMixin, tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
         self.dpi = DpiManager(self)
         self.store = store or Store()
         self.event_commands = EventCommandHistory(self.store)
+        self._schedule_drag = None
+        self._schedule_hits: list[ScheduleHit] = []
         self.instance_guard = instance
         self.theme_name = normalize_theme_name(self.store.settings.get("theme"))
         self.store.settings["theme"] = self.theme_name
@@ -3568,6 +3572,9 @@ class CalendarApp(tk.Tk):
         self.global_date_canvas.bind("<Double-Button-1>", self._create_global_day)
         self.global_date_canvas.bind("<Button-3>", self._show_global_day_menu)
         self.global_timeline_canvas.bind("<Button-1>", self._select_global_day)
+        self.global_timeline_canvas.bind("<B1-Motion>", self._schedule_motion)
+        self.global_timeline_canvas.bind("<ButtonRelease-1>", self._schedule_release)
+        self.global_timeline_canvas.bind("<Motion>", self._schedule_hover)
         self.global_timeline_canvas.bind("<Double-Button-1>", self._create_global_day)
         self.global_timeline_canvas.bind("<Button-3>", self._show_global_day_menu)
 
@@ -3607,6 +3614,7 @@ class CalendarApp(tk.Tk):
         self.global_flow_canvas.bind("<MouseWheel>", self._global_flow_mousewheel)
         self.global_flow_header_canvas.bind("<MouseWheel>", self._global_flow_mousewheel)
         self.global_flow_canvas.bind("<ButtonPress-1>", self._start_flow_drag)
+        self.global_flow_canvas.bind("<Motion>", self._schedule_hover)
         self.global_flow_canvas.bind("<B1-Motion>", self._update_flow_drag)
         self.global_flow_canvas.bind("<ButtonRelease-1>", self._finish_flow_drag)
         self.global_flow_canvas.bind("<Double-ButtonRelease-1>", self._create_flow_day)
@@ -4284,6 +4292,8 @@ class CalendarApp(tk.Tk):
         self._apply_dpi_change(new_dpi)
 
     def _rebuild_main_ui(self, quick_value: str, quick_was_placeholder: bool) -> None:
+        if getattr(self, "_schedule_drag", None):
+            self._cancel_schedule_drag()
         if self._global_tooltip:
             self._global_tooltip.hide()
             self._global_tooltip = None
@@ -4383,8 +4393,8 @@ class CalendarApp(tk.Tk):
         self.bind("<Key-t>", lambda event: self._keyboard_command(event, self.go_today))
         self.bind("<Key-n>", lambda event: self._keyboard_command(event, self._open_primary_action))
         self.bind("<Return>", lambda event: self._keyboard_command(event, self._open_primary_action))
-        self.bind("<Prior>", lambda _event: self.change_month(-1))
-        self.bind("<Next>", lambda _event: self.change_month(1))
+        self.bind("<Prior>", lambda _event: self._schedule_page_month(-1))
+        self.bind("<Next>", lambda _event: self._schedule_page_month(1))
         self.bind("<Left>", lambda event: self._move_selection(event, -1))
         self.bind("<Right>", lambda event: self._move_selection(event, 1))
         self.bind("<Up>", lambda event: self._move_selection(event, -7))
@@ -4400,6 +4410,9 @@ class CalendarApp(tk.Tk):
             self.open_day_detail()
 
     def _handle_escape(self, _event=None) -> str:
+        if getattr(self, "_schedule_drag", None):
+            self._cancel_schedule_drag()
+            return "break"
         if self.view_mode == "global" and self.global_display_mode == "flow" and self._global_flow_drag_start:
             self._cancel_flow_drag()
         else:
@@ -4407,6 +4420,8 @@ class CalendarApp(tk.Tk):
         return "break"
 
     def render(self) -> None:
+        if getattr(self, "_schedule_drag", None):
+            self._cancel_schedule_drag()
         if self.view_mode == "global":
             self._render_global_timeline()
             if self.day_detail_window and self.day_detail_window.winfo_exists():
@@ -4494,6 +4509,8 @@ class CalendarApp(tk.Tk):
         normalized = normalize_global_display_mode(mode)
         if normalized == self.global_display_mode:
             return
+        if getattr(self, "_schedule_drag", None):
+            self._cancel_schedule_drag()
         self._cancel_flow_drag(redraw=False)
         self.global_display_mode = normalized
         self.store.settings["global_display_mode"] = normalized
@@ -4550,6 +4567,7 @@ class CalendarApp(tk.Tk):
         self._schedule_global_render()
 
     def _draw_global_timeline(self) -> None:
+        self._schedule_hits = []
         model = self.timeline_model
         if model is None or not hasattr(self, "global_timeline_canvas") or not self.global_timeline_canvas.winfo_exists():
             return
@@ -4692,6 +4710,9 @@ class CalendarApp(tk.Tk):
                 end_index = (segment.end_date - model.period_start).days
                 segment_x1 = start_index * day_width + dp(3)
                 segment_x2 = (end_index + 1) * day_width - dp(3)
+                self._schedule_hits.append(ScheduleHit(item.id, (segment_x1, y1 + dp(8), segment_x2, y2 - dp(8)),
+                    segment.start_date == item.start_date,
+                    segment.end_date == item.end_date))
                 visible_segments.append((segment_x1, segment_x2))
                 rounded_rectangle(
                     canvas,
@@ -4739,12 +4760,14 @@ class CalendarApp(tk.Tk):
                     tags=(row_tag,),
                 )
             for target in (canvas, label_canvas):
-                target.tag_bind(row_tag, "<Button-1>", lambda _event, item_id=item.id: self.select_timeline_item(item_id))
+                if target is label_canvas:
+                    target.tag_bind(row_tag, "<Button-1>", lambda _event, item_id=item.id: self.select_timeline_item(item_id))
                 target.tag_bind(row_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self.open_timeline_item(item_id))
                 target.tag_bind(row_tag, "<Button-3>", lambda event, item_id=item.id: self._show_global_event_menu(item_id, event))
                 target.tag_bind(row_tag, "<Enter>", lambda event, item_id=item.id: self._show_timeline_item_tooltip(item_id, event))
                 target.tag_bind(row_tag, "<Leave>", self._hide_global_tooltip)
 
+        self._decorate_schedule_handles(canvas)
         date_canvas.configure(scrollregion=(0, 0, content_width, header_height))
         canvas.configure(scrollregion=(0, 0, content_width, content_height), xscrollincrement=dp(12), yscrollincrement=row_height)
         label_canvas.configure(scrollregion=(0, 0, title_width, content_height), yscrollincrement=row_height)
@@ -4761,6 +4784,7 @@ class CalendarApp(tk.Tk):
             self.global_status_label.configure(text="滚轮纵向浏览 · Shift + 滚轮横向浏览 · 双击日期空白新建")
 
     def _draw_calendar_flow(self) -> None:
+        self._schedule_hits = []
         model = self.timeline_model
         layout = self.calendar_flow_layout
         if (
@@ -4957,6 +4981,9 @@ class CalendarApp(tk.Tk):
                 x2 = (block.end_column + 1) * column_width - dp(4)
                 y1 = row_y1 + day_header_height + block.lane * (card_height + lane_gap)
                 y2 = y1 + card_height
+                self._schedule_hits.append(ScheduleHit(item.id, (x1, y1, x2, y2),
+                    block.start_date == item.start_date,
+                    block.end_date == item.end_date))
                 stripe_color = theme.event_done if item.completed else item.color
                 is_selected = bool(selected and selected.id == item.id)
                 is_hovered = self._global_flow_hover_item_id == item.id
@@ -5091,7 +5118,6 @@ class CalendarApp(tk.Tk):
                         outline=theme.ddl_indicator_highlight,
                         tags=(item_tag,),
                     )
-                canvas.tag_bind(item_tag, "<Button-1>", lambda _event, item_id=item.id: self._select_flow_item(item_id))
                 canvas.tag_bind(item_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self._open_flow_item(item_id))
                 canvas.tag_bind(item_tag, "<Button-3>", lambda event, item_id=item.id: self._show_flow_item_menu(item_id, event))
                 canvas.tag_bind(item_tag, "<Enter>", lambda event, item_id=item.id: self._enter_flow_item(item_id, event))
@@ -5113,6 +5139,7 @@ class CalendarApp(tk.Tk):
                 )
                 canvas.tag_bind(more_tag, "<Button-1>", lambda _event, day=week.dates[column]: self._open_flow_day_detail(day))
 
+        self._decorate_schedule_handles(canvas)
         if not model.items:
             canvas.create_text(
                 content_width // 2,
@@ -5199,6 +5226,8 @@ class CalendarApp(tk.Tk):
         )
 
     def _start_flow_drag(self, event: tk.Event) -> Optional[str]:
+        if self._schedule_press(event):
+            return "break"
         if self._canvas_has_timeline_item(event.widget):
             return None
         selected = self._global_flow_day_from_event(event)
@@ -5226,6 +5255,8 @@ class CalendarApp(tk.Tk):
         return "break"
 
     def _update_flow_drag(self, event: tk.Event) -> Optional[str]:
+        if getattr(self, "_schedule_drag", None):
+            return self._schedule_motion(event)
         anchor = self._global_flow_drag_anchor
         if anchor is None:
             return None
@@ -5240,6 +5271,8 @@ class CalendarApp(tk.Tk):
         return "break"
 
     def _finish_flow_drag(self, event: tk.Event) -> Optional[str]:
+        if getattr(self, "_schedule_drag", None):
+            return self._schedule_release(event)
         anchor = self._global_flow_drag_anchor
         if anchor is None:
             return None
@@ -5295,6 +5328,7 @@ class CalendarApp(tk.Tk):
         return "break"
 
     def _open_flow_item(self, item_id: str) -> str:
+        self._cancel_schedule_drag()
         self.open_timeline_item(item_id)
         return "break"
 
@@ -5450,6 +5484,8 @@ class CalendarApp(tk.Tk):
         )
 
     def _select_global_day(self, event: tk.Event) -> Optional[str]:
+        if event.widget is self.global_timeline_canvas and self._schedule_press(event):
+            return "break"
         if self._canvas_has_timeline_item(event.widget):
             return None
         selected = self._global_day_from_event(event)
@@ -5939,6 +5975,7 @@ class CalendarApp(tk.Tk):
         self.render()
 
     def change_month(self, delta: int) -> None:
+        self._cancel_schedule_drag()
         index = self.shown_year * 12 + self.shown_month - 1 + delta
         year, zero_month = divmod(index, 12)
         month = zero_month + 1
@@ -6365,6 +6402,8 @@ class CalendarApp(tk.Tk):
 
     def _prepare_modal_open(self) -> None:
         """Save the owner band before demoting it for the first modal."""
+        if getattr(self, "_schedule_drag", None):
+            self._cancel_schedule_drag()
         self._prune_modal_stack()
         if not self._modal_stack and not self._modal_state_saved:
             try:
@@ -6434,6 +6473,8 @@ class CalendarApp(tk.Tk):
         return True
 
     def _refresh_event_change(self, change: EventChange, *, focus_day: Optional[date] = None) -> None:
+        if getattr(self, "_schedule_drag", None):
+            self._cancel_schedule_drag()
         previous_selection = self.selected
         previous_month = (self.shown_year, self.shown_month)
         if focus_day is not None:
@@ -6725,6 +6766,8 @@ class CalendarApp(tk.Tk):
         self._update_mode_badge()
 
     def _on_focus_out(self, _event=None) -> None:
+        if getattr(self, "_schedule_drag", None):
+            self.after_idle(self._schedule_check_focus)
         if (
             self._startup_foreground_active
             or self.view_mode != "compact"
@@ -6900,6 +6943,7 @@ class CalendarApp(tk.Tk):
         menu.tk_popup(x, y)
 
     def set_theme(self, name: str) -> None:
+        self._cancel_schedule_drag()
         normalized = normalize_theme_name(name)
         if normalized == self.theme_name:
             return
@@ -7276,6 +7320,7 @@ class CalendarApp(tk.Tk):
         self.withdraw()
 
     def on_close(self) -> None:
+        self._cancel_schedule_drag()
         try:
             self._save_window_settings()
         except (OSError, tk.TclError):

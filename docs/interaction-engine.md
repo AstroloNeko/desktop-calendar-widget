@@ -73,3 +73,21 @@ event history because they can delete category links or change many inherited
 colors. Untracked changes to a task cause a conflict instead of silent overwrite.
 Undo/redo failures preserve the stacks and data. History is not saved and is
 empty after every restart. Nothing is pushed, merged or released by this phase.
+
+## Phase 2: shared scheduling gestures
+
+`schedule_drag.ScheduleDrag` owns the immutable source snapshot, threshold,
+operation (`move`, `start`, `end`), validation and final `EventPreview`.
+`GlobalDragMixin` only translates Canvas coordinates, manages grabs/cancellation
+and draws a small overlay at most once per 16 ms. Both renderers register
+`ScheduleHit` rectangles; only actual first/last effective dates have resize
+handles, including single-day events. Clipped or intermediate weekly pieces
+do not invent endpoints.
+
+Movement preserves the offset of the grabbed day relative to the original
+start. Resize uses `EventCommandHistory.preview_schedule` and Store's effective
+date rules. No Store writes occur before release. Release outside, Esc, modal
+opening, theme/view changes, external event edits and focus loss cancel safely.
+Horizontal edge dwell scrolls Timeline first, then changes month; Flow changes
+month after a 750 ms dwell. PgUp/PgDn also navigate while retaining the gesture.
+Only deliberate month navigation redraws the complete renderer during a drag.
