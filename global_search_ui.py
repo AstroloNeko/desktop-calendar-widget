@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from event_search import EventSearchService
+from search_palette_ui import PaletteList
 
 
 class GlobalSearchMixin:
@@ -47,6 +48,8 @@ class GlobalSearchMixin:
                 self._search_reveal_event_id = event.id
                 self._render_global_timeline(refresh_sidebar=False, select_event_id=event.id)
                 self._scroll_search_target_into_view(event.id)
+                if hasattr(self, "_flash_event"):
+                    self._flash_event(event.id)
             # Opening the existing editor guarantees access even when Flow
             # packs the task below '+更多', or Compact's list is collapsed.
             self.open_editor(event)
@@ -78,6 +81,7 @@ class GlobalSearchMixin:
             item = self.timeline_model.item_by_id(event_id)
             if item:
                 self._global_xview("moveto", (item.visible_start - self.timeline_model.period_start).days / len(self.timeline_model.days))
+            self._refresh_timeline_rows()
 
 
 class SearchDialog(tk.Toplevel):
@@ -89,7 +93,9 @@ class SearchDialog(tk.Toplevel):
         self._debounce = None
         self._poll_job = None
         self._results = ()
-        self._images = []
+        self._pending = True
+        self._activate_when_ready = False
+        self._activation_job = None
         self._previous_focus = app.focus_get()
         self.title("全局搜索 · 快捷命令")
         self.resizable(True, True)
@@ -99,6 +105,8 @@ class SearchDialog(tk.Toplevel):
         self.minsize(dp(300), dp(240))
         shell = tk.Frame(self, bg=theme.panel_background, padx=dp(14), pady=dp(12))
         shell.pack(fill="both", expand=True)
+        tk.Label(shell, text="搜索事项或执行命令…", anchor="w", bg=theme.panel_background,
+                 fg=theme.text_primary, font=(font, 10, "bold")).pack(fill="x", pady=(0, dp(9)))
         self.query = tk.StringVar()
         self.entry = tk.Entry(shell, textvariable=self.query, bg=theme.input_background,
                               fg=theme.text_primary, insertbackground=theme.text_primary,
@@ -108,20 +116,13 @@ class SearchDialog(tk.Toplevel):
         self.hint = tk.Label(shell, text="搜索标题、备注、分类，或输入日期 / 快捷命令", anchor="w",
                              bg=theme.panel_background, fg=theme.text_muted, font=(font, 8))
         self.hint.pack(fill="x", pady=dp(7))
-        style = ttk.Style(self)
-        style.configure("Search.Treeview", background=theme.panel_background, fieldbackground=theme.panel_background,
-                        foreground=theme.text_primary, font=(font, 9), rowheight=dp(48), borderwidth=0)
-        style.map("Search.Treeview", background=[("selected", theme.accent_soft)],
-                  foreground=[("selected", theme.text_primary)])
         frame = tk.Frame(shell, bg=theme.panel_background)
         frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(frame, show="tree", selectmode="browse", style="Search.Treeview")
-        self.tree.column("#0", stretch=True, minwidth=dp(100))
+        self.tree = PaletteList(frame, app, font)
         scrollbar = ttk.Scrollbar(frame, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.scrollbar = scrollbar
         scrollbar.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.tag_configure("completed", foreground=theme.text_done)
         self.tree.bind("<ButtonRelease-1>", self._click)
         self.bind("<Escape>", lambda _event: self.close() or "break")
         self.bind("<Return>", lambda _event: self.activate() or "break")
@@ -135,9 +136,11 @@ class SearchDialog(tk.Toplevel):
         self.bind("<Control-k>", lambda _event: self.present() or "break")
         for sequence in ("<Control-z>", "<Control-y>", "<Control-Shift-Z>"):
             self.bind(sequence, lambda _event: "break")
-        self.query.trace_add("write", self._changed)
+        self._query_trace = self.query.trace_add("write", self._changed)
         area = app.dpi.work_area()
-        center(self, app, min(640, app.dpi.logical(area.width) - 32), min(460, app.dpi.logical(area.height) - 48), y_offset=32)
+        center(self, app, min(600, app.dpi.logical(area.width) - 32), min(428, app.dpi.logical(area.height) - 48), y_offset=32)
+        self._palette_dpi = app.dpi.dpi
+        self.bind("<Configure>", self._check_palette_dpi, add="+")
         self.request()
         self._poll_job = self.after(30, self._poll)
 
@@ -147,15 +150,27 @@ class SearchDialog(tk.Toplevel):
         self.entry.focus_force()
 
     def _changed(self, *_args):
+        if self._activation_job:
+            self.after_cancel(self._activation_job)
+            self._activation_job = None
         self.app.search_service.cancel_pending()
         self.ticket = None
-        self._show(())
+        self._results = ()
+        self._pending = True
+        self._activate_when_ready = False
+        self.tree.set_pending()
         self.hint.configure(text="正在搜索…")
         if self._debounce:
             self.after_cancel(self._debounce)
-        self._debounce = self.after(70, self.request)
+        self._debounce = self.after(45, self._debounced_request)
+
+    def _debounced_request(self):
+        self._debounce = None
+        self.request()
 
     def request(self):
+        if self._debounce:
+            self.after_cancel(self._debounce)
         self._debounce = None
         if not self._closed:
             self.ticket = self.app.search_service.request(self.app.store, self.query.get())
@@ -168,28 +183,23 @@ class SearchDialog(tk.Toplevel):
         if delivery and delivery[0] == self.ticket:
             _, results, error = delivery
             self._show(results, error)
-        self._poll_job = self.after(30, self._poll)
+        self._poll_job = self.after(20, self._poll)
 
     def _show(self, results, error=None):
+        self._pending = False
         self._results = results
-        children = self.tree.get_children()
-        if children:
-            self.tree.delete(*children)
-        self._images.clear()
-        dp, theme = self.app.dpi.px, self.app.theme
-        for index, result in enumerate(results):
-            doc = result.document
-            image = tk.PhotoImage(master=self, width=dp(5), height=dp(28))
-            image.put(doc.color if doc else theme.accent, to=(0, 0, dp(5), dp(28)))
-            self._images.append(image)
-            # One row, two bounded lines; details remain available in the editor.
-            title = result.title.replace("\n", " ")
-            self.tree.insert("", "end", iid=str(index), text=f"{title}\n{result.detail}", image=image,
-                             tags=("completed",) if doc and doc.completed else ())
-        if results:
-            self.tree.selection_set("0")
-            self.tree.focus("0")
+        self.tree.set_results(results, self.query.get(), {event.id: event.event_type for event in self.app.store.events})
         self.hint.configure(text=f"搜索失败：{error}" if error else "没有匹配事项或命令" if not results else f"{len(results)} 条结果（事项最多显示 100 条） · ↑↓ 选择 · Enter 打开 · Esc 关闭")
+        if self._activate_when_ready:
+            self._activate_when_ready = False
+            if not error:
+                self._queue_activate()
+
+    def _check_palette_dpi(self, event):
+        if event.widget is self and self._palette_dpi != self.app.dpi.dpi:
+            self._palette_dpi = self.app.dpi.dpi
+            self.minsize(self.app.dpi.px(300), self.app.dpi.px(240))
+            self.tree.reflow()
 
     def move(self, delta):
         if self._results:
@@ -201,13 +211,24 @@ class SearchDialog(tk.Toplevel):
         return "break"
 
     def _click(self, event):
+        if self._pending:
+            return "break"
         row = self.tree.identify_row(event.y)
         if row:
             self.tree.selection_set(row)
-            self.after_idle(self.activate)
+            self._queue_activate()
         return "break"
 
+    def _queue_activate(self):
+        if self._activation_job:
+            self.after_cancel(self._activation_job)
+        self._activation_job = self.after_idle(self.activate)
+
     def activate(self):
+        self._activation_job = None
+        if self._pending and not self._closed:
+            self._activate_when_ready = True
+            return
         selected = self.tree.selection()
         if not selected or self._closed:
             return
@@ -219,15 +240,21 @@ class SearchDialog(tk.Toplevel):
         if self._closed:
             return
         self._closed = True
-        for job in (self._debounce, self._poll_job):
+        for job in (self._debounce, self._poll_job, self._activation_job):
             if job:
                 self.after_cancel(job)
+        query = self.query
+        query.trace_remove("write", self._query_trace)
         self.app.search_service.cancel_pending()
         if self.grab_current() is self:
             self.grab_release()
         self.app._leave_modal(self)
         self.app.search_window = None
         self.destroy()
+        # Tk Variables must be released on the UI thread, not left in a widget
+        # reference cycle that a background search allocation might collect.
+        self.query = None
+        del query
         if restore_focus:
             try:
                 target = self._previous_focus

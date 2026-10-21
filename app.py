@@ -77,6 +77,7 @@ from event_commands import EventChange, EventCommandHistory, EventPreview
 from schedule_drag import ScheduleHit
 from global_drag_ui import GlobalDragMixin
 from global_search_ui import GlobalSearchMixin
+from interaction_visuals import CanvasLayer, InteractionFeedbackMixin, visible_rows
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
 from update_manager import (
     UpdateError,
@@ -2999,7 +3000,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.configure(value=value)
 
 
-class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
+class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
         self.dpi = DpiManager(self)
@@ -3012,6 +3013,9 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         self.search_font = FONT
         self.search_center = center_toplevel
         self._search_reveal_event_id = None
+        self._feedback_job = None
+        self._feedback_label = None
+        self._timeline_rows_job = None
         self.instance_guard = instance
         self.theme_name = normalize_theme_name(self.store.settings.get("theme"))
         self.store.settings["theme"] = self.theme_name
@@ -3360,7 +3364,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
             outlined=True,
         )
         routines.pack(side="right", pady=dp(4), padx=(0, dp(3)))
-        Tooltip(add, "打开当天详情并管理事项")
+        Tooltip(add, "新建事项")
         Tooltip(routines, "管理习惯清单：工作日习惯与一次性待办")
         for widget in (self.agenda_bar, self.agenda_toggle, self.agenda_title, self.agenda_count):
             widget.bind("<Button-1>", lambda _event: self.toggle_agenda())
@@ -3585,6 +3589,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         self.global_timeline_canvas.bind("<B1-Motion>", self._schedule_motion)
         self.global_timeline_canvas.bind("<ButtonRelease-1>", self._schedule_release)
         self.global_timeline_canvas.bind("<Motion>", self._schedule_hover)
+        self.global_timeline_canvas.bind("<Leave>", self._hide_schedule_edge)
         self.global_timeline_canvas.bind("<Double-Button-1>", self._create_global_day)
         self.global_timeline_canvas.bind("<Button-3>", self._show_global_day_menu)
 
@@ -3625,6 +3630,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         self.global_flow_header_canvas.bind("<MouseWheel>", self._global_flow_mousewheel)
         self.global_flow_canvas.bind("<ButtonPress-1>", self._start_flow_drag)
         self.global_flow_canvas.bind("<Motion>", self._schedule_hover)
+        self.global_flow_canvas.bind("<Leave>", self._hide_schedule_edge)
         self.global_flow_canvas.bind("<B1-Motion>", self._update_flow_drag)
         self.global_flow_canvas.bind("<ButtonRelease-1>", self._finish_flow_drag)
         self.global_flow_canvas.bind("<Double-ButtonRelease-1>", self._create_flow_day)
@@ -4302,6 +4308,10 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         self._apply_dpi_change(new_dpi)
 
     def _rebuild_main_ui(self, quick_value: str, quick_was_placeholder: bool) -> None:
+        self._clear_feedback()
+        if self._timeline_rows_job:
+            self.after_cancel(self._timeline_rows_job)
+            self._timeline_rows_job = None
         if getattr(self, "_schedule_drag", None):
             self._cancel_schedule_drag()
         if self._global_tooltip:
@@ -4485,7 +4495,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
     def _schedule_global_render(self, _event=None) -> None:
         if self.view_mode != "global" or self._global_render_job:
             return
-        self._global_render_job = self.after_idle(self._finish_global_render)
+        self._global_render_job = self.after(32, self._finish_global_render)
 
     def _finish_global_render(self) -> None:
         self._global_render_job = None
@@ -4505,14 +4515,14 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
             reveal_event_ids=(self._search_reveal_event_id,) if self._search_reveal_event_id else (),
         )
         self.timeline_model = model
-        self.calendar_flow_layout = build_calendar_flow_layout(model)
+        self.calendar_flow_layout = build_calendar_flow_layout(model) if self.global_display_mode == "flow" else None
         if select_event_id is not None:
             self.timeline_selection.select(select_event_id, model)
         self.timeline_selection.get(model)
         self.global_month_label.configure(text=f"{model.year}年 {model.month}月")
         unfinished = sum(not item.completed for item in model.items)
         ddl_count = sum(bool(item.ddl_date) and not item.completed for item in model.items)
-        reveal_hint = " · 正在临时显示搜索事项" if self._search_reveal_event_id else ""
+        reveal_hint = " · 正在临时显示搜索事项" if self._search_reveal_event_id and model.item_by_id(self._search_reveal_event_id) else ""
         self.global_summary_label.configure(text=f"本月 {len(model.items)} 项工作 · {unfinished} 项未完成 · {ddl_count} 个 DDL{reveal_hint}")
         if refresh_sidebar:
             self._refresh_global_category_filter_button()
@@ -4557,6 +4567,9 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
                 button.draw()
 
     def _draw_active_global_view(self) -> None:
+        if self._global_render_job:
+            self.after_cancel(self._global_render_job)
+            self._global_render_job = None
         self._update_global_display_mode_widgets()
         if self.global_display_mode == "flow":
             self._draw_calendar_flow()
@@ -4581,7 +4594,8 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
             self.global_detail_notes.configure(wraplength=wraplength)
         self._schedule_global_render()
 
-    def _draw_global_timeline(self) -> None:
+    def _draw_global_timeline(self, *, rows_only: bool = False) -> None:
+        self._schedule_hover_key = None
         self._schedule_hits = []
         model = self.timeline_model
         if model is None or not hasattr(self, "global_timeline_canvas") or not self.global_timeline_canvas.winfo_exists():
@@ -4592,8 +4606,13 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         corner = self.global_corner_canvas
         x_position = canvas.xview()[0] if canvas.bbox("all") else 0.0
         y_position = canvas.yview()[0] if canvas.bbox("all") else 0.0
-        for target in (canvas, date_canvas, label_canvas, corner):
-            target.delete("all")
+        if rows_only:
+            canvas.delete("timeline-rows")
+            label_canvas.delete("timeline-rows")
+        else:
+            for target in (canvas, date_canvas, label_canvas, corner):
+                target.delete("all")
+        canvas, date_canvas, label_canvas = CanvasLayer(canvas), CanvasLayer(date_canvas), CanvasLayer(label_canvas)
         dp = self.dpi.px
         title_width = dp(GLOBAL_TITLE_WIDTH)
         header_height = dp(GLOBAL_HEADER_HEIGHT)
@@ -4608,7 +4627,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         theme = self.theme
         selected = self.timeline_selection.get(model)
 
-        for index, day_meta in enumerate(model.days):
+        for index, day_meta in enumerate(()) if rows_only else enumerate(model.days):
             x1 = index * day_width
             x2 = x1 + day_width
             if day_meta.is_user_leave or day_meta.is_user_holiday:
@@ -4663,11 +4682,13 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
             date_canvas.tag_bind(date_tag, "<Enter>", lambda event, text=f"{day_meta.date:%Y-%m-%d} · {tooltip}": self._show_global_tooltip(text, event))
             date_canvas.tag_bind(date_tag, "<Leave>", self._hide_global_tooltip)
 
-        corner.create_rectangle(0, 0, title_width, header_height, fill=theme.panel_secondary, outline="")
-        corner.create_text(dp(12), dp(18), text="事项", fill=theme.text_primary, font=(FONT, 9, "bold"), anchor="w")
-        corner.create_text(dp(12), dp(39), text="名称固定 · 时间轴可滚动", fill=theme.text_muted, font=(FONT, 7), anchor="w")
-        corner.create_line(0, header_height - 1, title_width, header_height - 1, fill=theme.divider)
-        date_canvas.create_line(0, header_height - 1, content_width, header_height - 1, fill=theme.divider)
+        if not rows_only:
+            corner.create_rectangle(0, 0, title_width, header_height, fill=theme.panel_secondary, outline="")
+            corner.create_text(dp(12), dp(18), text="事项", fill=theme.text_primary, font=(FONT, 9, "bold"), anchor="w")
+            corner.create_text(dp(12), dp(39), text="名称固定 · 时间轴可滚动", fill=theme.text_muted, font=(FONT, 7), anchor="w")
+            corner.create_line(0, header_height - 1, title_width, header_height - 1, fill=theme.divider)
+            date_canvas.create_line(0, header_height - 1, content_width, header_height - 1, fill=theme.divider)
+        canvas, label_canvas = CanvasLayer(canvas.canvas, "timeline-rows"), CanvasLayer(label_canvas.canvas, "timeline-rows")
 
         if not model.items:
             canvas.create_text(
@@ -4677,7 +4698,10 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
                 fill=theme.text_muted,
                 font=(FONT, 10),
             )
-        for row_index, item in enumerate(model.items):
+        window = visible_rows(len(model.items), y_position * content_height, canvas.winfo_height(), row_height)
+        self._timeline_row_window = (window.start, window.stop)
+        for row_index in window:
+            item = model.items[row_index]
             y1 = row_index * row_height
             y2 = y1 + row_height
             row_tag = f"timeline-item:{item.id}"
@@ -4783,6 +4807,8 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
                 target.tag_bind(row_tag, "<Leave>", self._hide_global_tooltip)
 
         self._decorate_schedule_handles(canvas)
+        for target in (canvas, date_canvas, label_canvas):
+            target.prune_bindings()
         date_canvas.configure(scrollregion=(0, 0, content_width, header_height))
         canvas.configure(scrollregion=(0, 0, content_width, content_height), xscrollincrement=dp(12), yscrollincrement=row_height)
         label_canvas.configure(scrollregion=(0, 0, title_width, content_height), yscrollincrement=row_height)
@@ -4799,8 +4825,11 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
             self.global_status_label.configure(text="滚轮纵向浏览 · Shift + 滚轮横向浏览 · 双击日期空白新建")
 
     def _draw_calendar_flow(self) -> None:
+        self._schedule_hover_key = None
         self._schedule_hits = []
         model = self.timeline_model
+        if model is not None and self.calendar_flow_layout is None:
+            self.calendar_flow_layout = build_calendar_flow_layout(model)
         layout = self.calendar_flow_layout
         if (
             model is None
@@ -4809,7 +4838,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
             or not self.global_flow_canvas.winfo_exists()
         ):
             return
-        canvas = self.global_flow_canvas
+        canvas = CanvasLayer(self.global_flow_canvas)
         header = self.global_flow_header_canvas
         y_position = canvas.yview()[0] if canvas.bbox("all") else 0.0
         canvas.delete("all")
@@ -5155,6 +5184,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
                 canvas.tag_bind(more_tag, "<Button-1>", lambda _event, day=week.dates[column]: self._open_flow_day_detail(day))
 
         self._decorate_schedule_handles(canvas)
+        canvas.prune_bindings()
         if not model.items:
             canvas.create_text(
                 content_width // 2,
@@ -5184,9 +5214,12 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         units = wheel_units(event.delta)
         if units:
             self.global_flow_canvas.yview_scroll(units, "units")
+            self._schedule_scroll_changed()
         return "break"
 
     def _enter_flow_item(self, item_id: str, event: tk.Event) -> None:
+        if getattr(self, "_schedule_drag", None):
+            return
         if self._global_flow_hover_item_id != item_id:
             previous = self._global_flow_hover_item_id
             self._global_flow_hover_item_id = item_id
@@ -5219,6 +5252,8 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
             self._restore_flow_card_style(item_id)
 
     def _restore_flow_card_style(self, item_id: str) -> None:
+        if getattr(self, "_schedule_drag", None):
+            return
         styles = self._global_flow_card_styles.get(item_id, ())
         canvas = getattr(self, "global_flow_canvas", None)
         if not styles or canvas is None or not canvas.winfo_exists():
@@ -5282,7 +5317,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
             self._global_flow_drag_start = anchor
             self._global_flow_drag_end = selected
             self._global_flow_drag_moved = selected != anchor
-            self._draw_calendar_flow()
+            self._draw_flow_range_preview()
         return "break"
 
     def _finish_flow_drag(self, event: tk.Event) -> Optional[str]:
@@ -5461,10 +5496,30 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
     def _sync_global_yscroll(self, first: str, last: str) -> None:
         self.global_vscroll.set(first, last)
         self.global_label_canvas.yview_moveto(float(first))
+        if getattr(self, "global_display_mode", None) == "timeline" and self.timeline_model:
+            row_height = self.dpi.px(GLOBAL_ROW_HEIGHT)
+            window = visible_rows(len(self.timeline_model.items), float(first) * self._global_content_height,
+                                  self.global_timeline_canvas.winfo_height(), row_height)
+            if (window.start, window.stop) != getattr(self, "_timeline_row_window", None) and not self._timeline_rows_job:
+                self._timeline_rows_job = self.after(16, self._finish_timeline_rows)
+
+    def _finish_timeline_rows(self) -> None:
+        self._timeline_rows_job = None
+        self._refresh_timeline_rows()
+
+    def _refresh_timeline_rows(self) -> None:
+        if self._timeline_rows_job:
+            self.after_cancel(self._timeline_rows_job)
+        self._timeline_rows_job = None
+        if self.view_mode == "global" and self.global_display_mode == "timeline":
+            self._draw_global_timeline(rows_only=True)
+            if self._schedule_drag and self._schedule_render_job is None:
+                self._schedule_render_job = self.after(0, self._draw_schedule_preview)
 
     def _global_xview(self, *args) -> None:
         self.global_date_canvas.xview(*args)
         self.global_timeline_canvas.xview(*args)
+        self._schedule_scroll_changed()
 
     def _global_yview(self, *args) -> None:
         self.global_label_canvas.yview(*args)
@@ -6125,6 +6180,8 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         if self.editor_window and self.editor_window.winfo_exists():
             self.editor_window.refresh_categories()
         self.render()
+        if hasattr(self, "_show_feedback"):
+            self._show_feedback("事项分类已更新")
 
     def _prune_global_category_filter(self) -> None:
         if self._global_category_filter_ids is None:
@@ -6505,6 +6562,8 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         if change is not None:
             focus_day = change.after_dates[0] if focus_result and change.after_dates else None
             self._refresh_event_change(change, focus_day=focus_day)
+            if hasattr(self, "_show_feedback"):
+                self._show_feedback(f"已{change.label}")
         return True
 
     def _refresh_event_change(self, change: EventChange, *, focus_day: Optional[date] = None) -> None:
@@ -6563,10 +6622,14 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         ))
 
     def undo_event(self) -> None:
-        self._run_event_command(self.event_commands.undo)
+        label = self.event_commands.undo_label
+        if self._run_event_command(self.event_commands.undo) and label and hasattr(self, "_show_feedback"):
+            self._show_feedback(f"已撤销：{label}")
 
     def redo_event(self) -> None:
-        self._run_event_command(self.event_commands.redo)
+        label = self.event_commands.redo_label
+        if self._run_event_command(self.event_commands.redo) and label and hasattr(self, "_show_feedback"):
+            self._show_feedback(f"已重做：{label}")
 
     def _history_shortcut(self, event: tk.Event, *, redo: bool) -> Optional[str]:
         search = getattr(self, "search_window", None)
@@ -7362,6 +7425,7 @@ class CalendarApp(GlobalSearchMixin, GlobalDragMixin, tk.Tk):
         self.withdraw()
 
     def on_close(self) -> None:
+        self._clear_feedback()
         self._cancel_schedule_drag()
         if self.search_window and self.search_window.winfo_exists():
             self.search_window.close(restore_focus=False)

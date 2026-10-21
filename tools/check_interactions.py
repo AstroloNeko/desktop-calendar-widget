@@ -31,8 +31,14 @@ def pump(app, seconds=0.04):
 def cleanup(app):
     # Multiple short-lived Tk roots in a smoke process share the Tcl timer
     # queue. Cancel those timers explicitly before destroying this test root.
+    def descendants(widget):
+        return [widget] + [descendant for child in widget.winfo_children() for descendant in descendants(child)]
+
+    widgets = descendants(app)
     for job in app.tk.call("after", "info"):
-        app.after_cancel(job)
+        command = str(app.tk.call("after", "info", job)[0]).split()[0]
+        owner = next((widget for widget in widgets if command in (widget._tclCommands or [])), app)
+        owner.after_cancel(job)
     app.on_close()
 
 
@@ -75,6 +81,11 @@ def gesture(app, operation):
         app.update()
         assert app.store.events[0].due == "2026-08-07T10:30"
         assert app.store.events[0].duration_days == 5
+        app.redo_event()
+        app.update()
+        assert app.event_commands.undo_count == 1
+        app.undo_event()
+        app.update()
         app.event_commands.clear()
     assert app._schedule_drag is None and app.grab_current() is None, (operation, app.focus_get(), app.grab_current())
 
@@ -121,8 +132,14 @@ def smoke(app):
             pump(app)
             assert app.search_window is None and app.editor_window is not None
             assert app.grab_current() is app.editor_window
-            app.editor_window.close()
+            editor = app.editor_window
+            original_title = app.store.events[0].title
+            editor.title_var.set(original_title + " / 编辑")
+            editor.save()
             pump(app)
+            assert app.store.events[0].title.endswith(" / 编辑")
+            app.undo_event()
+            app.event_commands.clear()
         app.return_to_compact_view()
         app.update()
         app.open_search()

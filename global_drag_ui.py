@@ -1,8 +1,11 @@
 """Tk scheduling adapter. Renderers provide hit boxes; commands own mutations."""
 
 import tkinter as tk
+from tkinter import font as tkfont
 
 from schedule_drag import ScheduleDrag, hit_at
+from interaction_visuals import CanvasOverlay, elide, preview_bounds
+from ui_draw import blend, draw_drag_bubble
 
 
 class GlobalDragMixin:
@@ -19,6 +22,8 @@ class GlobalDragMixin:
         hit = hit_at(self._schedule_hits, canvas.canvasx(event.x), canvas.canvasy(event.y))
         if hit is None:
             return None
+        if hasattr(self, "_clear_feedback"):
+            self._clear_feedback()
         day = self._schedule_pointer_day(event)
         if day is None:
             return None
@@ -33,6 +38,7 @@ class GlobalDragMixin:
         self._schedule_canvas = canvas
         self._schedule_origin_y = (hit.bounds[1] + hit.bounds[3]) / 2
         self._schedule_pointer = event
+        self._schedule_source_style = {}
         self._schedule_render_job = None
         self._schedule_month_job = None
         self._schedule_month_direction = 0
@@ -48,6 +54,55 @@ class GlobalDragMixin:
         hit = hit_at(self._schedule_hits, canvas.canvasx(event.x), canvas.canvasy(event.y))
         operation = hit.operation_at(canvas.canvasx(event.x), self.dpi.px(6)) if hit else None
         canvas.configure(cursor="sb_h_double_arrow" if operation in ("start", "end") else "fleur" if hit else "")
+        key = (hit, operation) if operation in ("start", "end") else None
+        if key == getattr(self, "_schedule_hover_key", None):
+            return
+        self._schedule_hover_key = key
+        canvas.delete("schedule-edge-hover")
+        if key:
+            x1, y1, x2, y2 = hit.bounds
+            x = x1 if operation == "start" else x2
+            item = self.timeline_model.item_by_id(hit.event_id)
+            canvas.create_rectangle(x - self.dpi.px(3), y1 + self.dpi.px(2), x + self.dpi.px(3), y2 - self.dpi.px(2),
+                                    fill=self.theme.control_hover, outline=item.color,
+                                    tags=("schedule-edge-hover", f"timeline-item:{hit.event_id}"))
+
+    def _hide_schedule_edge(self, event):
+        self._schedule_hover_key = None
+        event.widget.delete("schedule-edge-hover")
+
+    def _schedule_scroll_changed(self):
+        if not getattr(self, "_schedule_drag", None):
+            return
+        event = self._schedule_pointer
+        drag = self._schedule_drag
+        drag.last_day = None
+        drag.update(self._schedule_pointer_day(event), (event.x_root, event.y_root))
+        if self._schedule_render_job is None:
+            self._schedule_render_job = self.after(16, self._draw_schedule_preview)
+
+    def _draw_flow_range_preview(self):
+        bounds = self._flow_selected_range()
+        if not bounds:
+            return
+        first, last, _duration = bounds
+        canvas, dp = self.global_flow_canvas, self.dpi.px
+        if not hasattr(canvas, "_range_overlay"):
+            canvas._range_overlay = CanvasOverlay(canvas, "flow-range-preview")
+        pool = canvas._range_overlay
+        pool.begin()
+        slot = 0
+        for week in self.calendar_flow_layout.weeks:
+            for column, day in enumerate(week.dates):
+                if first <= day <= last:
+                    x = column * self._global_flow_column_width
+                    y = week.index * self._global_flow_week_height
+                    pool.item(slot, "rectangle", (x + dp(4), y + dp(4), x + self._global_flow_column_width - dp(4),
+                                                  y + self._global_flow_week_height - dp(4)),
+                              outline=self.theme.date_selected_border, width=dp(2))
+                    slot += 1
+        pool.end()
+        self.global_status_label.configure(text=f"已选择日期范围：{first:%Y-%m-%d} 至 {last:%Y-%m-%d} · 右键进行操作")
 
     def _schedule_motion(self, event):
         drag = getattr(self, "_schedule_drag", None)
@@ -69,10 +124,12 @@ class GlobalDragMixin:
             self._schedule_month_job = self.after(750, self._schedule_turn_month) if direction else None
         # Keep a long Timeline / Flow vertically navigable without relocating
         # the source item during preview.
-        if inside and event.y > canvas.winfo_height() - self.dpi.px(16):
+        if inside and drag.active and event.y > canvas.winfo_height() - self.dpi.px(16):
             canvas.yview_scroll(1, "units")
-        elif inside and event.y < self.dpi.px(16):
+            self._schedule_scroll_changed()
+        elif inside and drag.active and event.y < self.dpi.px(16):
             canvas.yview_scroll(-1, "units")
+            self._schedule_scroll_changed()
         return "break"
 
     def _schedule_turn_month(self):
@@ -127,41 +184,87 @@ class GlobalDragMixin:
         if drag is None:
             return
         canvas = self._schedule_canvas
-        canvas.delete("schedule-preview")
+        if not hasattr(canvas, "_schedule_overlay"):
+            canvas._schedule_overlay = CanvasOverlay(canvas, "schedule-preview")
+        pool = canvas._schedule_overlay
+        pool.begin()
         preview = drag.preview
         if not drag.active:
+            pool.end()
             return
+        theme, dp = self.theme, self.dpi.px
+        for identifier in canvas.find_withtag(f"timeline-item:{drag.source.event_id}"):
+            if identifier not in self._schedule_source_style:
+                options = {"fill": canvas.itemcget(identifier, "fill")}
+                if canvas.type(identifier) in ("rectangle", "polygon", "oval"):
+                    options["outline"] = canvas.itemcget(identifier, "outline")
+                self._schedule_source_style[identifier] = options
+                canvas.itemconfigure(identifier, **{key: blend(value, theme.schedule_background, .72) for key, value in options.items() if value})
+        if not hasattr(self, "_schedule_fonts") or self._schedule_fonts[0] != self.dpi.dpi:
+            self._schedule_fonts = (self.dpi.dpi, tkfont.Font(self, family=self.search_font, size=8, weight="bold"),
+                                    tkfont.Font(self, family=self.search_font, size=8))
+        _, font, small = self._schedule_fonts
+        event = self._schedule_pointer
+        viewport = (canvas.canvasx(0), canvas.canvasy(0), canvas.canvasx(canvas.winfo_width()), canvas.canvasy(canvas.winfo_height()))
+        box = preview_bounds(canvas.canvasx(event.x) + dp(16), canvas.canvasy(event.y) + dp(18), dp(260), dp(54), viewport, dp(6))
         if preview is None:
+            header = getattr(self, "global_date_canvas", None)
+            if header is not None and hasattr(header, "_schedule_overlay"):
+                header._schedule_overlay.clear()
             canvas.configure(cursor="X_cursor")
             self.global_status_label.configure(text=f"无法排期：{drag.error} · Esc 取消")
+            draw_drag_bubble(pool, box, theme=theme, color=theme.danger, title="无法放置 · Esc 取消",
+                             subtitle=elide(drag.error, small, box[2] - box[0] - dp(26)), badge="",
+                             font=font, small_font=small, scale=dp)
+            pool.end()
             return
         canvas.configure(cursor="fleur" if drag.operation == "move" else "sb_h_double_arrow")
         days = preview.effective_dates
         self.global_status_label.configure(text=f"预览：{preview.event().title} · {days[0]:%Y-%m-%d} → {days[-1]:%Y-%m-%d} · {len(days)}个有效日 · 松开提交 · Esc 取消 · 边缘停留或 PgUp/PgDn 切月")
-        theme, dp = self.theme, self.dpi.px
         color = preview.effective_color or theme.accent
         if self.global_display_mode == "flow":
             locations = {day: (week.index, column) for week in self.calendar_flow_layout.weeks for column, day in enumerate(week.dates)}
+            slot = 0
             for day in days:
                 if day not in locations:
                     continue
                 week, column = locations[day]
                 x1 = column * self._global_flow_column_width + dp(2)
                 y1 = week * self._global_flow_week_height + dp(2)
-                canvas.create_rectangle(x1, y1, x1 + self._global_flow_column_width - dp(4),
-                                        y1 + self._global_flow_week_height - dp(4),
-                                        outline=theme.accent, width=dp(2), dash=(dp(4), dp(2)), tags="schedule-preview")
-                canvas.create_rectangle(x1 + dp(3), y1 + dp(29), x1 + self._global_flow_column_width - dp(8), y1 + dp(40),
-                                        fill=color, outline=theme.accent, stipple="gray50", tags="schedule-preview")
+                pool.item(("snap", slot), "rectangle", (x1, y1, x1 + self._global_flow_column_width - dp(4), y1 + dp(27)),
+                          fill=blend(theme.schedule_background, color, .12), outline=color, width=dp(1))
+                slot += 1
+                if day == preview.deadline:
+                    pool.item("deadline", "text", (x1 + self._global_flow_column_width - dp(12), y1 + dp(14)),
+                              text="◆", anchor="e", fill=theme.event_type_ddl, font=small)
         else:
             model = self.timeline_model
             y = self._schedule_origin_y
+            slot = 0
             for day in days:
                 if model.period_start <= day <= model.period_end:
                     x1 = (day - model.period_start).days * self._global_day_width + dp(2)
-                    canvas.create_rectangle(x1, y - dp(15), x1 + self._global_day_width - dp(4), y + dp(15),
-                                            fill=color, outline=theme.accent, width=dp(2), stipple="gray50", tags="schedule-preview")
-        canvas.tag_raise("schedule-preview")
+                    pool.item(("snap", slot), "rectangle", (x1, y - dp(11), x1 + self._global_day_width - dp(4), y + dp(11)),
+                              fill=blend(theme.schedule_background, color, .18), outline=color, width=dp(1))
+                    slot += 1
+            header = self.global_date_canvas
+            if not hasattr(header, "_schedule_overlay"):
+                header._schedule_overlay = CanvasOverlay(header, "schedule-preview")
+            header_pool = header._schedule_overlay
+            header_pool.begin()
+            slot = 0
+            for day in days:
+                if model.period_start <= day <= model.period_end:
+                    x = (day - model.period_start).days * self._global_day_width
+                    header_pool.item(slot, "rectangle", (x + dp(2), dp(2), x + self._global_day_width - dp(2), header.winfo_height() - dp(2)),
+                                     outline=color, width=dp(2))
+                    slot += 1
+            header_pool.end()
+        draw_drag_bubble(pool, box, theme=theme, color=color,
+                         title=elide(preview.event().title, font, box[2] - box[0] - dp(65)),
+                         subtitle=elide(f"{days[0]:%Y-%m-%d} → {days[-1]:%Y-%m-%d}", small, box[2] - box[0] - dp(26)),
+                         badge="◆ DDL" if preview.deadline else "", font=font, small_font=small, scale=dp)
+        pool.end()
 
     def _schedule_release(self, event):
         drag = getattr(self, "_schedule_drag", None)
@@ -173,7 +276,9 @@ class GlobalDragMixin:
         preview = drag.finish()
         self._cancel_schedule_drag()
         if preview is not None:
-            self.commit_event_preview(preview, focus_result=True)
+            if self.commit_event_preview(preview, focus_result=True) and hasattr(self, "_show_feedback"):
+                self._show_feedback(f"已调整至 {preview.effective_dates[0]:%m月%d日} → {preview.effective_dates[-1]:%m月%d日}")
+                self._flash_event(event_id)
         elif not was_active:
             self.select_timeline_item(event_id)
         else:
@@ -186,6 +291,7 @@ class GlobalDragMixin:
             return False
         drag.cancel()
         self._schedule_drag = None
+        self._schedule_hover_key = None
         for job_name in ("_schedule_render_job", "_schedule_month_job"):
             job = getattr(self, job_name, None)
             if job:
@@ -195,7 +301,16 @@ class GlobalDragMixin:
         try:
             if canvas.grab_current() is canvas:
                 canvas.grab_release()
-            canvas.delete("schedule-preview")
+            if hasattr(canvas, "_schedule_overlay"):
+                canvas._schedule_overlay.clear()
+            canvas.delete("schedule-edge-hover")
+            for identifier, options in getattr(self, "_schedule_source_style", {}).items():
+                if canvas.type(identifier):
+                    canvas.itemconfigure(identifier, **options)
+            self._schedule_source_style = {}
+            header = getattr(self, "global_date_canvas", None)
+            if header is not None and hasattr(header, "_schedule_overlay"):
+                header._schedule_overlay.clear()
             canvas.configure(cursor="")
         except tk.TclError:
             pass  # The renderer can already have been destroyed on application exit.

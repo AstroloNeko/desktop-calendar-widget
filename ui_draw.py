@@ -118,6 +118,39 @@ def rounded_rectangle(
     return canvas.create_polygon(points, smooth=True, splinesteps=18, **kwargs)
 
 
+def pooled_rounded_rectangle(pool, key, *bounds, radius, **options):
+    """Reuse rounded geometry through a named, presentation-only item slot."""
+    class Slot:
+        def create_rectangle(self, *coordinates, **kwargs):
+            return pool.item(key, "rectangle", coordinates, **kwargs)
+
+        def create_polygon(self, *coordinates, **kwargs):
+            return pool.item(key, "polygon", coordinates, **kwargs)
+
+    return rounded_rectangle(Slot(), *bounds, radius, **options)
+
+
+def draw_drag_bubble(pool, bounds, *, theme, color, title, subtitle, badge, font, small_font, scale):
+    x1, y1, x2, y2 = bounds
+    dp = scale
+    radius = dp(2 if theme.style == "paper" else theme.metrics.control_radius + 2)
+    background = blend(theme.panel_background, color, .08)
+    pooled_rounded_rectangle(pool, "bubble", *bounds, radius=radius, fill=background,
+                             outline=color, width=dp(1))
+    pool.item("bubble-stripe", "line", (x1 + dp(5), y1 + dp(10), x1 + dp(5), y2 - dp(10)),
+              fill=color, width=dp(3))
+    if theme.style in ("aero", "frutiger"):
+        pool.item("bubble-gloss", "line", (x1 + dp(9), y1 + dp(2), x2 - dp(9), y1 + dp(2)),
+                  fill=theme.control_highlight, width=dp(1))
+    pool.item("bubble-title", "text", (x1 + dp(14), y1 + dp(15)), text=title,
+              fill=theme.text_primary, font=font, anchor="w")
+    pool.item("bubble-date", "text", (x1 + dp(14), y1 + dp(37)), text=subtitle,
+              fill=theme.text_secondary, font=small_font, anchor="w")
+    if badge:
+        pool.item("bubble-badge", "text", (x2 - dp(10), y1 + dp(15)), text=badge,
+                  fill=theme.event_type_ddl, font=small_font, anchor="e")
+
+
 def rounded_vertical_gradient(
     canvas: tk.Canvas,
     x1: float,
