@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from win_integration import IS_WINDOWS
 
 
 HEADER_HEIGHT = 58
@@ -72,8 +73,9 @@ class GlobalHeader(tk.Frame):
         # Whitelist only blank chrome and title labels. Buttons are never drag targets.
         for area in (self, self.month, self.subtitle):
             area.bind("<ButtonPress-1>", self._start_drag)
-            area.bind("<B1-Motion>", app._drag_window)
-            area.bind("<ButtonRelease-1>", app._end_drag)
+            if not IS_WINDOWS:
+                area.bind("<B1-Motion>", app._drag_window)
+                area.bind("<ButtonRelease-1>", app._end_drag)
         self.bind("<Configure>", self._layout)
         self.bind("<Unmap>", lambda _e: self.hide_tooltips(), add="+")
         self.bind("<Destroy>", lambda e: self.hide_tooltips() if e.widget is self else None, add="+")
@@ -81,7 +83,7 @@ class GlobalHeader(tk.Frame):
     def _start_drag(self, event):
         if self.app._active_modal_window() is None and self.app.state() == "normal":
             self.hide_tooltips()
-            self.app._start_drag(event)
+            self.app._start_global_window_move(event)
 
     def _layout(self, _event=None):
         dp = self.app.dpi.px

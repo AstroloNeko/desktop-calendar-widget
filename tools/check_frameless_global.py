@@ -199,6 +199,9 @@ def main():
                     app.window_mode = "desktop"
                     app.apply_window_mode()
                     assert not is_window_topmost(app)
+                    from tools.check_window_drag import drag_header
+                    drag_header(app, 30, 10)
+                    assert not is_window_topmost(app)
                     focus = app.focus_get()
                     foreground = user.GetForegroundWindow()
                     tip = app.global_header.tooltips[-2]
@@ -211,8 +214,21 @@ def main():
                     app.window_mode = "pinned"
                     app.apply_window_mode()
                     assert is_window_topmost(app)
+                    drag_header(app, 30, 10)
+                    assert is_window_topmost(app)
                     assert app.global_header.tooltips[6].text() == "取消置顶"
-                    app.open_new_event()
+                    # A release alone cannot activate the toolbar after moving.
+                    create = app.global_header.controls["create"]
+                    create.event_generate("<ButtonRelease-1>", x=10, y=10)
+                    pump(app)
+                    assert app.editor_window is None
+                    point = wintypes.POINT(create.winfo_rootx()+create.winfo_width()//2,
+                                           create.winfo_rooty()+create.winfo_height()//2)
+                    assert user.GetAncestor(user.WindowFromPoint(point), 2) == window_handle(app)
+                    user.SetCursorPos(point.x, point.y)
+                    user.mouse_event(2, 0, 0, 0, 0)
+                    pump(app, .03)
+                    user.mouse_event(4, 0, 0, 0, 0)
                     pump(app, .15)
                     assert app.grab_current() is app.editor_window
                     assert str(app.editor_window.transient()) == str(app)
@@ -281,16 +297,10 @@ def main():
                 # Header whitespace drags the window, controls don't bind that gesture.
                 app.geometry(scaled_geometry(1000, 600, 80, 50, actual_dpi))
                 pump(app, .2)
-                header = app.global_header
-                x, y, w, h = header_layout(app.dpi.logical(header.winfo_width()))["drag"]
-                x, y = app.dpi.px(x + w // 2), app.dpi.px(h // 2)
+                from tools.check_window_drag import drag_header
                 old = app.winfo_x(), app.winfo_y()
-                header.event_generate("<ButtonPress-1>", x=x, y=y)
-                header.event_generate("<B1-Motion>", x=x+60, y=y+30)
-                pump(app)
+                drag_header(app, 60, 30)
                 assert (app.winfo_x(), app.winfo_y()) == (old[0]+60, old[1]+30)
-                header.event_generate("<ButtonRelease-1>", x=x, y=y)
-                pump(app, .2)
 
                 # Native non-client hit testing still provides a right resize edge.
                 rect = wintypes.RECT()
@@ -325,6 +335,15 @@ def main():
                     assert extended & 0x40000 and not extended & 0x80  # taskbar / Alt+Tab
                     print("Restore", cycle+1, "shell taskbar" if options.taskbar else "Tk", flush=True)
 
+                # Restore, then drag again and reach the work-area edges without
+                # putting the pointer on a Snap hot zone.
+                drag_header(app, 24, 12)
+                work = app.dpi.work_area()
+                drag_header(app, work.left+4-app.winfo_x(), work.top+4-app.winfo_y())
+                edge_rect = wintypes.RECT()
+                user.GetWindowRect(hwnd, ctypes.byref(edge_rect))
+                assert edge_rect.left >= work.left and edge_rect.top >= work.top
+                assert edge_rect.right <= work.right and edge_rect.bottom <= work.bottom
                 # Actual Alt+Tab away and back, then the native system-close path.
                 user.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
                 for returning in (False, True):
@@ -345,8 +364,26 @@ def main():
                 assert closed == [True]
                 assert not errors, errors
                 print("Native shell/Alt+F4/drag/no-rebuild checks: passed", flush=True)
+                # Save away from work-area margins; restart fitting must not
+                # legitimately clamp the position used for this exact check.
+                app.geometry(scaled_geometry(1000, 600, 80, 50, actual_dpi))
+                pump(app, .3)
+                app._save_window_settings()
             finally:
                 cleanup(app)
+            saved = Store(Path(temporary) / "data.json").settings["global_geometry"].copy()
+            for restart in range(3):
+                app = CalendarApp(Store(Path(temporary) / "data.json"))
+                app.report_callback_exception = lambda *parts: errors.append("".join(traceback.format_exception(*parts)))
+                try:
+                    pump(app, .6)
+                    app.enter_global_view()
+                    pump(app, .3)
+                    assert app._capture_window_geometry().as_dict() == saved
+                    assert not errors, errors
+                    print("Geometry reload", restart+1, "exact client size/position: passed", flush=True)
+                finally:
+                    cleanup(app)
 
 
 if __name__ == "__main__":

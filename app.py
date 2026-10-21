@@ -58,9 +58,12 @@ from global_timeline_ui import (
 )
 from tray_icon import TrayIcon
 from win_integration import (
+    IS_WINDOWS,
+    NativeWindowMove,
     SingleInstance,
     bring_to_front,
     clamp_to_work_area,
+    clamp_native_window,
     is_autostart_enabled,
     is_foreground_process,
     is_window_topmost,
@@ -424,6 +427,7 @@ class ThemeButton(LogicalCanvas):
         self.accented = accented
         self.outlined = outlined
         self.icon = icon
+        self._armed = False
         self.state = "normal"
         super().__init__(
             parent,
@@ -437,7 +441,8 @@ class ThemeButton(LogicalCanvas):
         )
         self.bind("<Enter>", lambda _event: self._set_state("hover"))
         self.bind("<Leave>", lambda _event: self._set_state("normal"))
-        self.bind("<ButtonPress-1>", lambda _event: self._set_state("pressed"))
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<Unmap>", lambda _event: setattr(self, "_armed", False))
         self.bind("<ButtonRelease-1>", self._release)
         self.bind("<space>", lambda _event: self.command())
         self.bind("<Return>", lambda _event: self.command())
@@ -447,10 +452,15 @@ class ThemeButton(LogicalCanvas):
         self.state = state
         self.draw()
 
+    def _press(self, _event=None) -> None:
+        self._armed = True
+        self._set_state("pressed")
+
     def _release(self, event: tk.Event) -> None:
         inside = 0 <= event.x < self.winfo_width() and 0 <= event.y < self.winfo_height()
+        armed, self._armed = self._armed, False
         self._set_state("hover" if inside else "normal")
-        if inside:
+        if inside and armed:
             self.command()
 
     def set_text(self, text: str, foreground: Optional[str] = None) -> None:
@@ -3084,6 +3094,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             self.window_mode = "desktop"
         self.quick_placeholder_active = True
         self._drag_origin: Optional[tuple[int, int, int, int]] = None
+        self._global_window_move: Optional[NativeWindowMove] = None
         self._lower_job: Optional[str] = None
         self.notification_windows: list[tk.Toplevel] = []
         self.overlay_windows: list[tk.Toplevel] = []
@@ -3146,6 +3157,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self._set_initial_geometry()
         self._bind_shortcuts()
         self.bind("<Configure>", self._schedule_dpi_check, add="+")
+        self.bind("<ButtonRelease-1>", self._on_global_window_move_end, add="+")
         self.bind("<Configure>", self._schedule_view_geometry_save, add="+")
         self.bind("<FocusIn>", self._schedule_dpi_check, add="+")
         self.render()
@@ -4079,6 +4091,9 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
     def return_to_compact_view(self) -> None:
         if self.view_mode == "compact":
             return
+        if self._global_window_move is not None:
+            self._global_window_move.close()
+            self._global_window_move = None
         self.global_header.hide_tooltips()
         if self.state() == "normal":
             self._global_normal_geometry = self._capture_window_geometry()
@@ -4113,6 +4128,9 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         """Minimize the managed Global HWND to the taskbar, never to the tray."""
         if self.view_mode != "global" or self._active_modal_window() is not None:
             return
+        if self._global_window_move is not None:
+            self._global_window_move.close()
+            self._global_window_move = None
         self.global_header.hide_tooltips()
         if self._global_tooltip is not None:
             self._global_tooltip.hide()
@@ -4130,7 +4148,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             self.enter_global_view()
 
     def _schedule_view_geometry_save(self, event: tk.Event) -> None:
-        if event.widget is not self or self.view_mode != "global" or self._dpi_rebuilding:
+        if event.widget is not self or self.view_mode != "global" or self._dpi_rebuilding or self._global_window_move:
             return
         if self._geometry_save_job:
             try:
@@ -4141,9 +4159,11 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
 
     def _save_global_geometry(self) -> None:
         self._geometry_save_job = None
-        if self.view_mode != "global" or not self.winfo_exists() or self.state() != "normal":
+        if self.view_mode != "global" or not self.winfo_exists() or self.state() != "normal" or self._global_window_move:
             return
         self._global_normal_geometry = self._capture_window_geometry()
+        if self.store.settings.get("global_geometry") == self._global_normal_geometry.as_dict():
+            return  # A late Configure after a system move must not persist it twice.
         self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
         self.store.save()
 
@@ -4284,7 +4304,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
 
     def _check_dpi_change(self) -> None:
         self._dpi_check_job = None
-        if self._dpi_rebuilding or not self.winfo_exists():
+        if self._dpi_rebuilding or not self.winfo_exists() or self._global_window_move:
             return
         new_dpi = self.dpi.current_window_dpi()
         if new_dpi == self.dpi.dpi:
@@ -6884,6 +6904,42 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.desktop_session_active = False
         self.apply_window_mode(force_desktop=True)
 
+    def _start_global_window_move(self, event: tk.Event) -> None:
+        if self.view_mode != "global" or self._active_modal_window() is not None or self.state() != "normal":
+            return
+        if not IS_WINDOWS:
+            self._start_drag(event)
+            return
+        if self._global_window_move is not None:
+            return
+        self._drag_origin = None
+        session = NativeWindowMove(self)
+        self._global_window_move = session
+        try:
+            if not session.start():
+                self._global_window_move = None
+        except OSError:
+            self._global_window_move = None
+            raise
+
+    def _on_global_window_move_end(self, _event=None) -> None:
+        session = self._global_window_move
+        if session is not None and session.ended:
+            self._finish_global_window_move()
+
+    def _finish_global_window_move(self) -> None:
+        session = self._global_window_move
+        if session is None:
+            return
+        session.close()
+        session.ended = False  # Consume before any nested Tk idle work.
+        try:
+            if self.winfo_exists() and self.view_mode == "global" and self.state() == "normal":
+                self._end_drag()
+        finally:
+            # Keep Configure/DPI autosaves suspended through capture + persistence.
+            self._global_window_move = None
+
     def _start_drag(self, event: tk.Event) -> None:
         self._drag_origin = (event.x_root, event.y_root, self.winfo_x(), self.winfo_y())
 
@@ -6898,9 +6954,12 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         new_dpi = self.dpi.current_window_dpi()
         if new_dpi != self.dpi.dpi:
             self._apply_dpi_change(new_dpi)
-        width, height = self.winfo_width(), self.winfo_height()
-        x, y = clamp_to_work_area(self.winfo_x(), self.winfo_y(), width, height)
-        self.geometry(position_at(x, y))
+        if self.view_mode == "global" and IS_WINDOWS:
+            clamp_native_window(self)
+        else:
+            width, height = self.winfo_width(), self.winfo_height()
+            x, y = clamp_to_work_area(self.winfo_x(), self.winfo_y(), width, height)
+            self.geometry(position_at(x, y))
         self._save_window_settings()
         self.after(150, self.apply_window_mode)
 
@@ -7409,6 +7468,9 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.withdraw()
 
     def on_close(self) -> None:
+        if self._global_window_move is not None:
+            self._global_window_move.close()
+            self._global_window_move = None
         self._clear_feedback()
         self._cancel_schedule_drag()
         if self.search_window and self.search_window.winfo_exists():
