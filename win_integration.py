@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import os
 from pathlib import Path
 from typing import Optional
@@ -35,8 +36,10 @@ def window_handle(widget) -> Optional[int]:
         return None
     widget.update_idletasks()
     child = int(widget.winfo_id())
-    ctypes.windll.user32.GetAncestor.restype = ctypes.c_void_p
-    root = ctypes.windll.user32.GetAncestor(child, 2)  # GA_ROOT
+    get_ancestor = ctypes.windll.user32.GetAncestor
+    get_ancestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    get_ancestor.restype = wintypes.HWND
+    root = get_ancestor(child, 2)  # GA_ROOT
     return int(root or child)
 
 
@@ -138,6 +141,40 @@ def make_app_window(widget) -> None:
     set_long(hwnd, index, style)
     flags = 0x0001 | 0x0002 | 0x0004 | 0x0020  # NOSIZE | NOMOVE | NOZORDER | FRAMECHANGED
     user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags)
+
+
+def make_frameless_app_window(widget) -> None:
+    """Keep a managed taskbar window and native sizing, removing only its caption.
+
+    Unlike override-redirect this retains iconify, shell restore and Alt+Tab.
+    Idempotent style updates do not activate, raise or recreate the window.
+    HWND and LONG_PTR must stay pointer-wide on 64-bit Windows.
+    """
+    if not IS_WINDOWS:
+        return
+    hwnd = window_handle(widget)
+    if not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+    get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+    get_long.restype = ctypes.c_ssize_t
+    set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    set_long.restype = ctypes.c_ssize_t
+    position = user32.SetWindowPos
+    position.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                         ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    position.restype = wintypes.BOOL
+    changed = False
+    for index, remove, add in ((-16, 0x00C00000, 0), (-20, 0x80, 0x40000)):
+        old = get_long(hwnd, index)
+        new = (old & ~remove) | add
+        if old != new:
+            set_long(hwnd, index, new)
+            changed = True
+    if changed:
+        position(hwnd, None, 0, 0, 0, 0, 0x37)  # NOACTIVATE | FRAMECHANGED, no move/size/Z-order
 
 
 def _desktop_host() -> Optional[int]:

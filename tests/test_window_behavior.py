@@ -419,7 +419,7 @@ class WindowBehaviorTests(unittest.TestCase):
             grab_current=lambda: modal,
         )
         with (
-            patch("app.make_app_window", side_effect=lambda owner: actions.append(("app-window", owner))),
+            patch("app.make_frameless_app_window", side_effect=lambda owner: actions.append(("app-window", owner))),
             patch("app.raise_for_interaction", side_effect=lambda owner: actions.append(("raise", owner))),
             patch("app.bring_to_front", side_effect=lambda owner: actions.append(("topmost", owner))),
         ):
@@ -670,7 +670,10 @@ class WindowBehaviorTests(unittest.TestCase):
 
     def test_global_toolbar_names_compact_return_explicitly(self) -> None:
         source = inspect.getsource(CalendarApp._build_global_ui)
-        self.assertIn('"紧凑视图", self.return_to_compact_view', source)
+        self.assertIn("self.global_header = GlobalHeader(", source)
+        from global_header import GlobalHeader
+        header_source = inspect.getsource(GlobalHeader)
+        self.assertIn('("compact", "", app.return_to_compact_view, "返回紧凑视图")', header_source)
 
     def test_global_display_switch_persists_and_redraws_in_place(self) -> None:
         actions: list[str] = []
@@ -990,7 +993,8 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn("交付前复核", str(fake.global_detail_notes.values["text"]))
 
     def test_global_workspace_wires_complete_toolbar_and_quick_add(self) -> None:
-        source = inspect.getsource(CalendarApp._build_global_ui)
+        from global_header import GlobalHeader
+        source = inspect.getsource(CalendarApp._build_global_ui) + inspect.getsource(GlobalHeader)
         for command in (
             "open_new_event",
             "open_day_detail",
@@ -999,7 +1003,7 @@ class WindowBehaviorTests(unittest.TestCase):
             "toggle_window_mode",
             "show_main_menu",
             "return_to_compact_view",
-            "hide_to_tray",
+            "minimize_global",
             "quick_add",
             "show_quick_options",
         ):

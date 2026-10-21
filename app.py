@@ -64,7 +64,7 @@ from win_integration import (
     is_autostart_enabled,
     is_foreground_process,
     is_window_topmost,
-    make_app_window,
+    make_frameless_app_window,
     make_tool_window,
     raise_for_interaction,
     send_to_desktop,
@@ -76,6 +76,7 @@ from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build
 from event_commands import EventChange, EventCommandHistory, EventPreview
 from schedule_drag import ScheduleHit
 from global_drag_ui import GlobalDragMixin
+from global_header import GlobalHeader
 from global_search_ui import GlobalSearchMixin
 from interaction_visuals import CanvasLayer, InteractionFeedbackMixin, visible_rows
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
@@ -97,6 +98,7 @@ from ui_draw import (
     draw_calendar_date_state,
     draw_calendar_today_accent,
     draw_color_swatch,
+    draw_compact_view_icon,
     draw_ecology_horizon,
     glossy_control,
     rounded_rectangle,
@@ -411,6 +413,7 @@ class ThemeButton(LogicalCanvas):
         surface_background: Optional[str] = None,
         accented: bool = False,
         outlined: bool = False,
+        icon: Optional[str] = None,
     ) -> None:
         self.app = app
         self.text = text
@@ -420,6 +423,7 @@ class ThemeButton(LogicalCanvas):
         self.surface_background = surface_background
         self.accented = accented
         self.outlined = outlined
+        self.icon = icon
         self.state = "normal"
         super().__init__(
             parent,
@@ -546,6 +550,10 @@ class ThemeButton(LogicalCanvas):
             )
         y_offset = 1 if self.state == "pressed" and theme.style != "frutiger" else 0
         text_color = self.foreground or (theme.text_on_accent if self.accented and theme.style != "aero" else theme.control_text)
+        if self.icon == "compact":
+            draw_compact_view_icon(self, width / 2, height / 2 + y_offset,
+                                   foreground=text_color, background=background)
+            return
         self.create_text(
             width / 2,
             height / 2 + y_offset,
@@ -606,7 +614,7 @@ class TaskCheck(LogicalCanvas):
 
 
 class Tooltip:
-    def __init__(self, widget: tk.Widget, text: str) -> None:
+    def __init__(self, widget: tk.Widget, text: str | Callable[[], str]) -> None:
         self.widget = widget
         self.text = text
         self.window: Optional[tk.Toplevel] = None
@@ -614,29 +622,47 @@ class Tooltip:
         widget.bind("<Enter>", self._schedule, add="+")
         widget.bind("<Leave>", self.hide, add="+")
         widget.bind("<Button-1>", self.hide, add="+")
+        widget.bind("<Unmap>", self.hide, add="+")
+        widget.bind("<Destroy>", self.hide, add="+")
 
     def _schedule(self, _event=None) -> None:
+        self.hide()
         self.after_id = self.widget.after(550, self.show)
 
     def show(self) -> None:
-        if self.window or not self.widget.winfo_exists():
+        self.after_id = None
+        if self.window or not self.widget.winfo_exists() or not self.widget.winfo_ismapped():
+            return
+        owner = self.widget.winfo_toplevel()
+        app = self.widget._root()
+        if owner.state() in ("withdrawn", "iconic") or (getattr(app, "_active_modal_window", lambda: None)() not in (None, owner)):
             return
         self.window = tk.Toplevel(self.widget)
+        self.window.withdraw()
         self.window.overrideredirect(True)
-        self.window.attributes("-topmost", True)
-        x = self.widget.winfo_rootx()
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-        self.window.geometry(position_at(x, y))
+        self.window.transient(owner)
         palette = current_theme()
         tk.Label(
             self.window,
-            text=self.text,
+            text=self.text() if callable(self.text) else self.text,
             bg=palette.tooltip_background,
             fg=palette.tooltip_text,
             font=(FONT, 8),
-            padx=8,
-            pady=4,
+            padx=scale_px(8),
+            pady=scale_px(4),
         ).pack()
+        self.window.update_idletasks()
+        width, height = self.window.winfo_reqwidth(), self.window.winfo_reqheight()
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + scale_px(5)
+        area = work_area_for_rect(x, y, width, height)
+        if y + height > area.bottom:
+            y = self.widget.winfo_rooty() - height - scale_px(5)
+        x, y = clamp_to_work_area(x, y, width, height)
+        self.window.geometry(position_at(x, y))
+        self.window.deiconify()
+        make_tool_window(self.window)
+        self.window.lift(owner)
 
     def hide(self, _event=None) -> None:
         if self.after_id:
@@ -3383,67 +3409,14 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.shell = tk.Frame(self.inner_frame, bg=theme.panel_background)
         self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
 
-        toolbar = tk.Frame(
-            self.shell,
-            bg=theme.header_background,
-            highlightthickness=dp(1) if theme.style in ("aero", "frutiger") else 0,
-            highlightbackground=theme.header_highlight,
-            padx=dp(14),
-            pady=dp(9),
+        self.global_header = GlobalHeader(
+            self.shell, self, button_factory=ThemeButton, tooltip_factory=Tooltip, font_family=FONT
         )
-        toolbar.pack(fill="x")
-        title_box = tk.Frame(toolbar, bg=theme.header_background)
-        title_box.pack(side="left", fill="x", expand=True)
-        self.global_month_label = tk.Label(
-            title_box,
-            text="",
-            bg=theme.header_background,
-            fg=theme.header_text,
-            font=(FONT, 14, "bold"),
-            anchor="w",
-        )
-        self.global_month_label.pack(side="left")
-        self.global_view_title_label = tk.Label(
-            title_box,
-            text="全局时间轴",
-            bg=theme.header_background,
-            fg=theme.header_subtext,
-            font=(FONT, 8),
-        )
-        self.global_view_title_label.pack(side="left", padx=(dp(10), 0), pady=(dp(5), 0))
-        if theme.style == "frutiger":
-            motif = LogicalCanvas(title_box, dpi=self.dpi, width=42, height=30, bg=theme.header_background, bd=0, highlightthickness=0)
-            motif.pack(side="left", padx=(dp(8), 0))
-            draw_bubble_motif(
-                motif,
-                ((10, 13, 6), (25, 8, 4), (31, 20, 3)),
-                outline=blend(theme.header_gradient_mid, theme.header_highlight, 0.64),
-                highlight=theme.header_highlight,
-                accent=theme.environment_accent,
-            )
-
-        minimize = ThemeButton(toolbar, self, "−", self.hide_to_tray, width=29, height=29, font_size=11, surface_background=theme.header_background)
-        restore = ThemeButton(toolbar, self, "紧凑视图", self.return_to_compact_view, width=68, height=29, font_size=8, surface_background=theme.header_background, outlined=True)
-        self.menu_button = ThemeButton(toolbar, self, "···", self.show_main_menu, width=34, height=29, font_size=10, surface_background=theme.header_background)
-        self.mode_button = ThemeButton(toolbar, self, "窗口置顶", self.toggle_window_mode, width=62, height=29, font_size=8, surface_background=theme.header_background, outlined=True)
-        ddl_button = ThemeButton(toolbar, self, "DDL列表", self.open_ddl_list, width=58, height=29, font_size=8, surface_background=theme.header_background, outlined=True)
-        habit_button = ThemeButton(toolbar, self, ROUTINE_ENTRY_LABEL, self.open_routine_manager, width=46, height=29, font_size=8, surface_background=theme.header_background, outlined=True)
-        create_button = ThemeButton(toolbar, self, "+ 新建事项", self.open_new_event, width=82, height=29, font_size=8, surface_background=theme.header_background, accented=True)
-        following = ThemeButton(toolbar, self, "›", lambda: self.change_month(1), width=29, height=29, font_size=13, surface_background=theme.header_background)
-        today = ThemeButton(toolbar, self, "今", self.go_today, width=29, height=29, font_size=9, surface_background=theme.header_background)
-        previous = ThemeButton(toolbar, self, "‹", lambda: self.change_month(-1), width=29, height=29, font_size=13, surface_background=theme.header_background)
-        for control in (minimize, restore, self.menu_button, self.mode_button, ddl_button, habit_button, create_button, following, today, previous):
-            control.pack(side="right", padx=(dp(4), 0))
-        Tooltip(previous, "上个月（PgUp）")
-        Tooltip(today, "回到今天（Ctrl+T）")
-        Tooltip(following, "下个月（PgDn）")
-        Tooltip(create_button, "在当前选中日期新建事项")
-        Tooltip(habit_button, "打开习惯清单")
-        Tooltip(ddl_button, "查看完整 DDL 列表")
-        Tooltip(self.mode_button, "切换桌面 / 置顶模式")
-        Tooltip(self.menu_button, "设置、主题、更新与数据工具")
-        Tooltip(restore, "返回紧凑视图")
-        Tooltip(minimize, "隐藏到通知区域")
+        self.global_header.pack(fill="x")
+        self.global_month_label = self.global_header.month
+        self.global_view_title_label = self.global_header.subtitle
+        self.mode_button = self.global_header.controls["pin"]
+        self.menu_button = self.global_header.controls["more"]
 
         quick_surface = blend(theme.schedule_background, theme.environment_haze, 0.18) if theme.style == "frutiger" else theme.schedule_background
         quick_frame = tk.Frame(self.shell, bg=quick_surface, padx=dp(14), pady=dp(8))
@@ -4098,7 +4071,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self._global_normal_geometry = self._apply_saved_geometry(geometry)
         self.deiconify()
         self.update_idletasks()
-        make_app_window(self)
+        make_frameless_app_window(self)
         self.render()
         self.store.save()
         self.after(80, self.apply_window_mode)
@@ -4106,6 +4079,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
     def return_to_compact_view(self) -> None:
         if self.view_mode == "compact":
             return
+        self.global_header.hide_tooltips()
         if self.state() == "normal":
             self._global_normal_geometry = self._capture_window_geometry()
         if self._global_normal_geometry is not None:
@@ -4134,6 +4108,16 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         make_tool_window(self)
         self.store.save()
         self.after(80, self.apply_window_mode)
+
+    def minimize_global(self) -> None:
+        """Minimize the managed Global HWND to the taskbar, never to the tray."""
+        if self.view_mode != "global" or self._active_modal_window() is not None:
+            return
+        self.global_header.hide_tooltips()
+        if self._global_tooltip is not None:
+            self._global_tooltip.hide()
+        self._save_window_settings()
+        self.iconify()
 
     def _activate_compact_return_session(self) -> None:
         """Keep a restored desktop-mode gadget interactable without making it permanently topmost."""
@@ -4391,7 +4375,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                 self._global_normal_geometry = self._apply_saved_geometry(global_geometry or initial_global_geometry(self.dpi.work_area(), new_dpi))
                 if global_was_maximized:
                     self.state("zoomed")
-                make_app_window(self)
+                make_frameless_app_window(self)
             else:
                 pinned, regular = self.store.grouped_ddl_events()
                 height = self._desired_window_height(len(pinned), len(regular))
@@ -6793,7 +6777,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         if not self.winfo_exists():
             return
         if self.view_mode == "global":
-            make_app_window(self)
+            make_frameless_app_window(self)
         else:
             make_tool_window(self)
         if self._active_modal_window() is not None:

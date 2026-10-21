@@ -21,6 +21,14 @@ def blend(first: str, second: str, amount: float) -> str:
     return "#" + "".join(f"{value:02X}" for value in values)
 
 
+def draw_compact_view_icon(canvas, cx: float, cy: float, *, foreground: str, background: str) -> None:
+    """Two overlapping views, in logical pixels (not a fullscreen/minimize glyph)."""
+    rounded_rectangle(canvas, cx - 9, cy - 8, cx + 5, cy + 3, 2,
+                      fill="", outline=foreground, width=1)
+    rounded_rectangle(canvas, cx - 1, cy - 1, cx + 9, cy + 8, 2,
+                      fill=background, outline=foreground, width=1)
+
+
 def draw_color_swatch(
     canvas: tk.Canvas,
     color: str,
