@@ -1377,7 +1377,7 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIsNone(master.day_detail_window)
         self.assertEqual(actions, ["release", "leave", "destroy", "restore"])
 
-    def test_editor_close_refreshes_existing_day_detail(self) -> None:
+    def test_editor_close_restores_detail_without_duplicate_command_refresh(self) -> None:
         actions: list[str] = []
 
         class FakeDetail:
@@ -1407,7 +1407,7 @@ class WindowBehaviorTests(unittest.TestCase):
         EventEditor.close(editor)
 
         self.assertIsNone(master.editor_window)
-        self.assertEqual(actions, ["leave", "destroy", "refresh", "present"])
+        self.assertEqual(actions, ["leave", "destroy", "present"])
 
     def test_editor_cancel_without_detail_only_returns_to_main_window(self) -> None:
         actions: list[str] = []
@@ -1454,9 +1454,14 @@ class WindowBehaviorTests(unittest.TestCase):
             def set(self, value: str) -> None:
                 self.value = value
 
-        class FakeStore:
+        class FakeCommands:
             def create_quick(self, title: str, day: date, **options) -> None:
                 captured.update(title=title, day=day, **options)
+
+        def run_command(self, action):
+            action()
+            captured["rendered"] = True
+            return True
 
         class FakeEntry:
             def focus_set(self) -> None:
@@ -1471,7 +1476,8 @@ class WindowBehaviorTests(unittest.TestCase):
                 "quick_color": "#E65D67",
                 "quick_event_type": "ddl",
                 "selected": date(2026, 8, 5),
-                "store": FakeStore(),
+                "event_commands": FakeCommands(),
+                "_run_event_command": run_command,
                 "quick_entry": FakeEntry(),
                 "render": lambda self: captured.update(rendered=True),
             },

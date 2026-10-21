@@ -73,6 +73,7 @@ from win_integration import (
     set_autostart,
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
+from event_commands import EventChange, EventCommandHistory, EventPreview
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
 from update_manager import (
     UpdateError,
@@ -1243,6 +1244,7 @@ class EventEditor(tk.Toplevel):
             highlightbackground=BORDER,
             highlightcolor=ACCENT,
             wrap="word",
+            undo=True,
             font=(FONT, 9),
         )
         self.notes.pack(fill="x", pady=(4, 12))
@@ -1510,9 +1512,10 @@ class EventEditor(tk.Toplevel):
             notes=self.notes.get("1.0", "end").strip(),
             done=self.event.done if self.event else False,
             created_at=self.event.created_at if self.event else "",
+            snooze_until=self.event.snooze_until if self.event else None,
         )
-        self.master_app.upsert_event(item)
-        self.close()
+        if self.master_app.upsert_event(item):
+            self.close()
 
     def delete(self) -> None:
         if self.event and owned_messagebox(
@@ -1521,8 +1524,8 @@ class EventEditor(tk.Toplevel):
             APP_NAME,
             f"确定删除“{self.event.title}”？",
         ):
-            self.master_app.delete_event(self.event.id)
-            self.close()
+            if self.master_app.delete_event(self.event.id):
+                self.close()
 
     def close(self) -> None:
         if getattr(self, "_closing", False):
@@ -1539,7 +1542,6 @@ class EventEditor(tk.Toplevel):
         self.destroy()
         detail = self.master_app.day_detail_window
         if detail and detail.winfo_exists():
-            detail.refresh()
             self.master_app.after(60, detail._present)
         else:
             self.master_app.after(120, self.master_app.restore_window_mode_if_idle)
@@ -2997,6 +2999,7 @@ class CalendarApp(tk.Tk):
         super().__init__()
         self.dpi = DpiManager(self)
         self.store = store or Store()
+        self.event_commands = EventCommandHistory(self.store)
         self.instance_guard = instance
         self.theme_name = normalize_theme_name(self.store.settings.get("theme"))
         self.store.settings["theme"] = self.theme_name
@@ -4370,6 +4373,9 @@ class CalendarApp(tk.Tk):
         self.after(80, self.apply_window_mode)
 
     def _bind_shortcuts(self) -> None:
+        self.bind_all("<Control-z>", lambda event: self._history_shortcut(event, redo=False), add="+")
+        self.bind_all("<Control-y>", lambda event: self._history_shortcut(event, redo=True), add="+")
+        self.bind_all("<Control-Shift-Z>", lambda event: self._history_shortcut(event, redo=True), add="+")
         self.bind("<Control-n>", lambda _event: self._open_primary_action())
         self.bind("<Control-t>", lambda _event: self.go_today())
         self.bind("<Control-g>", lambda _event: self.toggle_global_view())
@@ -4460,7 +4466,7 @@ class CalendarApp(tk.Tk):
         if self.view_mode == "global" and self.winfo_exists():
             self._draw_active_global_view()
 
-    def _render_global_timeline(self) -> None:
+    def _render_global_timeline(self, *, refresh_sidebar: bool = True) -> None:
         if not hasattr(self, "global_timeline_canvas") or not self.global_timeline_canvas.winfo_exists():
             return
         self._prune_global_category_filter()
@@ -4478,8 +4484,9 @@ class CalendarApp(tk.Tk):
         unfinished = sum(not item.completed for item in model.items)
         ddl_count = sum(bool(item.ddl_date) and not item.completed for item in model.items)
         self.global_summary_label.configure(text=f"本月 {len(model.items)} 项工作 · {unfinished} 项未完成 · {ddl_count} 个 DDL")
-        self._refresh_global_category_filter_button()
-        self._refresh_global_category_sidebar()
+        if refresh_sidebar:
+            self._refresh_global_category_filter_button()
+            self._refresh_global_category_sidebar()
         self._draw_active_global_view()
 
     def set_global_display_mode(self, mode: str) -> None:
@@ -5630,7 +5637,7 @@ class CalendarApp(tk.Tk):
             return HolidayInfo("自定义假期", "放假", "day_off")
         return holiday_for(day) if self.show_holidays else None
 
-    def render_agenda(self) -> None:
+    def _render_agenda_items(self) -> None:
         theme = self.theme
         for child in self.agenda_inner.winfo_children():
             child.destroy()
@@ -5674,8 +5681,18 @@ class CalendarApp(tk.Tk):
                 else:
                     self._build_event_card(item)
 
+    def render_agenda(self, *, refresh_items: bool = True, refresh_ddl: bool = True) -> None:
+        if refresh_items:
+            self._render_agenda_items()
         upcoming_count = len(self.store.upcoming(7, include_overdue=True))
         self.upcoming_label.configure(text=f"未来 7 天 · {upcoming_count} 项  ›")
+        if refresh_ddl:
+            self._refresh_ddl_regions()
+        self._set_quick_placeholder()
+        if refresh_items:
+            self.after_idle(self._update_scrollbar)
+
+    def _refresh_ddl_regions(self) -> None:
         pinned_ddl, regular_ddl = self.store.grouped_ddl_events()
         self._render_ddl_area(
             pinned_ddl,
@@ -5694,8 +5711,6 @@ class CalendarApp(tk.Tk):
             pinned=False,
         )
         self._apply_main_layout(len(pinned_ddl), len(regular_ddl))
-        self._set_quick_placeholder()
-        self.after_idle(self._update_scrollbar)
 
     def _render_ddl_area(
         self,
@@ -6044,8 +6059,10 @@ class CalendarApp(tk.Tk):
         editor._present()
 
     def category_data_changed(self) -> None:
+        # Catalog edits can change many inherited colors or remove categories.
+        # They are not event commands in V1; keep history from restoring stale links.
+        self.event_commands.clear()
         self._prune_global_category_filter()
-        self.store.save()
         if self.category_manager and self.category_manager.winfo_exists():
             self.category_manager.refresh()
         if self.editor_window and self.editor_window.winfo_exists():
@@ -6404,21 +6421,86 @@ class CalendarApp(tk.Tk):
                 continue
         return active
 
-    def upsert_event(self, event: Event) -> None:
-        self.store.upsert(event)
-        self.selected = self.store.event_dates(event)[0]
-        self.shown_year, self.shown_month = self.selected.year, self.selected.month
-        self.render()
+    def _run_event_command(self, action: Callable[[], Optional[EventChange]], *, focus_result: bool = False) -> bool:
+        try:
+            change = action()
+        except (OSError, ValueError, OverflowError) as exc:
+            owner = self._active_modal_window() or self
+            owned_messagebox(owner, messagebox.showerror, APP_NAME, f"事项操作未完成，数据已保留。\n\n{exc}")
+            return False
+        if change is not None:
+            focus_day = change.after_dates[0] if focus_result and change.after_dates else None
+            self._refresh_event_change(change, focus_day=focus_day)
+        return True
 
-    def delete_event(self, event_id: str) -> None:
-        self.store.delete(event_id)
-        self.render()
+    def _refresh_event_change(self, change: EventChange, *, focus_day: Optional[date] = None) -> None:
+        previous_selection = self.selected
+        previous_month = (self.shown_year, self.shown_month)
+        if focus_day is not None:
+            self.selected = focus_day
+            self.shown_year, self.shown_month = focus_day.year, focus_day.month
+        month_changed = previous_month != (self.shown_year, self.shown_month)
+        if self.view_mode == "global":
+            if month_changed or any(day.year == self.shown_year and day.month == self.shown_month for day in change.affected_dates):
+                # Row ordering and weekly lane packing require one active-Canvas
+                # redraw, but not a shell, sidebar, modal, or theme rebuild.
+                self._render_global_timeline(refresh_sidebar=False)
+        elif month_changed:
+            self.render()
+            return
+        else:
+            selection_dates = {previous_selection, self.selected} if previous_selection != self.selected else set()
+            for cell in self.day_cells:
+                if cell.day in change.affected_dates or cell.day in selection_dates:
+                    events = self.store.events_on(cell.day)
+                    cell.event_colors = [self.store.effective_event_color(item) if not item.done else self.theme.event_done for item in events][:3]
+                    cell.ddl = self.store.has_ddl_on(cell.day)
+                    cell.selected = cell.day == self.selected
+                    cell.draw()
+            self.render_agenda(
+                refresh_items=self.selected in change.affected_dates or previous_selection != self.selected,
+                refresh_ddl=change.ddl_changed,
+            )
+        if self.day_detail_window and self.day_detail_window.winfo_exists() and self.day_detail_window.day in change.affected_dates:
+            self.day_detail_window.refresh()
+        if change.ddl_changed and self.ddl_list_window and self.ddl_list_window.winfo_exists():
+            self.ddl_list_window.refresh()
 
-    def toggle_done(self, event: Event) -> None:
-        event.done = not event.done
-        event.snooze_until = None
-        self.store.upsert(event)
-        self.render()
+    def upsert_event(self, event: Event) -> bool:
+        return self._run_event_command(lambda: self.event_commands.upsert(event), focus_result=True)
+
+    def commit_event_preview(self, preview: EventPreview, *, focus_result: bool = False) -> bool:
+        """Shared mouse-release endpoint for future Flow and Timeline dragging."""
+        return self._run_event_command(lambda: self.event_commands.commit(preview), focus_result=focus_result)
+
+    def delete_event(self, event_id: str) -> bool:
+        return self._run_event_command(lambda: self.event_commands.delete(event_id))
+
+    def toggle_done(self, event: Event) -> bool:
+        current = self.store.event_by_id(event.id)
+        if current is None:
+            return False
+        return self._run_event_command(lambda: self.event_commands.update(
+            current.id, label="取消完成" if current.done else "完成事项", done=not current.done, snooze_until=None,
+        ))
+
+    def undo_event(self) -> None:
+        self._run_event_command(self.event_commands.undo)
+
+    def redo_event(self) -> None:
+        self._run_event_command(self.event_commands.redo)
+
+    def _history_shortcut(self, event: tk.Event, *, redo: bool) -> Optional[str]:
+        if event.widget.winfo_class() in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"):
+            return None
+        if any(window is not None and window.winfo_exists() for window in
+               (self.editor_window, self.category_editor, self.routine_editor)):
+            return "break"
+        if redo:
+            self.redo_event()
+        else:
+            self.undo_event()
+        return "break"
 
     def toggle_routine(self, item: RoutineItem, day: Optional[date] = None) -> None:
         target_day = day or self.selected
@@ -6431,15 +6513,15 @@ class CalendarApp(tk.Tk):
         title = self.quick_var.get().strip()
         if not title or self.quick_placeholder_active:
             return "break"
-        self.store.create_quick(
+        if not self._run_event_command(lambda: self.event_commands.create_quick(
             title,
             self.selected,
             color=self.quick_color,
             event_type=self.quick_event_type,
-        )
+        )):
+            return "break"
         self.quick_var.set("")
         self.quick_placeholder_active = False
-        self.render()
         if hasattr(self.quick_entry, "configure") and hasattr(self, "after"):
             self.quick_placeholder_active = True
             self.quick_var.set("已保存 · 可继续输入")
@@ -6735,13 +6817,11 @@ class CalendarApp(tk.Tk):
             self.delete_event(event.id)
 
     def defer_to_tomorrow(self, event: Event) -> None:
-        self.store.clear_notifications(event.id)
-        event.due = (event.due_at + timedelta(days=1)).isoformat(timespec="minutes")
-        event.snooze_until = None
-        self.store.upsert(event)
-        self.selected = event.due_date
-        self.shown_year, self.shown_month = self.selected.year, self.selected.month
-        self.render()
+        current = self.store.event_by_id(event.id)
+        if current is not None:
+            self._run_event_command(lambda: self.event_commands.commit(self.event_commands.preview_schedule(
+                current.id, start_date=current.due_date + timedelta(days=1),
+            )), focus_result=True)
 
     def _focus_quick_entry(self) -> None:
         self.quick_entry.focus_set()
@@ -6772,6 +6852,11 @@ class CalendarApp(tk.Tk):
 
     def show_main_menu(self) -> None:
         menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
+        menu.add_command(label=f"撤销 {self.event_commands.undo_label}\tCtrl+Z", command=self.undo_event,
+                         state="normal" if self.event_commands.can_undo else "disabled")
+        menu.add_command(label=f"重做 {self.event_commands.redo_label}\tCtrl+Y", command=self.redo_event,
+                         state="normal" if self.event_commands.can_redo else "disabled")
+        menu.add_separator()
         menu.add_command(
             label="切换为桌面模式" if self.window_mode == "pinned" else "始终置顶",
             command=self.toggle_window_mode,
@@ -6918,6 +7003,8 @@ class CalendarApp(tk.Tk):
             "Ctrl+N：打开当天事项详情\n"
             "Ctrl+T：回到今天\n"
             "Ctrl+G：打开 / 关闭全局视图\n"
+            "Ctrl+Z：撤销事项操作；Ctrl+Y / Ctrl+Shift+Z：重做\n"
+            "文本输入时优先使用文本编辑自身的撤销\n"
             "拖动顶部：移动挂件位置\n\n"
             "顶部横线 / Alt+F4：隐藏到通知区域，提醒继续运行\n"
             "真正退出：右键托盘图标并选择“退出桌面月历”\n\n"
@@ -7158,16 +7245,16 @@ class CalendarApp(tk.Tk):
             self.notification_windows.remove(popup)
 
     def snooze_event(self, event: Event, popup: tk.Toplevel) -> None:
-        event.snooze_until = (datetime.now() + timedelta(minutes=10)).isoformat(timespec="minutes")
-        self.store.save()
-        popup.destroy()
+        if self._run_event_command(lambda: self.event_commands.update(
+            event.id, label="稍后提醒", snooze_until=(datetime.now() + timedelta(minutes=10)).isoformat(timespec="minutes"),
+        )):
+            popup.destroy()
 
     def complete_from_notification(self, event: Event, popup: tk.Toplevel) -> None:
-        event.done = True
-        event.snooze_until = None
-        self.store.upsert(event)
-        popup.destroy()
-        self.render()
+        if self._run_event_command(lambda: self.event_commands.update(
+            event.id, label="完成事项", done=True, snooze_until=None,
+        )):
+            popup.destroy()
 
     def hide_to_tray(self) -> None:
         if not self.tray_icon:

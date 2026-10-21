@@ -448,7 +448,6 @@ class Store:
     def save(self) -> None:
         self.data_file.parent.mkdir(parents=True, exist_ok=True)
         notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
-        self.notified = set(notification_history)
         payload = {
             "version": 7,
             "events": [asdict(event) for event in self.events],
@@ -461,6 +460,61 @@ class Store:
         temporary = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(self.data_file)
+        self.notified = set(notification_history)
+
+    def prepare_event(self, event: Event) -> Event:
+        """Validate a detached candidate without changing canonical tasks or writing data."""
+        candidate = Event.from_dict(asdict(event))
+        category = self.category_by_id(candidate.category_id)
+        if category is None:
+            candidate.category_id = None
+            candidate.color_mode = "override"
+        elif candidate.color_mode == "inherit":
+            candidate.color = category.color
+        self.event_dates(candidate)  # Validate the entire span before accepting a command.
+        return candidate
+
+    def persist_event_state(
+        self,
+        event_id: str,
+        event: Optional[Event],
+        *,
+        index: Optional[int],
+        notification_keys: Collection[str],
+    ) -> None:
+        """Replace one task and its reminders atomically; retain all unrelated user data."""
+        if event is not None and event.id != event_id:
+            raise ValueError("event id cannot change")
+        previous_events, previous_notified = self.events, self.notified
+        replacement = [item for item in self.events if item.id != event_id]
+        if event is not None:
+            replacement.insert(min(max(0, index if index is not None else len(replacement)), len(replacement)), event)
+        prefix = event_id + ":"
+        self.events = replacement
+        self.notified = {key for key in self.notified if not key.startswith(prefix)} | set(notification_keys)
+        try:
+            self.save()
+        except Exception:
+            self.events, self.notified = previous_events, previous_notified
+            raise
+
+    def duration_for_range(self, start: date, end: date, *, skip_non_working_days: bool = False) -> int:
+        """Convert a resize endpoint into the same effective-day count used by Event."""
+        if end < start:
+            raise ValueError("end date must not precede start date")
+        duration = 0
+        current = start
+        while current <= end:
+            if not skip_non_working_days or self.is_workday(current):
+                duration += 1
+            if duration > 365:
+                raise ValueError("duration must be between 1 and 365 effective days")
+            if current == end:
+                break
+            current += timedelta(days=1)
+        if duration == 0:
+            raise ValueError("date range contains no effective days")
+        return duration
 
     def upsert(self, event: Event) -> None:
         category = self.category_by_id(event.category_id)
@@ -589,8 +643,17 @@ class Store:
         color: Optional[str] = None,
         event_type: str = "general",
     ) -> Event:
+        event = self.make_quick_event(title, day, color=color, event_type=event_type)
+        self.upsert(event)
+        return event
+
+    @staticmethod
+    def make_quick_event(
+        title: str, day: date, *, color: Optional[str] = None, event_type: str = "general"
+    ) -> Event:
+        """Shared quick-add defaults, independent from saving and command history."""
         due = datetime.combine(day, datetime.min.time()).replace(hour=23, minute=59)
-        event = Event(
+        return Event(
             id=str(uuid.uuid4()),
             title=title.strip(),
             due=due.isoformat(timespec="minutes"),
@@ -599,8 +662,6 @@ class Store:
             event_type=event_type,
             reminder=None,
         )
-        self.upsert(event)
-        return event
 
     def upsert_routine(self, item: RoutineItem) -> None:
         previous = next((existing for existing in self.routines if existing.id == item.id), None)
