@@ -137,7 +137,7 @@ class GlobalDragMixin:
             return
         canvas.configure(cursor="fleur" if drag.operation == "move" else "sb_h_double_arrow")
         days = preview.effective_dates
-        self.global_status_label.configure(text=f"预览 {days[0]:%Y-%m-%d} → {days[-1]:%Y-%m-%d} · {len(days)}个有效日 · 松开提交 · Esc 取消 · 边缘停留或 PgUp/PgDn 切月")
+        self.global_status_label.configure(text=f"预览：{preview.event().title} · {days[0]:%Y-%m-%d} → {days[-1]:%Y-%m-%d} · {len(days)}个有效日 · 松开提交 · Esc 取消 · 边缘停留或 PgUp/PgDn 切月")
         theme, dp = self.theme, self.dpi.px
         color = preview.effective_color or theme.accent
         if self.global_display_mode == "flow":

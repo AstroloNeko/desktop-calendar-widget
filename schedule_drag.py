@@ -67,7 +67,10 @@ class ScheduleDrag:
             if live.before != self.source.before or live.effective_dates != self.source.effective_dates:
                 raise CommandConflictError("事项或工作日日历已变化，请重新拖动")
             if self.operation == "move":
-                start = event.due_date + timedelta(days=(day - self.anchor_day).days)
+                delta = (day - self.anchor_day).days
+                # A stored Saturday start can be displayed from Monday. Move
+                # the visible schedule, not an invisible pre-expansion anchor.
+                start = self.source.effective_dates[0] + timedelta(days=delta) if delta else event.due_date
                 candidate = self.history.preview_schedule(event.id, start_date=start)
             elif self.operation == "start":
                 candidate = self.history.preview_schedule(event.id, start_date=day, end_date=self.source.effective_dates[-1])

@@ -195,6 +195,7 @@ def build_month_timeline(
     today: Optional[date] = None,
     category_ids: Optional[Collection[str]] = None,
     include_uncategorized: bool = True,
+    reveal_event_ids: Collection[str] = (),
 ) -> TimelineMonth:
     """Build one immutable month model from the same facts used by Compact View."""
     last_day = calendar.monthrange(year, month)[1]
@@ -210,7 +211,7 @@ def build_month_timeline(
         for item in (
             _timeline_item(store, event, period_start, period_end)
             for event in store.events
-            if store.event_matches_category_filter(
+            if event.id in reveal_event_ids or store.event_matches_category_filter(
                 event,
                 None if category_ids is None else frozenset(category_ids),
                 include_uncategorized=include_uncategorized,

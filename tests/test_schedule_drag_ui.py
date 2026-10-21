@@ -82,3 +82,23 @@ class ScheduleDragUITests(unittest.TestCase):
     def test_modal_editor_blocks_drag_start(self):
         fake = SimpleNamespace(_active_modal_window=lambda: object())
         self.assertIsNone(GlobalDragMixin._schedule_press(fake, Mock()))
+
+    def test_drag_month_navigation_keeps_source_gesture_and_only_rebuilds_on_transition(self):
+        drag = Mock()
+        fake = SimpleNamespace(shown_year=2026, shown_month=12, _schedule_drag=drag,
+                               _schedule_pointer=object(), _render_global_timeline=Mock(), _schedule_motion=Mock())
+        GlobalDragMixin._schedule_navigate_month(fake, 1)
+        self.assertEqual((fake.shown_year, fake.shown_month), (2027, 1))
+        self.assertIs(fake._schedule_drag, drag)
+        fake._render_global_timeline.assert_called_once_with(refresh_sidebar=False)
+        fake._schedule_motion.assert_called_once_with(fake._schedule_pointer)
+
+    def test_scrolled_timeline_edge_scrolls_before_changing_month(self):
+        canvas = Mock()
+        canvas.xview.return_value = (0, .5)
+        fake = SimpleNamespace(_schedule_drag=Mock(), global_display_mode="timeline", _schedule_canvas=canvas,
+                               _schedule_month_direction=1, _global_xview=Mock(), _schedule_motion=Mock(),
+                               _schedule_pointer=object(), after=Mock(), _schedule_turn_month=Mock())
+        GlobalDragMixin._schedule_turn_month(fake)
+        fake._global_xview.assert_called_once_with("scroll", 4, "units")
+        fake.after.assert_called_once_with(150, fake._schedule_turn_month)

@@ -114,7 +114,8 @@ class ScheduleDragTests(unittest.TestCase):
 
     def test_external_edit_or_delete_rejects_drag(self):
         for deleted in (False, True):
-            self.setUp() if deleted else None
+            self.store.events = [Event("event", "同名任务", "2026-08-07T10:30", duration_days=5, end_as_ddl=True)]
+            self.history.clear()
             drag = self.gesture()
             if deleted:
                 self.history.delete("event")
@@ -147,6 +148,51 @@ class ScheduleDragTests(unittest.TestCase):
         drag = self.gesture()
         self.assertIsNone(self.move(drag, date.max))
         self.assertIsNone(drag.finish())
+
+    def test_nonworking_stored_start_moves_from_first_effective_date(self):
+        self.store.events[0].due = "2026-08-08T10:30"
+        self.store.events[0].skip_non_working_days = True
+        drag = self.gesture(anchor=date(2026, 8, 10))
+        preview = self.move(drag, date(2026, 8, 11))
+        self.assertEqual(preview.effective_dates[0], date(2026, 8, 11))
+        self.assertEqual(preview.event().duration_days, 5)
+
+    def test_single_day_can_move_and_resize_into_multiple_days(self):
+        self.store.events[0].duration_days = 1
+        for operation in ("move", "end", "start"):
+            drag = self.gesture(operation, anchor=date(2026, 8, 7))
+            day = date(2026, 8, 6) if operation == "start" else date(2026, 8, 8)
+            self.assertIsNotNone(self.move(drag, day))
+
+    def test_cross_month_resize_and_ddl_actual_end(self):
+        drag = self.gesture("end")
+        preview = self.move(drag, date(2026, 9, 3))
+        self.assertEqual(preview.deadline, date(2026, 9, 3))
+        self.assertEqual(preview.event().duration_days, 28)
+
+    def test_adjusted_weekend_workday_is_kept(self):
+        event = self.store.events[0]
+        event.due, event.skip_non_working_days, event.duration_days = "2026-10-09T10:30", True, 2
+        drag = self.gesture("end", anchor=date(2026, 10, 10))
+        preview = self.move(drag, date(2026, 10, 10))
+        self.assertIn(date(2026, 10, 10), preview.effective_dates)
+        self.assertEqual(preview.event().duration_days, 2)
+
+    def test_canvas_date_mapping_with_scroll_offsets_at_all_dpis(self):
+        from calendar_flow_layout import build_calendar_flow_layout, flow_day_at
+        from dpi_utils import scale_px
+        from global_timeline_ui import canvas_day_at
+        from timeline_model import build_month_timeline
+        model = build_month_timeline(self.store, 2026, 8)
+        layout = build_calendar_flow_layout(model)
+        for dpi in (96, 120, 144, 168, 192):
+            with self.subTest(dpi=dpi):
+                column, week = scale_px(100, dpi), scale_px(150, dpi)
+                day = flow_day_at(column * 3 + scale_px(50, dpi), week * 2 + scale_px(10, dpi),
+                                  layout=layout, column_width=column, week_height=week)
+                self.assertEqual(day, layout.weeks[2].dates[3])
+                self.assertEqual(canvas_day_at(column * 8 + scale_px(10, dpi), period_start=model.period_start,
+                                               day_width=column, day_count=31), date(2026, 8, 9))
 
     def test_dpi_threshold_and_real_endpoint_hits(self):
         for dpi in (96, 120, 144, 168, 192):

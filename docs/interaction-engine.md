@@ -1,4 +1,4 @@
-# v0.9.0 interaction engine, phase 1
+# v0.9.0 interaction engine
 
 ## Existing architecture and scope
 
@@ -91,3 +91,49 @@ opening, theme/view changes, external event edits and focus loss cancel safely.
 Horizontal edge dwell scrolls Timeline first, then changes month; Flow changes
 month after a 750 ms dwell. PgUp/PgDn also navigate while retaining the gesture.
 Only deliberate month navigation redraws the complete renderer during a drag.
+
+## Global search and command palette
+
+`EventSearchIndex` projects all canonical events (past/future/completed included)
+into immutable search documents. It reuses Store's actual effective dates,
+deadline and category color. A detached snapshot feeds one background worker;
+no worker touches Tk, saves data, or mutates a canonical Event. Title exact,
+prefix, substring, then category/notes matches rank by date and stable ID.
+Case folding and whitespace normalization apply to Chinese/English queries.
+
+`EventSearchService` caches the index by revision, cancels queued stale requests
+and delivers only the latest ticket via a queue. Event commands (including
+undo/redo), category changes and date-state changes invalidate it. UI input is
+debounced 70 ms; results are capped at 100 events plus matching commands.
+Narrow the query to find additional matches. History/indexes are session-only.
+
+Ctrl+K is registered once and shared by Compact/Flow/Timeline. SearchDialog
+uses the existing modal owner stack, releases its grab before an action opens
+an editor, restores focus on Escape, and never steals an existing editor's
+unsaved session. Seven commands reuse existing application entry points.
+Explicit year-month-day date formats are accepted; ambiguous natural dates are
+not interpreted. Searching itself creates no undo records.
+
+Activating an event selects its actual start date and opens the existing editor.
+Global also selects/scrolls the result and temporarily reveals that stable ID,
+not its entire category. Both renderers consume the same revealed month model.
+The Sidebar selection is never saved/changed by search; the next filter action
+clears temporary reveal. A summary hint identifies the temporary state. Flow
+overflow events remain accessible through the editor even below visible lanes.
+
+## Validation and performance
+
+`py -3 tools/check_interactions.py --performance` opens real native test windows
+using only a temporary Store. It checks four themes, Compact/Flow/Timeline,
+move/start/end resize and undo, cancellation, search singleton, focus/grabs,
+keyboard activation and filtered results. It also records 100/500/1000-event
+search, Flow scroll, category redraw and Timeline preview costs. It never
+registers a tray icon or sends real reminders. Headless tests separately cover
+96/120/144/168/192 DPI coordinate mapping and thresholds.
+
+At actual 192 DPI on the development machine, the 1000-event sample took
+approximately 14 ms to build its background index, 2 ms per search, 10–11 ms
+per drag preview frame, 21–25 ms per actual Flow scroll paint, and 125–135 ms
+for a category-triggered full redraw.
+Filtering and committed mutations still require one lane/row-layout redraw;
+motion does not. These are local observations, not cross-machine guarantees.
