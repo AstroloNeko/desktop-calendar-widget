@@ -99,7 +99,7 @@ from backup_ui import BackupActionsMixin
 from data_backup import automatic_backup
 from data_compat import DataCompatibilityError
 from update_state import update_in_progress
-from update_dialog import UpdateAvailableDialog
+from update_dialog import UpdateAvailableDialog, ReleaseHistoryDialog
 from habit_schedule import schedule_label
 from habit_ui import HabitScheduleForm
 from ui_draw import (
@@ -7224,6 +7224,8 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
         menu.add_checkbutton(label="开机自动启动", variable=self.autostart_var, command=lambda: self.toggle_autostart(self.autostart_var.get()))
         self.holiday_var = tk.BooleanVar(value=self.show_holidays)
         menu.add_checkbutton(label="显示节假日与常用节日", variable=self.holiday_var, command=lambda: self.toggle_holidays(self.holiday_var.get()))
+        menu.add_command(label="版本与更新日志…",
+                         command=lambda: self._queue_context_menu_action(menu, self.open_release_history))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
         data_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         data_menu.add_command(label="备份数据…", command=self.export_backup)
@@ -7349,6 +7351,9 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
             self.after(0, callback)
         except (RuntimeError, tk.TclError):
             pass
+
+    def open_release_history(self) -> None:
+        ReleaseHistoryDialog(self, __version__, resource_path("CHANGELOG.md"), FONT)
 
     def check_for_updates(self) -> None:
         if self.update_busy:

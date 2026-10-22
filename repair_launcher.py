@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import os
+import re
 import queue
 import shutil
 import subprocess
@@ -19,6 +20,10 @@ from typing import Callable
 from update_manager import GITHUB_REPOSITORY, UpdateInfo, check_for_update, download_update, version_tuple
 from version import __version__
 from update_payload import PayloadError, stage_verified_updater as _stage_verified_updater
+from dpi_utils import dpi_for_window, work_area_for_window
+from release_notes_ui import NotesDocument
+from update_dialog import dialog_geometry
+from ui_theme import get_theme
 
 
 APP_EXE = "DesktopCalendar.exe"
@@ -48,6 +53,83 @@ def repair_action(latest_version: str, installed_version: str = __version__) -> 
     if latest < installed:
         raise RepairError("GitHub 上的正式版本比此修复工具更旧，已取消降级。")
     return "更新" if latest > installed else "重新安装"
+
+
+def installed_version(directory: Path) -> str | None:
+    """Read program-only build metadata; never open calendar data or execute EXEs."""
+    try:
+        value = (directory / "app-version.txt").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    return value if re.fullmatch(r"\d+\.\d+\.\d+", value) else None
+
+
+def repair_description(info: UpdateInfo, local: str | None) -> tuple[str, str, str]:
+    # Preserve the existing no-downgrade guard against this tool's own version,
+    # and additionally protect a newer installation when metadata is available.
+    repair_action(info.version, __version__)
+    action = repair_action(info.version, local) if local else "修复 / 更新"
+    if local is None:
+        heading = f"修复版本 {info.tag}（已安装版本未知）"
+    elif version_tuple(info.version) > version_tuple(local):
+        heading = f"发现新版本 {info.tag}"
+    else:
+        heading = f"当前已是最新版本 · 修复版本 {info.tag}"
+    summary = f"本地 v{local} → {info.tag}" if local else f"已安装版本无法确认 · 修复工具 v{__version__} → 目标 {info.tag}"
+    return heading, summary, action
+
+
+class RepairNotesDialog(tk.Toplevel):
+    """Independent confirmation: no main app, calendar Store or network calls."""
+
+    def __init__(self, master, info: UpdateInfo, local: str | None):
+        heading, summary, action = repair_description(info, local)
+        super().__init__(master)
+        self.withdraw()
+        self.accepted = False
+        self._closing = False
+        self.title("确认修复 / 更新")
+        dpi = dpi_for_window(master)
+        px = lambda value: round(value * dpi / 96)
+        area = work_area_for_window(master)
+        w, h, x, y = dialog_geometry(area, dpi, (master.winfo_rootx(), master.winfo_rooty(),
+                                                master.winfo_width(), master.winfo_height()))
+        self.geometry(f"{w}x{h}{x:+d}{y:+d}")
+        self.minsize(min(w, px(320)), min(h, px(260)))
+        self.maxsize(max(w, area.width - px(48)), max(h, area.height - px(48)))
+        theme = get_theme("modern")
+        self.configure(bg=theme.panel_background)
+        actions = ttk.Frame(self, padding=px(12))
+        actions.pack(side="bottom", fill="x")
+        self.confirm_button = ttk.Button(actions, text=f"确认{action}", command=lambda: self.close(True))
+        self.confirm_button.pack(side="right")
+        self.cancel_button = ttk.Button(actions, text="稍后再说", command=self.close)
+        self.cancel_button.pack(side="right", padx=px(8))
+        header = ttk.Frame(self, padding=px(12))
+        header.pack(side="top", fill="x")
+        ttk.Label(header, text=heading, wraplength=w - px(48), font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(header, text=summary, wraplength=w - px(48)).pack(anchor="w", pady=px(4))
+        ttk.Label(header, text="来源：GitHub 目标版本 Release Notes · 确认后才下载", wraplength=w - px(48)).pack(anchor="w")
+        self.document = NotesDocument(self, theme, px)
+        self.document.pack(fill="both", expand=True, padx=px(12))
+        self.document.show(info.notes, info.name if info.name != info.tag else "")
+        self.notes = self.document.text
+        self.transient(master)
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.bind("<Escape>", lambda _event: self.close())
+        self.deiconify()
+        self.lift()
+        self.grab_set()
+        self.cancel_button.focus_set()
+
+    def close(self, accepted=False):
+        if self._closing:
+            return
+        self._closing = True
+        self.accepted = accepted
+        if self.grab_current() is self:
+            self.grab_release()
+        self.destroy()
 
 
 def validate_installation_directory(directory: Path) -> Path:
@@ -174,6 +256,12 @@ class RepairWindow(tk.Tk):
 
         self._run_worker(download)
 
+    def _confirm_release(self, info: UpdateInfo) -> bool:
+        local = installed_version(self.install_dir) if self.install_dir else None
+        dialog = RepairNotesDialog(self, info, local)
+        self.wait_window(dialog)
+        return dialog.accepted
+
     def _poll_messages(self) -> None:
         try:
             while True:
@@ -183,16 +271,11 @@ class RepairWindow(tk.Tk):
                 elif kind == "release":
                     info = payload
                     try:
-                        action = repair_action(info.version)
+                        confirmed = self._confirm_release(info)
                     except RepairError as exc:
                         self._show_error(str(exc))
                         continue
-                    if messagebox.askyesno(
-                        "确认修复",
-                        f"找到正式版本 {info.tag}。是否{action}程序文件？\n\n"
-                        "个人事项、习惯和设置不会被删除。",
-                        parent=self,
-                    ):
+                    if confirmed:
                         self._start_download(info)
                     else:
                         self.status.set("已取消；没有修改程序或个人数据。")
