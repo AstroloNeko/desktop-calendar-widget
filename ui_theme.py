@@ -14,6 +14,16 @@ class ThemeMetrics:
     shadow_depth: int = 2
     highlight_alpha: float = 0.45
     animation_ms: int = 90
+    workspace_padding: int = 12
+    workspace_gap: int = 8
+    flow_card_radius: int = 4
+    flow_title_y: int = 8
+    flow_meta_y: int = 22
+    timeline_label_font_size: int = 8
+    timeline_bar_font_size: int = 7
+    tooltip_padding_x: int = 8
+    tooltip_padding_y: int = 5
+    tooltip_max_width: int = 320
 
 
 @dataclass(frozen=True)
@@ -30,6 +40,13 @@ class Theme:
     panel_background: str
     panel_secondary: str
     divider: str
+
+    # Quiet workspace surfaces; independent from Compact and content colors.
+    workspace_sidebar: str
+    workspace_detail: str
+    workspace_grid: str
+    search_match_background: str
+    search_match_text: str
 
     # Optional environmental decoration used by expressive themes.
     environment_haze: str
@@ -143,6 +160,11 @@ MODERN = Theme(
     panel_background="#F7F6F2",
     panel_secondary="#EEEDE9",
     divider="#D8D7D2",
+    workspace_sidebar="#F3F2EE",
+    workspace_detail="#FAF9F6",
+    workspace_grid="#E5E4DF",
+    search_match_background="#DDDFFC",
+    search_match_text="#424DB1",
     environment_haze="#F2F1ED",
     environment_horizon="#D8D7D2",
     environment_highlight="#FFFFFF",
@@ -250,6 +272,11 @@ WIN7_AERO = Theme(
     panel_background="#FAFAF7",
     panel_secondary="#F1F2EF",
     divider="#E1E3E1",
+    workspace_sidebar="#F0F4F3",
+    workspace_detail="#F7F9F7",
+    workspace_grid="#E2E7E5",
+    search_match_background="#D6EAEE",
+    search_match_text="#24566A",
     environment_haze="#F1F2EF",
     environment_horizon="#D5DCDA",
     environment_highlight="#FFFFFF",
@@ -360,6 +387,11 @@ PAPER = Theme(
     panel_background="#F5EFE4",
     panel_secondary="#ECE3D5",
     divider="#D9CFC0",
+    workspace_sidebar="#F3EDE3",
+    workspace_detail="#FBF7EF",
+    workspace_grid="#E4DCCD",
+    search_match_background="#F1DEC0",
+    search_match_text="#79552D",
     environment_haze="#EEE8DA",
     environment_horizon="#D3C8B6",
     environment_highlight="#FFFDF8",
@@ -470,6 +502,11 @@ FRUTIGER = Theme(
     panel_background="#EFFAFA",
     panel_secondary="#DDF3F4",
     divider="#B9DDE0",
+    workspace_sidebar="#E5F4F3",
+    workspace_detail="#F1FBF8",
+    workspace_grid="#CCE5E7",
+    search_match_background="#C8EFF0",
+    search_match_text="#006479",
     environment_haze="#ECF8E9",
     environment_horizon="#B9DCAC",
     environment_highlight="#F8FFF5",

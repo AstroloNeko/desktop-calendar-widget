@@ -21,6 +21,43 @@ def blend(first: str, second: str, amount: float) -> str:
     return "#" + "".join(f"{value:02X}" for value in values)
 
 
+def readable_text(background: str, dark: str, light: str) -> str:
+    """Choose the higher-contrast theme text for arbitrary user content colors."""
+    def luminance(color):
+        channels = [value / 255 for value in _rgb(color)]
+        linear = [value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4 for value in channels]
+        return sum(value * weight for value, weight in zip(linear, (.2126, .7152, .0722)))
+
+    base = luminance(background)
+    def contrast(color):
+        value = luminance(color)
+        return (max(base, value) + .05) / (min(base, value) + .05)
+    return max((dark, light), key=contrast)
+
+
+def draw_control_icon(canvas, kind, cx, cy, *, foreground, width=1):
+    """Small vector controls share an integer logical-pixel center."""
+    cx, cy = round(cx), round(cy)
+    if kind == "minimize":
+        canvas.create_line(cx - 5, cy + 3, cx + 5, cy + 3, fill=foreground, width=width)
+    elif kind in ("previous", "following"):
+        direction = -1 if kind == "previous" else 1
+        canvas.create_line(cx - direction * 2, cy - 4, cx + direction * 2, cy,
+                           cx - direction * 2, cy + 4, fill=foreground, width=width,
+                           capstyle="round", joinstyle="round")
+    elif kind == "search":
+        canvas.create_oval(cx - 6, cy - 6, cx + 2, cy + 2, outline=foreground, width=width)
+        canvas.create_line(cx + 1, cy + 1, cx + 5, cy + 5, fill=foreground, width=width, capstyle="round")
+
+
+def draw_compact_view_icon(canvas, cx: float, cy: float, *, foreground: str, background: str) -> None:
+    """Two overlapping views, in logical pixels (not a fullscreen/minimize glyph)."""
+    rounded_rectangle(canvas, cx - 9, cy - 8, cx + 5, cy + 3, 2,
+                      fill="", outline=foreground, width=1)
+    rounded_rectangle(canvas, cx - 1, cy - 1, cx + 9, cy + 8, 2,
+                      fill=background, outline=foreground, width=1)
+
+
 def draw_color_swatch(
     canvas: tk.Canvas,
     color: str,
@@ -116,6 +153,39 @@ def rounded_rectangle(
         x1, y2, x1, y2 - radius, x1, y1 + radius, x1, y1,
     )
     return canvas.create_polygon(points, smooth=True, splinesteps=18, **kwargs)
+
+
+def pooled_rounded_rectangle(pool, key, *bounds, radius, **options):
+    """Reuse rounded geometry through a named, presentation-only item slot."""
+    class Slot:
+        def create_rectangle(self, *coordinates, **kwargs):
+            return pool.item(key, "rectangle", coordinates, **kwargs)
+
+        def create_polygon(self, *coordinates, **kwargs):
+            return pool.item(key, "polygon", coordinates, **kwargs)
+
+    return rounded_rectangle(Slot(), *bounds, radius, **options)
+
+
+def draw_drag_bubble(pool, bounds, *, theme, color, title, subtitle, badge, font, small_font, scale):
+    x1, y1, x2, y2 = bounds
+    dp = scale
+    radius = dp(2 if theme.style == "paper" else theme.metrics.control_radius + 2)
+    background = blend(theme.panel_background, color, .08)
+    pooled_rounded_rectangle(pool, "bubble", *bounds, radius=radius, fill=background,
+                             outline=color, width=dp(1))
+    pool.item("bubble-stripe", "line", (x1 + dp(5), y1 + dp(10), x1 + dp(5), y2 - dp(10)),
+              fill=color, width=dp(3))
+    if theme.style in ("aero", "frutiger"):
+        pool.item("bubble-gloss", "line", (x1 + dp(9), y1 + dp(2), x2 - dp(9), y1 + dp(2)),
+                  fill=theme.control_highlight, width=dp(1))
+    pool.item("bubble-title", "text", (x1 + dp(14), y1 + dp(15)), text=title,
+              fill=theme.text_primary, font=font, anchor="w")
+    pool.item("bubble-date", "text", (x1 + dp(14), y1 + dp(37)), text=subtitle,
+              fill=theme.text_secondary, font=small_font, anchor="w")
+    if badge:
+        pool.item("bubble-badge", "text", (x2 - dp(10), y1 + dp(15)), text=badge,
+                  fill=theme.event_type_ddl, font=small_font, anchor="e")
 
 
 def rounded_vertical_gradient(

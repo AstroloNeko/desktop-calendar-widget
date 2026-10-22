@@ -419,7 +419,7 @@ class WindowBehaviorTests(unittest.TestCase):
             grab_current=lambda: modal,
         )
         with (
-            patch("app.make_app_window", side_effect=lambda owner: actions.append(("app-window", owner))),
+            patch("app.make_frameless_app_window", side_effect=lambda owner: actions.append(("app-window", owner))),
             patch("app.raise_for_interaction", side_effect=lambda owner: actions.append(("raise", owner))),
             patch("app.bring_to_front", side_effect=lambda owner: actions.append(("topmost", owner))),
         ):
@@ -670,7 +670,10 @@ class WindowBehaviorTests(unittest.TestCase):
 
     def test_global_toolbar_names_compact_return_explicitly(self) -> None:
         source = inspect.getsource(CalendarApp._build_global_ui)
-        self.assertIn('"紧凑视图", self.return_to_compact_view', source)
+        self.assertIn("self.global_header = GlobalHeader(", source)
+        from global_header import GlobalHeader
+        header_source = inspect.getsource(GlobalHeader)
+        self.assertIn('("compact", "", app.return_to_compact_view, "返回紧凑视图")', header_source)
 
     def test_global_display_switch_persists_and_redraws_in_place(self) -> None:
         actions: list[str] = []
@@ -951,6 +954,8 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertEqual(actions, ["redraw"])
 
     def test_global_detail_keeps_existing_task_semantics(self) -> None:
+        from ui_theme import get_theme
+
         class Capture:
             def __init__(self) -> None:
                 self.values: dict[str, object] = {}
@@ -961,11 +966,21 @@ class WindowBehaviorTests(unittest.TestCase):
             def set_text(self, text: str) -> None:
                 self.values["text"] = text
 
+            def draw(self) -> None:
+                pass
+
         fake = SimpleNamespace(
             global_detail_title=Capture(),
             global_detail_meta=Capture(),
             global_detail_notes=Capture(),
             global_detail_toggle_button=Capture(),
+            global_detail_edit_button=Capture(),
+            global_detail_delete_button=Capture(),
+            global_detail_state_label=Capture(),
+            global_detail_category_label=Capture(),
+            global_detail_color_label=Capture(),
+            global_detail_category_dot=SimpleNamespace(delete=lambda *_a: None, create_oval=lambda *_a, **_kw: None),
+            theme=get_theme("modern"),
         )
         item = SimpleNamespace(
             title="跨周交付",
@@ -983,14 +998,15 @@ class WindowBehaviorTests(unittest.TestCase):
         detail = str(fake.global_detail_meta.values["text"])
         self.assertIn("2026-08-03 → 2026-08-07", detail)
         self.assertIn("5 个自然日 · 5 个有效工作日", detail)
-        self.assertIn("事项性质：紧急", detail)
-        self.assertIn("事项分类：无分类", detail)
+        self.assertIn("事项性质\n紧急", detail)
+        self.assertEqual(fake.global_detail_category_label.values["text"], "无分类")
         self.assertIn("DDL：2026-08-07", detail)
-        self.assertIn("状态：已逾期", detail)
+        self.assertEqual(fake.global_detail_state_label.values["text"], "已逾期")
         self.assertIn("交付前复核", str(fake.global_detail_notes.values["text"]))
 
     def test_global_workspace_wires_complete_toolbar_and_quick_add(self) -> None:
-        source = inspect.getsource(CalendarApp._build_global_ui)
+        from global_header import GlobalHeader
+        source = inspect.getsource(CalendarApp._build_global_ui) + inspect.getsource(GlobalHeader)
         for command in (
             "open_new_event",
             "open_day_detail",
@@ -999,7 +1015,7 @@ class WindowBehaviorTests(unittest.TestCase):
             "toggle_window_mode",
             "show_main_menu",
             "return_to_compact_view",
-            "hide_to_tray",
+            "minimize_global",
             "quick_add",
             "show_quick_options",
         ):
@@ -1377,7 +1393,7 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIsNone(master.day_detail_window)
         self.assertEqual(actions, ["release", "leave", "destroy", "restore"])
 
-    def test_editor_close_refreshes_existing_day_detail(self) -> None:
+    def test_editor_close_restores_detail_without_duplicate_command_refresh(self) -> None:
         actions: list[str] = []
 
         class FakeDetail:
@@ -1407,7 +1423,7 @@ class WindowBehaviorTests(unittest.TestCase):
         EventEditor.close(editor)
 
         self.assertIsNone(master.editor_window)
-        self.assertEqual(actions, ["leave", "destroy", "refresh", "present"])
+        self.assertEqual(actions, ["leave", "destroy", "present"])
 
     def test_editor_cancel_without_detail_only_returns_to_main_window(self) -> None:
         actions: list[str] = []
@@ -1454,9 +1470,14 @@ class WindowBehaviorTests(unittest.TestCase):
             def set(self, value: str) -> None:
                 self.value = value
 
-        class FakeStore:
+        class FakeCommands:
             def create_quick(self, title: str, day: date, **options) -> None:
                 captured.update(title=title, day=day, **options)
+
+        def run_command(self, action):
+            action()
+            captured["rendered"] = True
+            return True
 
         class FakeEntry:
             def focus_set(self) -> None:
@@ -1471,7 +1492,8 @@ class WindowBehaviorTests(unittest.TestCase):
                 "quick_color": "#E65D67",
                 "quick_event_type": "ddl",
                 "selected": date(2026, 8, 5),
-                "store": FakeStore(),
+                "event_commands": FakeCommands(),
+                "_run_event_command": run_command,
                 "quick_entry": FakeEntry(),
                 "render": lambda self: captured.update(rendered=True),
             },

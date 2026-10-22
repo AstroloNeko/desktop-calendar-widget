@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import os
 from pathlib import Path
 from typing import Optional
@@ -30,13 +31,16 @@ class SingleInstance:
             self.handle = None
 
 
-def window_handle(widget) -> Optional[int]:
+def window_handle(widget, *, refresh: bool = True) -> Optional[int]:
     if not IS_WINDOWS:
         return None
-    widget.update_idletasks()
+    if refresh:
+        widget.update_idletasks()
     child = int(widget.winfo_id())
-    ctypes.windll.user32.GetAncestor.restype = ctypes.c_void_p
-    root = ctypes.windll.user32.GetAncestor(child, 2)  # GA_ROOT
+    get_ancestor = ctypes.windll.user32.GetAncestor
+    get_ancestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    get_ancestor.restype = wintypes.HWND
+    root = get_ancestor(child, 2)  # GA_ROOT
     return int(root or child)
 
 
@@ -138,6 +142,172 @@ def make_app_window(widget) -> None:
     set_long(hwnd, index, style)
     flags = 0x0001 | 0x0002 | 0x0004 | 0x0020  # NOSIZE | NOMOVE | NOZORDER | FRAMECHANGED
     user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags)
+
+
+def make_frameless_app_window(widget) -> None:
+    """Keep a managed taskbar window and native sizing, removing only its caption.
+
+    Unlike override-redirect this retains iconify, shell restore and Alt+Tab.
+    Idempotent style updates do not activate, raise or recreate the window.
+    HWND and LONG_PTR must stay pointer-wide on 64-bit Windows.
+    """
+    if not IS_WINDOWS:
+        return
+    hwnd = window_handle(widget)
+    if not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+    get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+    get_long.restype = ctypes.c_ssize_t
+    set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    set_long.restype = ctypes.c_ssize_t
+    position = user32.SetWindowPos
+    position.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                         ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    position.restype = wintypes.BOOL
+    changed = False
+    client_before = None
+    for index, remove, add in ((-16, 0x00C00000, 0), (-20, 0x80, 0x40000)):
+        old = get_long(hwnd, index)
+        new = (old & ~remove) | add
+        if old != new:
+            if index == -16 and old & 0x00C00000:
+                user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+                user32.GetClientRect.restype = wintypes.BOOL
+                client_before = wintypes.RECT()
+                if not user32.GetClientRect(hwnd, ctypes.byref(client_before)):
+                    raise OSError("Unable to read the client size before removing the caption")
+            set_long(hwnd, index, new)
+            changed = True
+    if changed:
+        position(hwnd, None, 0, 0, 0, 0, 0x37)  # NOACTIVATE | FRAMECHANGED, no move/size/Z-order
+        if client_before is not None:
+            # Removing the caption otherwise enlarges Tk's client area by the
+            # old titlebar metrics, accumulating on every geometry restoration.
+            # Correct once at the style transition, never during pointer Motion.
+            client_after, outer = wintypes.RECT(), wintypes.RECT()
+            user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            user32.GetWindowRect.restype = wintypes.BOOL
+            if not user32.GetClientRect(hwnd, ctypes.byref(client_after)) or not user32.GetWindowRect(hwnd, ctypes.byref(outer)):
+                raise OSError("Unable to read the captionless window size")
+            dx = (client_after.right-client_after.left) - (client_before.right-client_before.left)
+            dy = (client_after.bottom-client_after.top) - (client_before.bottom-client_before.top)
+            if dx or dy:
+                if not position(hwnd, None, 0, 0, outer.right-outer.left-dx,
+                                outer.bottom-outer.top-dy, 0x16):  # NOMOVE | NOZORDER | NOACTIVATE
+                    raise OSError("Unable to preserve the captionless client size")
+
+
+_WIN_EVENT_PROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(
+    None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND, wintypes.LONG,
+    wintypes.LONG, wintypes.DWORD, wintypes.DWORD,
+)
+
+
+class NativeWindowMove:
+    """One asynchronous system move, with a scoped move-end event subscription.
+
+    Post (never Send) the system command: entering a nested Windows/Tk loop
+    synchronously from a Python Tk callback can corrupt Tk's saved thread state.
+    No WndProc subclass, frame mutation, Motion handler or polling is involved.
+    The owning Tk root retains this object until its queued completion runs.
+    """
+    def __init__(self, widget) -> None:
+        self.widget = widget
+        self.hwnd: Optional[int] = None
+        self.client_hwnd: Optional[int] = None
+        self.hook: Optional[int] = None
+        self.started = False
+        self.ended = False
+        self._callback = _WIN_EVENT_PROC(self._event)
+
+    def start(self) -> bool:
+        if not IS_WINDOWS:
+            return False
+        user = ctypes.windll.user32
+        user.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        user.GetAsyncKeyState.restype = ctypes.c_short
+        if not user.GetAsyncKeyState(1) & 0x8000:
+            return False  # The press was already released; don't enter keyboard move mode.
+        # Already mapped. Don't run idle callbacks between the app's modal
+        # guard and ReleaseCapture; one could open a newer editor/dialog.
+        self.hwnd = window_handle(self.widget, refresh=False)
+        self.client_hwnd = int(self.widget.winfo_id())
+        if not self.hwnd:
+            return False
+        user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user.GetWindowThreadProcessId.restype = wintypes.DWORD
+        pid = wintypes.DWORD()
+        thread_id = user.GetWindowThreadProcessId(self.hwnd, ctypes.byref(pid))
+        if not thread_id or not pid.value:
+            raise OSError("Unable to identify the window's GUI thread")
+        user.SetWinEventHook.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE,
+                                       _WIN_EVENT_PROC, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+        user.SetWinEventHook.restype = wintypes.HANDLE
+        # EVENT_SYSTEM_MOVESIZESTART..END, this HWND's process AND GUI thread only.
+        self.hook = user.SetWinEventHook(0xA, 0xB, None, self._callback, pid.value, thread_id, 0)
+        if not self.hook:
+            raise OSError("Unable to subscribe to the Windows move-end event")
+        user.ReleaseCapture.argtypes = []
+        user.ReleaseCapture.restype = wintypes.BOOL
+        user.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t]
+        user.PostMessageW.restype = wintypes.BOOL
+        user.ReleaseCapture()
+        if not user.PostMessageW(self.hwnd, 0x0112, 0xF012, 0):  # WM_SYSCOMMAND / SC_MOVE | HTCAPTION
+            self.close()
+            raise OSError("Unable to start the Windows window move")
+        return True
+
+    def _event(self, _hook, event, hwnd, _object, _child, _thread, _time) -> None:
+        if not self.hook or hwnd != self.hwnd:
+            return
+        if event == 0xA:
+            self.started = True
+        elif event == 0xB:
+            self.ended = True
+            self.close()
+            # Never call Tcl/Tk from a ctypes WinEvent callback. The system move
+            # consumes the physical button-up; return that RELEASE to Tk's root
+            # (never the window under the pointer) to end Tk's implicit grab.
+            # No press/click is synthesized, and the header has no click action.
+            ctypes.windll.user32.PostMessageW(self.client_hwnd, 0x0202, 0, 0)
+
+    def close(self) -> None:
+        if self.hook:
+            user = ctypes.windll.user32
+            user.UnhookWinEvent.argtypes = [wintypes.HANDLE]
+            user.UnhookWinEvent.restype = wintypes.BOOL
+            hook = self.hook
+            self.hook = None
+            user.UnhookWinEvent(hook)
+            if self.started and not self.ended:
+                user.PostMessageW(self.hwnd, 0x001F, 0, 0)  # WM_CANCELMODE on hide/destroy/mode switch
+
+
+def clamp_native_window(widget) -> None:
+    """Clamp once after a system move, using the physical OUTER HWND rectangle.
+
+    Avoid Tk geometry writes: Tk's cached decorated-frame metrics don't match
+    our captionless native frame. No-op if already in bounds.
+    """
+    if not IS_WINDOWS:
+        return
+    hwnd = window_handle(widget, refresh=False)
+    user = ctypes.windll.user32
+    user.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user.GetWindowRect.restype = wintypes.BOOL
+    bounds = wintypes.RECT()
+    if not hwnd or not user.GetWindowRect(hwnd, ctypes.byref(bounds)):
+        raise OSError("Unable to read the moved window rectangle")
+    x, y = clamp_to_work_area(bounds.left, bounds.top, bounds.right-bounds.left, bounds.bottom-bounds.top)
+    if (x, y) != (bounds.left, bounds.top):
+        user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user.SetWindowPos.restype = wintypes.BOOL
+        if not user.SetWindowPos(hwnd, None, x, y, 0, 0, 0x215):  # NOSIZE | NOZORDER | NOACTIVATE | NOOWNERZORDER
+            raise OSError("Unable to keep the moved window in its work area")
 
 
 def _desktop_host() -> Optional[int]:
