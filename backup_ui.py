@@ -71,6 +71,8 @@ class BackupActionsMixin:
 
     def _refresh_restored_data(self):
         self._cancel_schedule_drag()
+        if hasattr(self, "bulk_selection"):
+            self.clear_bulk_selection()
         self.show_holidays = bool(self.store.settings.get("show_holidays", True))
         self.agenda_open = bool(self.store.settings.get("agenda_open", True))
         mode = self.store.settings.get("window_mode", "desktop")

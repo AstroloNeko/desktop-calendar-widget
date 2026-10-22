@@ -505,16 +505,31 @@ class Store:
         index: Optional[int],
         notification_keys: Collection[str],
     ) -> None:
-        """Replace one task and its reminders atomically; retain all unrelated user data."""
-        if event is not None and event.id != event_id:
-            raise ValueError("event id cannot change")
+        """Replace one task using the same transaction as grouped commands."""
+        self.persist_event_states([(event_id, event, index, notification_keys)])
+
+    def persist_event_states(self, states: Collection[tuple[str, Optional[Event], Optional[int], Collection[str]]]) -> None:
+        """Publish an entire prevalidated event command with exactly one save."""
+        states = list(states)
+        if not states:
+            return
+        ids = [identifier for identifier, _event, _index, _keys in states]
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate event ids in transaction")
+        for identifier, event, _index, _keys in states:
+            if event is not None and event.id != identifier:
+                raise ValueError("event id cannot change")
         previous_events, previous_notified = self.events, self.notified
-        replacement = [item for item in self.events if item.id != event_id]
-        if event is not None:
-            replacement.insert(min(max(0, index if index is not None else len(replacement)), len(replacement)), event)
-        prefix = event_id + ":"
-        self.events = replacement
-        self.notified = {key for key in self.notified if not key.startswith(prefix)} | set(notification_keys)
+        affected = set(ids)
+        replacement = [item for item in self.events if item.id not in affected]
+        insertions = [(index if index is not None else len(self.events), event)
+                      for _id, event, index, _keys in states if event is not None]
+        for index, event in sorted(insertions, key=lambda pair: pair[0]):
+            replacement.insert(min(max(0, index), len(replacement)), event)
+        prefixes = tuple(identifier + ":" for identifier in ids)
+        notifications = {key for key in self.notified if not key.startswith(prefixes)}
+        notifications.update(key for _id, _event, _index, keys in states for key in keys)
+        self.events, self.notified = replacement, notifications
         try:
             self.save()
         except Exception:

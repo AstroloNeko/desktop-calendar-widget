@@ -76,7 +76,9 @@ from win_integration import (
     set_autostart,
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
-from event_commands import EventChange, EventCommandHistory, EventPreview
+from event_commands import BatchChange, EventChange, EventCommandHistory, EventPreview
+from event_selection import EventSelection
+from bulk_ui import BulkActionsMixin
 from schedule_drag import ScheduleHit
 from global_drag_ui import GlobalDragMixin
 from global_header import GlobalHeader
@@ -3115,7 +3117,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.configure(value=value)
 
 
-class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
+class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
         self.dpi = DpiManager(self)
@@ -3152,6 +3154,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         self.view_mode = "compact"
         self.global_display_mode = normalize_global_display_mode(self.store.settings.get("global_display_mode"))
         self.timeline_selection = TimelineSelection()
+        self.bulk_selection = EventSelection()
         self.timeline_model: Optional[TimelineMonth] = None
         self.calendar_flow_layout: Optional[CalendarFlowLayout] = None
         self._global_normal_geometry: Optional[WindowGeometry] = None
@@ -3598,6 +3601,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         Tooltip(self.global_flow_mode_button, "按周查看本月每天的安排")
         Tooltip(self.global_timeline_mode_button, "按事项查看持续时间与 DDL")
 
+        self._build_bulk_toolbar(button_factory=ThemeButton, tooltip_factory=Tooltip, font_family=FONT)
         self.global_workspace = tk.Frame(self.shell, bg=theme.panel_background, padx=dp(theme.metrics.workspace_padding), pady=dp(theme.metrics.workspace_gap))
         self.global_workspace.pack(fill="both", expand=True)
         self.global_workspace.grid_rowconfigure(0, weight=1)
@@ -4182,6 +4186,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
     def return_to_compact_view(self) -> None:
         if self.view_mode == "compact":
             return
+        if hasattr(self, "bulk_selection"):
+            self.clear_bulk_selection()
         if self._global_window_move is not None:
             self._global_window_move.close()
             self._global_window_move = None
@@ -4526,8 +4532,13 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             self.open_day_detail()
 
     def _handle_escape(self, _event=None) -> str:
+        if getattr(self, "_active_modal_window", lambda: None)() is not None:
+            return "break"
         if getattr(self, "_schedule_drag", None):
             self._cancel_schedule_drag()
+            return "break"
+        if hasattr(self, "bulk_selection") and self.bulk_selection.ids:
+            self.clear_bulk_selection()
             return "break"
         if self.view_mode == "global" and self.global_display_mode == "flow" and self._global_flow_drag_start:
             self._cancel_flow_drag()
@@ -4610,9 +4621,15 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             reveal_event_ids=(self._search_reveal_event_id,) if self._search_reveal_event_id else (),
         )
         self.timeline_model = model
+        if hasattr(self, "bulk_selection"):
+            if self.bulk_selection.context != self._bulk_context():
+                self.timeline_selection.clear()
+            self.bulk_selection.reconcile((item.id for item in model.items), self._bulk_context())
         self.calendar_flow_layout = build_calendar_flow_layout(model) if self.global_display_mode == "flow" else None
         if select_event_id is not None:
             self.timeline_selection.select(select_event_id, model)
+            if hasattr(self, "bulk_selection"):
+                self.bulk_selection.single(select_event_id, (item.id for item in model.items))
         self.timeline_selection.get(model)
         self.global_month_label.configure(text=f"{model.year}年 {model.month}月")
         unfinished = sum(not item.completed for item in model.items)
@@ -4625,7 +4642,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         self._draw_active_global_view()
 
     def set_global_display_mode(self, mode: str) -> None:
-        """Switch Global renderers in place while keeping month and selection stable."""
+        """Keep the month/date in place; clear event selection across renderers."""
         normalized = normalize_global_display_mode(mode)
         if normalized == self.global_display_mode:
             return
@@ -4662,6 +4679,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 button.draw()
 
     def _draw_active_global_view(self) -> None:
+        if hasattr(self, "bulk_selection"):
+            self._sync_bulk_selection()
         if self._global_render_job:
             self.after_cancel(self._global_render_job)
             self._global_render_job = None
@@ -4809,7 +4828,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             y1 = row_index * row_height
             y2 = y1 + row_height
             row_tag = f"timeline-item:{item.id}"
-            if selected and selected.id == item.id:
+            if selected and selected.id == item.id and not hasattr(self, "bulk_selection"):
                 canvas.create_rectangle(0, y1, content_width, y2, fill=theme.accent_soft, outline="", tags=(row_tag,))
                 label_canvas.create_rectangle(0, y1, title_width, y2, fill=theme.accent_soft, outline="", tags=(row_tag,))
             else:
@@ -4844,7 +4863,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             bar_fill = blend(item.color, theme.schedule_background, 0.68) if item.completed else item.color
             outline = (
                 theme.accent
-                if selected and selected.id == item.id
+                if selected and selected.id == item.id and not hasattr(self, "bulk_selection")
                 else theme.schedule_card_border
             )
             visible_segments = []
@@ -4904,8 +4923,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 )
             for target in (canvas, label_canvas):
                 if target is label_canvas:
-                    target.tag_bind(row_tag, "<Button-1>", lambda _event, item_id=item.id: self.select_timeline_item(item_id))
-                target.tag_bind(row_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self.open_timeline_item(item_id))
+                    target.tag_bind(row_tag, "<Button-1>", lambda event, item_id=item.id: self._bulk_label_press(event, item_id))
+                target.tag_bind(row_tag, "<Double-Button-1>", lambda event, item_id=item.id: self._bulk_open_item(event, item_id))
                 target.tag_bind(row_tag, "<Button-3>", lambda event, item_id=item.id: self._show_global_event_menu(item_id, event))
                 target.tag_bind(row_tag, "<Enter>", lambda event, item_id=item.id: self._show_timeline_item_tooltip(item_id, event))
                 target.tag_bind(row_tag, "<Leave>", self._hide_global_tooltip)
@@ -4927,6 +4946,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             )
         else:
             self.global_status_label.configure(text="滚轮纵向浏览 · Shift + 滚轮横向浏览 · 双击日期空白新建")
+        if hasattr(self, "bulk_selection"):
+            self._refresh_bulk_visuals()
 
     def _draw_calendar_flow(self) -> None:
         self._schedule_hover_key = None
@@ -5133,7 +5154,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                     block.start_date == item.start_date,
                     block.end_date == item.end_date))
                 stripe_color = theme.event_done if item.completed else item.color
-                is_selected = bool(selected and selected.id == item.id)
+                is_selected = bool(selected and selected.id == item.id and not hasattr(self, "bulk_selection"))
                 is_hovered = self._global_flow_hover_item_id == item.id
                 if item.completed:
                     card_fill = blend(theme.schedule_card_background, theme.card_done_background, 0.62)
@@ -5266,7 +5287,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                         outline=theme.ddl_indicator_highlight,
                         tags=(item_tag,),
                     )
-                canvas.tag_bind(item_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self._open_flow_item(item_id))
+                canvas.tag_bind(item_tag, "<Double-Button-1>", lambda event, item_id=item.id: self._bulk_open_item(event, item_id))
                 canvas.tag_bind(item_tag, "<Button-3>", lambda event, item_id=item.id: self._show_flow_item_menu(item_id, event))
                 canvas.tag_bind(item_tag, "<Enter>", lambda event, item_id=item.id: self._enter_flow_item(item_id, event))
                 canvas.tag_bind(item_tag, "<Leave>", lambda event, item_id=item.id: self._leave_flow_item(item_id, event))
@@ -5313,6 +5334,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             )
         else:
             self.global_status_label.configure(text="一周一行 · 滚轮浏览 · 双击日期空白新建 · 双击事项编辑")
+        if hasattr(self, "bulk_selection"):
+            self._refresh_bulk_visuals()
 
     def _global_flow_mousewheel(self, event: tk.Event) -> str:
         units = wheel_units(event.delta)
@@ -5387,6 +5410,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         selected = self._global_flow_day_from_event(event)
         if selected is None:
             return None
+        if hasattr(self, "bulk_selection"):
+            self.clear_bulk_selection()
         existing_range = self._flow_selected_range()
         preserve_range = bool(
             existing_range
@@ -5670,6 +5695,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         selected = self._global_day_from_event(event)
         if selected is None:
             return None
+        if hasattr(self, "bulk_selection"):
+            self.clear_bulk_selection()
         self.selected = selected
         self._set_quick_placeholder()
         self._draw_active_global_view()
@@ -5829,6 +5856,9 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
 
     def select_timeline_item(self, item_id: str) -> Optional[TimelineItem]:
         model = self.timeline_model or build_month_timeline(self.store, self.shown_year, self.shown_month)
+        if hasattr(self, "bulk_selection"):
+            self._sync_bulk_selection()
+            self.bulk_selection.single(item_id, (item.id for item in model.items))
         selected = self.timeline_selection.select(item_id, model)
         self._draw_active_global_view()
         return selected
@@ -5838,6 +5868,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         return self.timeline_selection.get(model)
 
     def clear_timeline_selection(self) -> None:
+        if hasattr(self, "bulk_selection"):
+            self.bulk_selection.clear()
         self.timeline_selection.clear()
         if self.view_mode == "global":
             self._draw_active_global_view()
@@ -6661,7 +6693,10 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 continue
         return active
 
-    def _run_event_command(self, action: Callable[[], Optional[EventChange]], *, focus_result: bool = False) -> bool:
+    def _run_owned_bulk_modal(self, owner, callback):
+        return run_owned_modal(owner, callback)
+
+    def _run_event_command(self, action: Callable[[], Optional[EventChange | BatchChange]], *, focus_result: bool = False) -> bool:
         try:
             change = action()
         except (OSError, ValueError, OverflowError) as exc:
@@ -6675,7 +6710,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 self._show_feedback(f"已{change.label}")
         return True
 
-    def _refresh_event_change(self, change: EventChange, *, focus_day: Optional[date] = None) -> None:
+    def _refresh_event_change(self, change: EventChange | BatchChange, *, focus_day: Optional[date] = None) -> None:
         if getattr(self, "search_service", None) is not None:
             self._invalidate_search()
         if getattr(self, "_schedule_drag", None):
