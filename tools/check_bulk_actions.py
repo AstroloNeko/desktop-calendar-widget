@@ -5,6 +5,7 @@ Exercises actual Tk widgets using generated mouse/keyboard events (not a claim
 of physical hardware input). Reports native DPI separately from simulations.
 """
 import argparse
+import ctypes
 from datetime import date
 from pathlib import Path
 import sys
@@ -107,16 +108,24 @@ def smoke(app, screenshots):
             app.event_commands.clear()
             select_pair(app)
             original = [(e.id, e.category_id, e.color_mode, e.color) for e in app.store.events]
-            app.show_bulk_categories()
-            pump(app)
             # Windows implements Menu as a native popup; winfo_ismapped is not
             # a reliable indicator of its presentation. Exercise its actual
-            # registered command, rather than asserting a Tk mapped flag.
-            menu = next(child for child in reversed(app.winfo_children()) if isinstance(child, tk.Menu))
-            assert menu.entrycget(1, "label") == "绘画"
+            # command inside the native popup loop: tk_popup can block until
+            # dismissal, so invoking only after it returns is a deadlock.
+            chosen = []
+            def choose_category():
+                menu = next(child for child in reversed(app.winfo_children()) if isinstance(child, tk.Menu))
+                assert menu.entrycget(1, "label") == "绘画"
+                result = menu.invoke(1)
+                menu.unpost()
+                if sys.platform == "win32":
+                    ctypes.windll.user32.EndMenu()  # End this thread's native popup loop.
+                chosen.append((menu, result))
             with patch.object(app, "_execute_bulk", wraps=app._execute_bulk) as execute:
-                result = menu.invoke(1)  # existing art category, not a copied CRUD path
-            menu.unpost()
+                app.after(100, choose_category)
+                app.show_bulk_categories()
+            assert chosen, "native menu command did not run"
+            menu, result = chosen[0]
             menu.destroy()
             pump(app)
             assert app.store.event_by_id("b").category_id == "art", (result, execute.call_args_list,

@@ -5,6 +5,15 @@ from tkinter import messagebox
 from interaction_visuals import CanvasOverlay
 from global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
 from timeline_model import build_month_timeline
+from ui_draw import pooled_rounded_rectangle
+
+
+def shift_summary(value):
+    try:
+        days = int(value)
+    except ValueError:
+        return "请输入整数天数（负数提前，正数延后）"
+    return f"延后 {days} 天" if days > 0 else f"提前 {abs(days)} 天" if days < 0 else "日期保持不变"
 
 
 class BulkActionsMixin:
@@ -83,10 +92,12 @@ class BulkActionsMixin:
 
     def _build_bulk_toolbar(self, *, button_factory, tooltip_factory, font_family):
         theme, dp = self.theme, self.dpi.px
-        self.bulk_toolbar = tk.Frame(self.shell, bg=theme.panel_secondary, padx=dp(12), pady=dp(4))
-        self.bulk_count_label = tk.Label(self.bulk_toolbar, bg=theme.panel_secondary, fg=theme.text_primary,
+        self._bulk_button_factory = button_factory
+        self.bulk_toolbar = tk.Frame(self.shell, bg=theme.accent_soft, padx=dp(12), pady=dp(4))
+        self.bulk_count_label = tk.Label(self.bulk_toolbar, bg=theme.accent_soft, fg=theme.accent,
                                          font=(font_family, 8, "bold"))
         self.bulk_count_label.pack(side="left", padx=(0, dp(8)))
+        tk.Frame(self.bulk_toolbar, bg=theme.control_border, width=dp(1)).pack(side="left", fill="y", padx=(0, dp(8)))
         self.bulk_buttons = {}
         options = (("完成", "全部完成", lambda: self.bulk_complete(True), 58),
                    ("取消完成", "全部取消完成", lambda: self.bulk_complete(False), 80),
@@ -96,7 +107,7 @@ class BulkActionsMixin:
                    ("清空", "×", self.clear_bulk_selection, 24))
         for key, label, command, width in options:
             button = button_factory(self.bulk_toolbar, self, label, command, width=width, height=26,
-                                    font_size=8, surface_background=theme.panel_secondary, outlined=True,
+                                    font_size=8, surface_background=theme.accent_soft, outlined=key == "日期",
                                     foreground=theme.danger if key == "删除" else theme.control_text)
             button.pack(side="left", padx=(0, dp(4)))
             tooltip_factory(button, "取消所有选择（Esc）" if key == "清空" else f"对当前选中事项：{label}")
@@ -123,8 +134,9 @@ class BulkActionsMixin:
             if hit.event_id not in ids:
                 continue
             x1, y1, x2, y2 = hit.bounds
-            outline = pool.item(index, "rectangle", (x1-dp(1), y1-dp(1), x2+dp(1), y2+dp(1)),
-                                fill="", outline=self.theme.date_selected_border, width=dp(2))
+            outline = pooled_rounded_rectangle(pool, index, x1, y1, x2, y2,
+                                radius=dp(self.theme.metrics.flow_card_radius),
+                                fill="", outline=self.theme.date_selected_border, width=dp(1))
             canvas.itemconfigure(outline, tags=(pool.tag, f"timeline-item:{hit.event_id}"))
         pool.end()
         if self.global_display_mode == "timeline":
@@ -138,7 +150,7 @@ class BulkActionsMixin:
                 if item.id in ids:
                     outline = label_pool.item(item.id, "rectangle", (dp(2), index*row_height+dp(2),
                         labels.winfo_width()-dp(2), (index+1)*row_height-dp(2)),
-                        fill="", outline=self.theme.date_selected_border, width=dp(2))
+                        fill="", outline=self.theme.date_selected_border, width=dp(1))
                     labels.itemconfigure(outline, tags=(label_pool.tag, f"timeline-item:{item.id}"))
             label_pool.end()
         if count >= 2:
@@ -182,6 +194,10 @@ class BulkActionsMixin:
         success = self._run_event_command(lambda: self.event_commands.bulk(ids, operation, **options))
         if success:
             self.clear_bulk_selection()
+            if hasattr(self, "_show_feedback"):
+                action = {"complete": "已完成" if options.get("done", True) else "已取消完成",
+                          "category": "已修改分类", "shift": "已调整日期", "delete": "已删除"}[operation]
+                self._show_feedback(f"{action} {len(ids)} 个事项" + ("，可撤销" if operation == "delete" else ""))
         return success
 
     def bulk_complete(self, done):
@@ -193,10 +209,18 @@ class BulkActionsMixin:
         except ValueError as exc:
             self._bulk_message(str(exc))
             return
-        menu = tk.Menu(self, tearoff=False, font=(self.search_font, 9))
+        theme, dp = self.theme, self.dpi.px
+        menu = tk.Menu(self, tearoff=False, font=(self.search_font, 9),
+                       bg=theme.panel_background, fg=theme.text_primary,
+                       activebackground=theme.control_hover, activeforeground=theme.text_primary)
+        menu._swatches = []  # Menu images must survive the native popup loop.
         menu.add_command(label="无分类", command=lambda: self._execute_bulk("category", expected=ids, category_id=None))
         for category in self.store.sorted_categories():
-            menu.add_command(label=category.name, command=lambda value=category.id: self._execute_bulk("category", expected=ids, category_id=value))
+            swatch = tk.PhotoImage(master=menu, width=dp(10), height=dp(10))
+            swatch.put(category.color, to=(0, 0, dp(10), dp(10)))
+            menu._swatches.append(swatch)
+            menu.add_command(label=category.name, image=swatch, compound="left",
+                             command=lambda value=category.id: self._execute_bulk("category", expected=ids, category_id=value))
         button = self.bulk_buttons["分类"]
         try:
             menu.tk_popup(button.winfo_rootx(), button.winfo_rooty()+button.winfo_height())
@@ -220,7 +244,7 @@ class BulkActionsMixin:
             if not self._bulk_message(f"确定删除选中的 {len(ids)} 个事项吗？", confirm=True):
                 return False
             self._bulk_ids_for_action(ids)
-            if not self._bulk_message(f"再次确认：删除这 {len(ids)} 个事项？\n可用一次 Ctrl+Z 撤销整批删除。", confirm=True):
+            if not self._bulk_message(f"再次确认：从数据文件删除这 {len(ids)} 个事项？\n本次会话仍可用一次 Ctrl+Z 撤销整批删除。", confirm=True):
                 return False
             return self._execute_bulk("delete", expected=ids)
         except ValueError as exc:
@@ -244,12 +268,21 @@ class BulkDateDialog(tk.Toplevel):
                  bg=theme.panel_background, fg=theme.text_secondary, font=(app.search_font, 8), justify="left").pack(anchor="w", pady=dp(8))
         self.days = tk.StringVar(value="1")
         self.entry = tk.Entry(frame, textvariable=self.days, width=10, font=(app.search_font, 10),
-                              bg=theme.input_background, fg=theme.text_primary, insertbackground=theme.text_primary)
+                              bg=theme.input_background, fg=theme.text_primary, insertbackground=theme.text_primary,
+                              relief="flat", highlightthickness=dp(1), highlightbackground=theme.input_border,
+                              highlightcolor=theme.input_focus)
         self.entry.pack(anchor="w")
+        self.preview = tk.StringVar(value=shift_summary(self.days.get()))
+        self.days.trace_add("write", lambda *_args: self.preview.set(shift_summary(self.days.get())))
+        tk.Label(frame, textvariable=self.preview, bg=theme.panel_background, fg=theme.accent,
+                 font=(app.search_font, 9, "bold"), anchor="w", wraplength=dp(320)).pack(fill="x", pady=(dp(8), 0))
         actions = tk.Frame(frame, bg=theme.panel_background)
         actions.pack(fill="x", pady=(dp(12), 0))
-        tk.Button(actions, text="取消", command=self.close, bg=theme.control_background, fg=theme.control_text).pack(side="left")
-        tk.Button(actions, text="应用", command=self.apply, bg=theme.accent, fg=theme.text_on_accent).pack(side="right")
+        factory = app._bulk_button_factory
+        factory(actions, app, "取消", self.close, width=64, height=29, font_size=9,
+                surface_background=theme.panel_background).pack(side="left")
+        factory(actions, app, "应用调整", self.apply, width=96, height=29, font_size=9,
+                surface_background=theme.panel_background, accented=True).pack(side="right")
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda _e: self.close())
         self.bind("<Return>", lambda _e: self.apply())
