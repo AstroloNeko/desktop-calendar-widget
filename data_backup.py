@@ -13,7 +13,7 @@ import zipfile
 from version import __version__
 
 FORMAT_VERSION = 1
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 MAX_DATA_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 40 * 1024 * 1024
 AUTO_KEEP = 10

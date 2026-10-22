@@ -76,7 +76,9 @@ from win_integration import (
     set_autostart,
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
-from event_commands import EventChange, EventCommandHistory, EventPreview
+from event_commands import BatchChange, EventChange, EventCommandHistory, EventPreview
+from event_selection import EventSelection
+from bulk_ui import BulkActionsMixin
 from schedule_drag import ScheduleHit
 from global_drag_ui import GlobalDragMixin
 from global_header import GlobalHeader
@@ -96,6 +98,8 @@ from version import __version__
 from backup_ui import BackupActionsMixin
 from data_backup import automatic_backup
 from update_dialog import UpdateAvailableDialog
+from habit_schedule import schedule_label
+from habit_ui import HabitScheduleForm
 from ui_draw import (
     bevel_control,
     blend,
@@ -1611,17 +1615,17 @@ class EventEditor(tk.Toplevel):
 
 
 class RoutineEditor(tk.Toplevel):
-    WIDTH = 360
-    HEIGHT = 420
+    WIDTH = 420
+    HEIGHT = 650
 
     def __init__(self, master: "CalendarApp", item: Optional[RoutineItem] = None) -> None:
         super().__init__(master)
+        self.withdraw()
         self.master_app = master
         self.item = item
         self.title("编辑习惯清单项" if item else "新增习惯清单项")
         self.configure(bg=master.theme.window_border_outer)
         self.overrideredirect(True)
-        self.attributes("-topmost", True)
         self.geometry(f"{scale_px(self.WIDTH)}x{scale_px(self.HEIGHT)}")
         self.title_var = tk.StringVar(value=item.title if item else "")
         self.kind_var = tk.StringVar(value=item.kind if item else "habit")
@@ -1633,15 +1637,28 @@ class RoutineEditor(tk.Toplevel):
         self.reminder_time_var = tk.StringVar(value=default_reminder_time)
         self.color_canvases: list[tuple[tk.Canvas, str]] = []
 
-        shell = tk.Frame(self, bg=CARD, padx=20)
+        shell = tk.Frame(self, bg=CARD, padx=master.dpi.px(16))
         shell.pack(fill="both", expand=True, padx=1, pady=1)
-        header = tk.Frame(shell, bg=CARD, height=54)
+        self.actions = tk.Frame(shell, bg=CARD)
+        self.actions.pack(fill="x", side="bottom", pady=master.dpi.px(12))
+        header = tk.Frame(shell, bg=CARD, height=master.dpi.px(54))
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Label(header, text="编辑习惯清单项" if item else "新增习惯清单项", bg=CARD, fg=INK, font=(FONT, 12, "bold")).pack(side="left", pady=13)
-        button_label(header, "×", self.close, width=2, bg=CARD, font_size=13).pack(side="right", pady=8)
+        tk.Button(header, text="×", command=self.close, bg=CARD, fg=INK, relief="flat", bd=0, font=(FONT, 13)).pack(side="right", pady=8)
 
-        tk.Label(shell, text="每天要做什么？", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
+        self.content_canvas = tk.Canvas(shell, bg=CARD, bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(shell, orient="vertical", command=self.content_canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.content_canvas.pack(fill="both", expand=True)
+        shell = tk.Frame(self.content_canvas, bg=CARD)
+        content_window = self.content_canvas.create_window((0, 0), window=shell, anchor="nw")
+        self.content_canvas.configure(yscrollcommand=scrollbar.set)
+        shell.bind("<Configure>", lambda _event: self.content_canvas.configure(scrollregion=self.content_canvas.bbox("all")))
+        self.content_canvas.bind("<Configure>", lambda event: self.content_canvas.itemconfigure(content_window, width=event.width))
+        self.bind("<MouseWheel>", self._content_wheel, add="+")
+
+        tk.Label(shell, text="要做什么？", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
         self.title_entry = tk.Entry(
             shell,
             textvariable=self.title_var,
@@ -1659,12 +1676,13 @@ class RoutineEditor(tk.Toplevel):
         tk.Label(shell, text="类型", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
         kind_row = tk.Frame(shell, bg=CARD)
         kind_row.pack(fill="x", pady=(5, 6))
-        for text, value in (("习惯 · 每个工作日重置", "habit"), ("待办 · 完成一次即结束", "todo")):
+        for text, value in (("习惯 · 按周期打卡", "habit"), ("待办 · 完成一次即结束", "todo")):
             tk.Radiobutton(
                 kind_row,
                 text=text,
                 variable=self.kind_var,
                 value=value,
+                command=self._update_schedule_controls,
                 indicatoron=False,
                 bg=CONTROL_BACKGROUND,
                 fg=SUBTLE,
@@ -1679,6 +1697,9 @@ class RoutineEditor(tk.Toplevel):
                 cursor="hand2",
             ).pack(side="left", padx=(0, 7))
         tk.Label(shell, text="习惯只记录当天完成；待办完成后不会在次日出现。", bg=CARD, fg=FAINT, font=(FONT, 8)).pack(anchor="w", pady=(0, 14))
+
+        self.schedule_form = HabitScheduleForm(shell, master, item, FONT)
+        self._update_schedule_controls()
 
         tk.Label(shell, text="提醒", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
         reminder_row = tk.Frame(
@@ -1750,24 +1771,49 @@ class RoutineEditor(tk.Toplevel):
             self.color_canvases.append((swatch, color))
         self._draw_colors()
 
-        actions = tk.Frame(shell, bg=CARD)
-        actions.pack(fill="x", side="bottom", pady=(0, 17))
+        actions = self.actions
         if item:
             tk.Button(actions, text="删除", command=self.delete, bg=DANGER_SOFT, fg=DANGER, relief="flat", bd=0, padx=14, pady=7, cursor="hand2").pack(side="left")
-        tk.Button(actions, text="保存", command=self.save, bg=ACCENT, fg=current_theme().text_on_accent, activebackground=ACCENT_HOVER, activeforeground=current_theme().text_on_accent, relief="flat", bd=0, padx=20, pady=7, font=(FONT, 9, "bold"), cursor="hand2").pack(side="right")
+        self.save_button = tk.Button(actions, text="保存", command=self.save, bg=ACCENT, fg=current_theme().text_on_accent, activebackground=ACCENT_HOVER, activeforeground=current_theme().text_on_accent, relief="flat", bd=0, padx=20, pady=7, font=(FONT, 9, "bold"), cursor="hand2")
+        self.save_button.pack(side="right")
         tk.Button(actions, text="取消", command=self.close, bg=CONTROL_BACKGROUND, fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2").pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _event: self.close())
         self.bind("<Control-Return>", lambda _event: self.save())
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
-        center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=48)
+        area = master.dpi.work_area()
+        width = min(master.dpi.px(self.WIDTH), area.width - master.dpi.px(24))
+        height = min(master.dpi.px(self.HEIGHT), area.height - master.dpi.px(24))
+        x = max(area.left, min(area.right - width, master.winfo_rootx() + (master.winfo_width() - width) // 2))
+        y = max(area.top, min(area.bottom - height, master.winfo_rooty() + master.dpi.px(24)))
+        self.geometry(f"{width}x{height}{x:+d}{y:+d}")
         self.after_idle(self._present)
 
     def _present(self) -> None:
         if self.winfo_exists():
-            self.master_app.present_overlay(self)
+            parent = self.master_app.routine_manager or self.master_app.day_detail_window or self.master_app
+            self.master_app.present_modal(self, parent)
+            self.grab_set()
             self.title_entry.focus_force()
+
+    def _content_wheel(self, event):
+        if isinstance(event.widget, tk.Text):
+            return None
+        self.content_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _update_schedule_controls(self):
+        if not hasattr(self, "schedule_form"):
+            return
+        if self.kind_var.get() == "habit":
+            siblings = self.schedule_form.master.winfo_children()
+            index = siblings.index(self.schedule_form)
+            following = siblings[index + 1] if index + 1 < len(siblings) else None
+            self.schedule_form.pack(fill="x", pady=(0, self.master_app.dpi.px(12)),
+                                    **({"before": following} if following else {}))
+        else:
+            self.schedule_form.pack_forget()
 
     def _choose_color(self, color: str) -> None:
         self.color_var.set(color)
@@ -1790,12 +1836,17 @@ class RoutineEditor(tk.Toplevel):
     def save(self) -> None:
         title = self.title_var.get().strip()
         if not title:
-            messagebox.showinfo(APP_NAME, "请先填写习惯清单内容。", parent=self)
+            owned_messagebox(self, messagebox.showinfo, APP_NAME, "请先填写习惯清单内容。")
             self.title_entry.focus_set()
             return
         reminder_time = normalize_reminder_time(self.reminder_time_var.get())
         if self.reminder_enabled_var.get() and reminder_time is None:
-            messagebox.showinfo(APP_NAME, "提醒时间请使用 HH:MM，例如 09:00。", parent=self)
+            owned_messagebox(self, messagebox.showinfo, APP_NAME, "提醒时间请使用 HH:MM，例如 09:00。")
+            return
+        try:
+            schedule = self.schedule_form.value() if self.kind_var.get() == "habit" else self.schedule_form.original
+        except ValueError as exc:
+            owned_messagebox(self, messagebox.showinfo, APP_NAME, str(exc))
             return
         item = RoutineItem(
             id=self.item.id if self.item else str(uuid.uuid4()),
@@ -1808,6 +1859,7 @@ class RoutineEditor(tk.Toplevel):
             enabled=self.item.enabled if self.item else True,
             reminder_enabled=self.reminder_enabled_var.get(),
             reminder_time=reminder_time,
+            **schedule,
         )
         self.master_app.store.upsert_routine(item)
         self.master_app.render()
@@ -1816,7 +1868,7 @@ class RoutineEditor(tk.Toplevel):
         self.close()
 
     def delete(self) -> None:
-        if self.item and messagebox.askyesno(APP_NAME, f"确定删除“{self.item.title}”？", parent=self):
+        if self.item and owned_messagebox(self, messagebox.askyesno, APP_NAME, f"确定删除“{self.item.title}”？"):
             self.master_app.store.delete_routine(self.item.id)
             self.master_app.render()
             if self.master_app.routine_manager and self.master_app.routine_manager.winfo_exists():
@@ -1824,8 +1876,14 @@ class RoutineEditor(tk.Toplevel):
             self.close()
 
     def close(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
         if self.master_app.routine_editor is self:
             self.master_app.routine_editor = None
+        if self.grab_current() is self:
+            self.grab_release()
+        self.master_app._leave_modal(self)
         self.destroy()
         manager = self.master_app.routine_manager
         if manager and manager.winfo_exists():
@@ -1858,7 +1916,7 @@ class RoutineManager(tk.Toplevel):
         title_box = tk.Frame(header, bg=CARD)
         title_box.pack(side="left")
         tk.Label(title_box, text="习惯清单", bg=CARD, fg=INK, font=(FONT, 13, "bold"), anchor="w").pack(anchor="w")
-        tk.Label(title_box, text="习惯每天回来，待办完成一次即结束", bg=CARD, fg=FAINT, font=(FONT, 8), anchor="w").pack(anchor="w")
+        tk.Label(title_box, text="习惯按计划日期出现，待办完成一次即结束", bg=CARD, fg=FAINT, font=(FONT, 8), anchor="w").pack(anchor="w")
         button_label(header, "×", self.close, width=2, bg=CARD, font_size=13).pack(side="right")
         tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
 
@@ -1878,7 +1936,7 @@ class RoutineManager(tk.Toplevel):
         footer = tk.Frame(shell, bg=CARD, padx=16, pady=12)
         footer.pack(fill="x")
         tk.Button(footer, text="＋ 新增习惯清单项", command=lambda: self.master_app.open_routine_editor(), bg=ACCENT, fg=current_theme().text_on_accent, activebackground=ACCENT_HOVER, activeforeground=current_theme().text_on_accent, relief="flat", bd=0, padx=16, pady=7, font=(FONT, 9, "bold"), cursor="hand2").pack(side="right")
-        tk.Label(footer, text="仅在工作日显示", bg=CARD, fg=FAINT, font=(FONT, 8)).pack(side="left")
+        tk.Label(footer, text="按各自周期执行", bg=CARD, fg=FAINT, font=(FONT, 8)).pack(side="left")
 
         self.bind("<Escape>", lambda _event: self.close())
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -1910,10 +1968,10 @@ class RoutineManager(tk.Toplevel):
                 anchor="w",
             )
             title.pack(fill="x")
-            type_text = "习惯 · 每个工作日" if item.kind == "habit" else ("待办 · 已完成" if item.completed_on else "待办 · 等待完成")
+            type_text = ("习惯 · " + schedule_label(item)) if item.kind == "habit" else ("待办 · 已完成" if item.completed_on else "待办 · 等待完成")
             if item.reminder_enabled and item.reminder_time:
                 type_text += f" · 提醒 {item.reminder_time}"
-            meta = tk.Label(content, text=type_text, bg=row_background, fg=current_theme().text_done if completed else SUBTLE, font=(FONT, 8), anchor="w")
+            meta = tk.Label(content, text=type_text, bg=row_background, fg=current_theme().text_done if completed else SUBTLE, font=(FONT, 8), anchor="w", wraplength=scale_px(280), justify="left")
             meta.pack(fill="x", pady=(2, 0))
             more = tk.Label(row, text="›", bg=row_background, fg=FAINT, font=(FONT, 13), width=3, cursor="hand2")
             more.pack(side="right", fill="y")
@@ -3059,7 +3117,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.configure(value=value)
 
 
-class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
+class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
         self.dpi = DpiManager(self)
@@ -3096,6 +3154,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         self.view_mode = "compact"
         self.global_display_mode = normalize_global_display_mode(self.store.settings.get("global_display_mode"))
         self.timeline_selection = TimelineSelection()
+        self.bulk_selection = EventSelection()
         self.timeline_model: Optional[TimelineMonth] = None
         self.calendar_flow_layout: Optional[CalendarFlowLayout] = None
         self._global_normal_geometry: Optional[WindowGeometry] = None
@@ -3542,6 +3601,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         Tooltip(self.global_flow_mode_button, "按周查看本月每天的安排")
         Tooltip(self.global_timeline_mode_button, "按事项查看持续时间与 DDL")
 
+        self._build_bulk_toolbar(button_factory=ThemeButton, tooltip_factory=Tooltip, font_family=FONT)
         self.global_workspace = tk.Frame(self.shell, bg=theme.panel_background, padx=dp(theme.metrics.workspace_padding), pady=dp(theme.metrics.workspace_gap))
         self.global_workspace.pack(fill="both", expand=True)
         self.global_workspace.grid_rowconfigure(0, weight=1)
@@ -4126,6 +4186,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
     def return_to_compact_view(self) -> None:
         if self.view_mode == "compact":
             return
+        if hasattr(self, "bulk_selection"):
+            self.clear_bulk_selection()
         if self._global_window_move is not None:
             self._global_window_move.close()
             self._global_window_move = None
@@ -4470,8 +4532,13 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             self.open_day_detail()
 
     def _handle_escape(self, _event=None) -> str:
+        if getattr(self, "_active_modal_window", lambda: None)() is not None:
+            return "break"
         if getattr(self, "_schedule_drag", None):
             self._cancel_schedule_drag()
+            return "break"
+        if hasattr(self, "bulk_selection") and self.bulk_selection.ids:
+            self.clear_bulk_selection()
             return "break"
         if self.view_mode == "global" and self.global_display_mode == "flow" and self._global_flow_drag_start:
             self._cancel_flow_drag()
@@ -4554,9 +4621,15 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             reveal_event_ids=(self._search_reveal_event_id,) if self._search_reveal_event_id else (),
         )
         self.timeline_model = model
+        if hasattr(self, "bulk_selection"):
+            if self.bulk_selection.context != self._bulk_context():
+                self.timeline_selection.clear()
+            self.bulk_selection.reconcile((item.id for item in model.items), self._bulk_context())
         self.calendar_flow_layout = build_calendar_flow_layout(model) if self.global_display_mode == "flow" else None
         if select_event_id is not None:
             self.timeline_selection.select(select_event_id, model)
+            if hasattr(self, "bulk_selection"):
+                self.bulk_selection.single(select_event_id, (item.id for item in model.items))
         self.timeline_selection.get(model)
         self.global_month_label.configure(text=f"{model.year}年 {model.month}月")
         unfinished = sum(not item.completed for item in model.items)
@@ -4569,7 +4642,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         self._draw_active_global_view()
 
     def set_global_display_mode(self, mode: str) -> None:
-        """Switch Global renderers in place while keeping month and selection stable."""
+        """Keep the month/date in place; clear event selection across renderers."""
         normalized = normalize_global_display_mode(mode)
         if normalized == self.global_display_mode:
             return
@@ -4606,6 +4679,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 button.draw()
 
     def _draw_active_global_view(self) -> None:
+        if hasattr(self, "bulk_selection"):
+            self._sync_bulk_selection()
         if self._global_render_job:
             self.after_cancel(self._global_render_job)
             self._global_render_job = None
@@ -4753,7 +4828,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             y1 = row_index * row_height
             y2 = y1 + row_height
             row_tag = f"timeline-item:{item.id}"
-            if selected and selected.id == item.id:
+            if selected and selected.id == item.id and not hasattr(self, "bulk_selection"):
                 canvas.create_rectangle(0, y1, content_width, y2, fill=theme.accent_soft, outline="", tags=(row_tag,))
                 label_canvas.create_rectangle(0, y1, title_width, y2, fill=theme.accent_soft, outline="", tags=(row_tag,))
             else:
@@ -4788,7 +4863,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             bar_fill = blend(item.color, theme.schedule_background, 0.68) if item.completed else item.color
             outline = (
                 theme.accent
-                if selected and selected.id == item.id
+                if selected and selected.id == item.id and not hasattr(self, "bulk_selection")
                 else theme.schedule_card_border
             )
             visible_segments = []
@@ -4848,8 +4923,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 )
             for target in (canvas, label_canvas):
                 if target is label_canvas:
-                    target.tag_bind(row_tag, "<Button-1>", lambda _event, item_id=item.id: self.select_timeline_item(item_id))
-                target.tag_bind(row_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self.open_timeline_item(item_id))
+                    target.tag_bind(row_tag, "<Button-1>", lambda event, item_id=item.id: self._bulk_label_press(event, item_id))
+                target.tag_bind(row_tag, "<Double-Button-1>", lambda event, item_id=item.id: self._bulk_open_item(event, item_id))
                 target.tag_bind(row_tag, "<Button-3>", lambda event, item_id=item.id: self._show_global_event_menu(item_id, event))
                 target.tag_bind(row_tag, "<Enter>", lambda event, item_id=item.id: self._show_timeline_item_tooltip(item_id, event))
                 target.tag_bind(row_tag, "<Leave>", self._hide_global_tooltip)
@@ -4871,6 +4946,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             )
         else:
             self.global_status_label.configure(text="滚轮纵向浏览 · Shift + 滚轮横向浏览 · 双击日期空白新建")
+        if hasattr(self, "bulk_selection"):
+            self._refresh_bulk_visuals()
 
     def _draw_calendar_flow(self) -> None:
         self._schedule_hover_key = None
@@ -5077,7 +5154,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                     block.start_date == item.start_date,
                     block.end_date == item.end_date))
                 stripe_color = theme.event_done if item.completed else item.color
-                is_selected = bool(selected and selected.id == item.id)
+                is_selected = bool(selected and selected.id == item.id and not hasattr(self, "bulk_selection"))
                 is_hovered = self._global_flow_hover_item_id == item.id
                 if item.completed:
                     card_fill = blend(theme.schedule_card_background, theme.card_done_background, 0.62)
@@ -5210,7 +5287,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                         outline=theme.ddl_indicator_highlight,
                         tags=(item_tag,),
                     )
-                canvas.tag_bind(item_tag, "<Double-Button-1>", lambda _event, item_id=item.id: self._open_flow_item(item_id))
+                canvas.tag_bind(item_tag, "<Double-Button-1>", lambda event, item_id=item.id: self._bulk_open_item(event, item_id))
                 canvas.tag_bind(item_tag, "<Button-3>", lambda event, item_id=item.id: self._show_flow_item_menu(item_id, event))
                 canvas.tag_bind(item_tag, "<Enter>", lambda event, item_id=item.id: self._enter_flow_item(item_id, event))
                 canvas.tag_bind(item_tag, "<Leave>", lambda event, item_id=item.id: self._leave_flow_item(item_id, event))
@@ -5257,6 +5334,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             )
         else:
             self.global_status_label.configure(text="一周一行 · 滚轮浏览 · 双击日期空白新建 · 双击事项编辑")
+        if hasattr(self, "bulk_selection"):
+            self._refresh_bulk_visuals()
 
     def _global_flow_mousewheel(self, event: tk.Event) -> str:
         units = wheel_units(event.delta)
@@ -5331,6 +5410,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         selected = self._global_flow_day_from_event(event)
         if selected is None:
             return None
+        if hasattr(self, "bulk_selection"):
+            self.clear_bulk_selection()
         existing_range = self._flow_selected_range()
         preserve_range = bool(
             existing_range
@@ -5614,6 +5695,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         selected = self._global_day_from_event(event)
         if selected is None:
             return None
+        if hasattr(self, "bulk_selection"):
+            self.clear_bulk_selection()
         self.selected = selected
         self._set_quick_placeholder()
         self._draw_active_global_view()
@@ -5773,6 +5856,9 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
 
     def select_timeline_item(self, item_id: str) -> Optional[TimelineItem]:
         model = self.timeline_model or build_month_timeline(self.store, self.shown_year, self.shown_month)
+        if hasattr(self, "bulk_selection"):
+            self._sync_bulk_selection()
+            self.bulk_selection.single(item_id, (item.id for item in model.items))
         selected = self.timeline_selection.select(item_id, model)
         self._draw_active_global_view()
         return selected
@@ -5782,6 +5868,8 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         return self.timeline_selection.get(model)
 
     def clear_timeline_selection(self) -> None:
+        if hasattr(self, "bulk_selection"):
+            self.bulk_selection.clear()
         self.timeline_selection.clear()
         if self.view_mode == "global":
             self._draw_active_global_view()
@@ -5814,7 +5902,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         self.agenda_toggle.configure(text="⌃" if self.agenda_open else "⌄")
 
         if not events and not routine_items:
-            empty_title = "休息日不安排习惯清单" if not self.store.is_workday(self.selected) and self.store.routines else "这一天很清静"
+            empty_title = "这一天很清静"
             if theme.style == "frutiger":
                 empty = LogicalCanvas(
                     self.agenda_inner,
@@ -5835,7 +5923,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 empty.pack(fill="both", expand=True)
                 empty.pack_propagate(False)
                 tk.Label(empty, text=empty_title, bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 9, "bold")).pack(pady=(27, 2))
-                tk.Label(empty, text="双击日期查看详情 · 习惯清单仅在工作日出现", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8)).pack()
+                tk.Label(empty, text="双击日期查看详情 · 习惯按计划日期出现", bg=theme.schedule_background, fg=theme.text_muted, font=(FONT, 8)).pack()
         else:
             for item in items:
                 if isinstance(item, RoutineItem):
@@ -6053,7 +6141,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
         )
         title.pack(fill="x")
         if item.kind == "habit":
-            meta_text = "习惯 · 今日已完成，下一工作日继续" if done else "习惯 · 每个工作日"
+            meta_text = "习惯 · " + ("今日已完成 · " if done else "") + schedule_label(item)
         else:
             meta_text = "待办 · 已完成" if done else "待办 · 完成一次即结束"
         meta = tk.Label(content, text=meta_text, bg=card_bg, fg=theme.schedule_time_text, font=(FONT, 8), anchor="w")
@@ -6448,7 +6536,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
 
     def open_routine_editor(self, item: Optional[RoutineItem] = None) -> None:
         if self.routine_editor and self.routine_editor.winfo_exists():
-            self.present_overlay(self.routine_editor)
+            self.routine_editor._present()
             return
         self._suspend_main_topmost()
         if self.view_mode == "compact":
@@ -6605,7 +6693,10 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 continue
         return active
 
-    def _run_event_command(self, action: Callable[[], Optional[EventChange]], *, focus_result: bool = False) -> bool:
+    def _run_owned_bulk_modal(self, owner, callback):
+        return run_owned_modal(owner, callback)
+
+    def _run_event_command(self, action: Callable[[], Optional[EventChange | BatchChange]], *, focus_result: bool = False) -> bool:
         try:
             change = action()
         except (OSError, ValueError, OverflowError) as exc:
@@ -6619,7 +6710,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
                 self._show_feedback(f"已{change.label}")
         return True
 
-    def _refresh_event_change(self, change: EventChange, *, focus_day: Optional[date] = None) -> None:
+    def _refresh_event_change(self, change: EventChange | BatchChange, *, focus_day: Optional[date] = None) -> None:
         if getattr(self, "search_service", None) is not None:
             self._invalidate_search()
         if getattr(self, "_schedule_drag", None):
@@ -7235,7 +7326,7 @@ class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixi
             "双击日期：打开当天事项详情\n"
             "右键日期：打开快捷菜单\n"
             "单击日程：编辑；方框：完成\n"
-            "习惯清单：习惯每天重置，待办完成一次即结束\n"
+            "习惯清单：习惯按周期独立打卡，待办完成一次即结束\n"
             "滚轮 / PgUp / PgDn：切换月份\n"
             "方向键：移动所选日期\n"
             "Ctrl+N：打开当天事项详情\n"

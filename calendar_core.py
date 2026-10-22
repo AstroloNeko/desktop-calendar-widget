@@ -11,12 +11,14 @@ from typing import Any, Callable, Collection, Optional
 
 from holiday_data import is_workday as system_is_workday
 from ui_theme import DEFAULT_THEME_NAME, normalize_theme_name
+from habit_schedule import habit_scheduled_on, normalize_schedule
 
 
 APP_NAME = "桌面月历"
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "DesktopCalendar"
 DATA_FILE = DATA_DIR / "calendar_data.json"
+DATA_SCHEMA_VERSION = 8
 
 COLORS = {
     "海盐蓝": "#6687F2",
@@ -280,6 +282,16 @@ class RoutineItem:
     enabled: bool = True
     reminder_enabled: bool = False
     reminder_time: Optional[str] = None
+    frequency: str = "daily"
+    interval: int = 1
+    weekdays: list[int] = field(default_factory=list)
+    month_day: Optional[int] = None
+    year_month: Optional[int] = None
+    start_on: Optional[str] = None
+    end_on: Optional[str] = None
+    # Direct/legacy constructors retain the historic workday-only behavior.
+    # The new editor explicitly chooses False for a new everyday habit.
+    workdays_only: bool = True
 
     def __post_init__(self) -> None:
         if not self.created_on:
@@ -310,6 +322,7 @@ class RoutineItem:
         self.reminder_time = normalize_reminder_time(self.reminder_time)
         if self.reminder_time is None:
             self.reminder_enabled = False
+        normalize_schedule(self)
 
     @property
     def created_date(self) -> date:
@@ -330,6 +343,8 @@ class RoutineItem:
             raise ValueError("invalid routine title")
         if not isinstance(data.get("habit_done", []), list):
             data["habit_done"] = []
+        if "workdays_only" not in raw:
+            data["workdays_only"] = "frequency" not in raw
         return cls(**data)
 
 
@@ -378,7 +393,7 @@ class Store:
     def load(self) -> None:
         try:
             raw = json.loads(self.data_file.read_text(encoding="utf-8"))
-            self._migration_backup_pending = raw.get("version", 1) != 7
+            self._migration_backup_pending = raw.get("version", 1) != DATA_SCHEMA_VERSION
             categories: list[EventCategory] = []
             seen_category_ids: set[str] = set()
             category_payload = raw.get("categories", [])
@@ -457,7 +472,7 @@ class Store:
         self.data_file.parent.mkdir(parents=True, exist_ok=True)
         notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
         payload = {
-            "version": 7,
+            "version": DATA_SCHEMA_VERSION,
             "events": [asdict(event) for event in self.events],
             "categories": [asdict(category) for category in self.sorted_categories()],
             "routines": [asdict(item) for item in self.routines],
@@ -490,16 +505,31 @@ class Store:
         index: Optional[int],
         notification_keys: Collection[str],
     ) -> None:
-        """Replace one task and its reminders atomically; retain all unrelated user data."""
-        if event is not None and event.id != event_id:
-            raise ValueError("event id cannot change")
+        """Replace one task using the same transaction as grouped commands."""
+        self.persist_event_states([(event_id, event, index, notification_keys)])
+
+    def persist_event_states(self, states: Collection[tuple[str, Optional[Event], Optional[int], Collection[str]]]) -> None:
+        """Publish an entire prevalidated event command with exactly one save."""
+        states = list(states)
+        if not states:
+            return
+        ids = [identifier for identifier, _event, _index, _keys in states]
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate event ids in transaction")
+        for identifier, event, _index, _keys in states:
+            if event is not None and event.id != identifier:
+                raise ValueError("event id cannot change")
         previous_events, previous_notified = self.events, self.notified
-        replacement = [item for item in self.events if item.id != event_id]
-        if event is not None:
-            replacement.insert(min(max(0, index if index is not None else len(replacement)), len(replacement)), event)
-        prefix = event_id + ":"
-        self.events = replacement
-        self.notified = {key for key in self.notified if not key.startswith(prefix)} | set(notification_keys)
+        affected = set(ids)
+        replacement = [item for item in self.events if item.id not in affected]
+        insertions = [(index if index is not None else len(self.events), event)
+                      for _id, event, index, _keys in states if event is not None]
+        for index, event in sorted(insertions, key=lambda pair: pair[0]):
+            replacement.insert(min(max(0, index), len(replacement)), event)
+        prefixes = tuple(identifier + ":" for identifier in ids)
+        notifications = {key for key in self.notified if not key.startswith(prefixes)}
+        notifications.update(key for _id, _event, _index, keys in states for key in keys)
+        self.events, self.notified = replacement, notifications
         try:
             self.save()
         except Exception:
@@ -699,15 +729,32 @@ class Store:
     def routines_on(self, day: date) -> list[RoutineItem]:
         visible: list[RoutineItem] = []
         for item in self.routines:
-            if not item.enabled or day < item.created_date:
-                continue
-            if item.kind == "todo" and item.completed_on and day > date.fromisoformat(item.completed_on):
+            if not self.routine_planned_on(item, day):
                 continue
             visible.append(item)
         return sorted(visible, key=lambda item: (item.is_done_on(day), item.kind == "todo", item.created_on, item.title))
 
+    def routine_planned_on(self, item: RoutineItem, day: date) -> bool:
+        if not item.enabled:
+            return False
+        if item.kind == "todo":
+            return (day >= item.created_date and self.is_workday(day)
+                    and (not item.completed_on or day <= date.fromisoformat(item.completed_on)))
+        return (habit_scheduled_on(item, day)
+                and (not item.workdays_only or self.is_workday(day)))
+
+    def routine_progress(self, item: RoutineItem, start: date, end: date) -> tuple[int, int]:
+        """(planned, completed) for an explicit period; non-plan days never count."""
+        planned = completed = 0
+        for offset in range(max(0, (end - start).days + 1)):
+            day = start + timedelta(days=offset)
+            if self.routine_planned_on(item, day):
+                planned += 1
+                completed += int(item.is_done_on(day))
+        return planned, completed
+
     def agenda_items_on(self, day: date) -> list[Event | RoutineItem]:
-        routines = self.routines_on(day) if self.is_workday(day) else []
+        routines = self.routines_on(day)
         items: list[Event | RoutineItem] = [*self.events_on(day), *routines]
 
         def sort_key(item: Event | RoutineItem) -> tuple[bool, int]:
@@ -845,8 +892,6 @@ class Store:
 
     def due_routine_reminders(self, now: datetime) -> list[RoutineItem]:
         day = now.date()
-        if not self.is_workday(day):
-            return []
         due: list[RoutineItem] = []
         for item in self.routines_on(day):
             key = self.routine_notification_key(item, day)
@@ -858,6 +903,8 @@ class Store:
         return due
 
     def toggle_routine(self, item: RoutineItem, day: date) -> None:
+        if not self.routine_planned_on(item, day) and not item.is_done_on(day):
+            return
         day_key = day.isoformat()
         if item.kind == "habit":
             if day_key in item.habit_done:

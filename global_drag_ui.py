@@ -22,6 +22,8 @@ class GlobalDragMixin:
         hit = hit_at(self._schedule_hits, canvas.canvasx(event.x), canvas.canvasy(event.y))
         if hit is None:
             return None
+        if hasattr(self, "_bulk_press") and self._bulk_press(event, hit.event_id):
+            return "break"
         if hasattr(self, "_clear_feedback"):
             self._clear_feedback()
         day = self._schedule_pointer_day(event)
@@ -148,6 +150,8 @@ class GlobalDragMixin:
         self._schedule_navigate_month(self._schedule_month_direction)
 
     def _decorate_schedule_handles(self, canvas):
+        if hasattr(self, "bulk_selection") and len(self.bulk_selection.ids) > 1:
+            return
         dp = self.dpi.px
         selected = self.timeline_selection.get(self.timeline_model)
         for hit in self._schedule_hits:
