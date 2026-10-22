@@ -57,6 +57,7 @@ from global_timeline_ui import (
     wheel_units,
 )
 from tray_icon import TrayIcon
+from app_lifecycle import ApplicationLifecycleMixin
 from win_integration import (
     IS_WINDOWS,
     NativeWindowMove,
@@ -3119,9 +3120,10 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.configure(value=value)
 
 
-class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
+class CalendarApp(ApplicationLifecycleMixin, BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
+        self._init_lifecycle()
         self.dpi = DpiManager(self)
         self.store = store or Store()
         if self.store.load_error:
@@ -3245,7 +3247,7 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
             opacity = 1.0
         self._apply_theme_opacity(opacity)
         self.resizable(False, False)
-        self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         self._configure_style()
         self._build_ui()
@@ -3258,7 +3260,7 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
         self.render()
         self.after(80, self._finish_window_setup)
         self.after(220, self._start_tray_icon)
-        self.after(250, self._poll_tray_actions)
+        self._tray_poll_job = self.after(250, self._poll_tray_actions)
         self.after(1200, self.check_reminders)
 
     @staticmethod
@@ -4336,7 +4338,8 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
     def _finish_window_setup(self) -> None:
         make_tool_window(self)
         self._window_ready = True
-        self._present_initial_foreground()
+        if not self.lifecycle.hidden:
+            self._present_initial_foreground()
 
     def _present_initial_foreground(self) -> None:
         """Give a normal launch one foreground pulse without changing preferences."""
@@ -7108,12 +7111,15 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
 
     def _save_window_settings(self) -> None:
         if self.view_mode == "global":
-            if self.state() == "normal":
+            if self.lifecycle.hidden and self.lifecycle.view == "global" and self.lifecycle.snapshot is not None:
+                self._global_normal_geometry = self.lifecycle.snapshot
+            elif self.state() == "normal":
                 self._global_normal_geometry = self._capture_window_geometry()
             if self._global_normal_geometry is not None:
                 self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
-        else:
-            compact_geometry = self._capture_window_geometry()
+        elif ((self.lifecycle.hidden and self.lifecycle.view == "compact" and self.lifecycle.snapshot is not None)
+              or self.state() == "normal" and not self.lifecycle.hidden):
+            compact_geometry = self.lifecycle.snapshot if self.lifecycle.hidden else self._capture_window_geometry()
             self.store.settings["compact_geometry"] = compact_geometry.as_dict()
             self.store.settings["x"] = compact_geometry.x
             self.store.settings["y"] = compact_geometry.y
@@ -7235,6 +7241,9 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
                 messagebox.showwarning, f"最近自动备份未完成：{self.backup_warning}\n请检查磁盘空间或目录权限。"))
         menu.add_cascade(label="数据管理", menu=data_menu)
         menu.add_separator()
+        menu.add_command(label="隐藏到系统托盘",
+                         state="normal" if self.tray_icon and self.tray_icon.is_available else "disabled",
+                         command=lambda: self._queue_context_menu_action(menu, self.hide_to_tray))
         menu.add_command(label="快捷键与操作说明", command=self.show_help)
         menu.add_command(label="退出", command=self.on_close)
         x = self.menu_button.winfo_rootx()
@@ -7269,51 +7278,24 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
         self.render()
 
     def _start_tray_icon(self) -> None:
-        if self.tray_icon or not self.winfo_exists():
+        if self.lifecycle.exiting or self.lifecycle.stopped or not self.winfo_exists():
             return
-        intro_key = "tray_intro_version"
-        first_for_version = self.store.settings.get(intro_key) != __version__
-        message = "启动完成。顶部横线可隐藏到这里，单击托盘图标可重新显示月历。" if first_for_version else None
+        if self.tray_icon and self.tray_icon.is_available:
+            return
+        if self.tray_icon:
+            if not self.tray_icon.stop():
+                return  # Do not create a second helper thread while one is stopping.
         self.tray_icon = TrayIcon(
             f"{APP_NAME} v{__version__}",
             resource_path("assets/calendar.ico"),
             self.tray_actions.put,
-            startup_message=message,
         )
-        if self.tray_icon.start() and first_for_version:
-            self.store.settings[intro_key] = __version__
-            self.store.save()
-        elif self.tray_icon.error:
+        if not self.tray_icon.start() and self.tray_icon.error:
             log_exception(
                 RuntimeError,
                 RuntimeError(f"系统托盘初始化失败：{self.tray_icon.error}"),
                 None,
             )
-
-    def _poll_tray_actions(self) -> None:
-        if not self.winfo_exists():
-            return
-        try:
-            while True:
-                self._handle_tray_action(self.tray_actions.get_nowait())
-        except queue.Empty:
-            pass
-        self.after(120, self._poll_tray_actions)
-
-    def _handle_tray_action(self, action: str) -> None:
-        if action == "exit":
-            self.on_close()
-            return
-        self.deiconify()
-        self._activate_desktop_session()
-        if self.window_mode == "pinned":
-            bring_to_front(self)
-        if action == "new":
-            self.after(40, self.open_editor)
-        elif action == "today":
-            self.go_today()
-        elif action == "update":
-            self.after(40, self.check_for_updates)
 
     def toggle_autostart(self, enabled: bool) -> None:
         try:
@@ -7322,7 +7304,11 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
             messagebox.showerror(APP_NAME, f"设置开机启动失败：\n{exc}", parent=self)
 
     def _owned_data_dialog(self, callback):
-        return run_owned_modal(self, callback)
+        self._lifecycle_operation_depth += 1
+        try:
+            return run_owned_modal(self, callback)
+        finally:
+            self._lifecycle_operation_depth -= 1
 
     def show_help(self) -> None:
         messagebox.showinfo(
@@ -7340,17 +7326,15 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
             "Ctrl+Z：撤销事项操作；Ctrl+Y / Ctrl+Shift+Z：重做\n"
             "文本输入时优先使用文本编辑自身的撤销\n"
             "拖动顶部：移动挂件位置\n\n"
-            "顶部横线 / Alt+F4：隐藏到通知区域，提醒继续运行\n"
+            "紧凑视图横线 / Alt+F4：保持原有隐藏到通知区域行为\n"
+            "全局视图横线：最小化到任务栏\n"
+            "更多 → 隐藏到系统托盘：保留当前视图并隐藏窗口\n"
+            "双击托盘图标：恢复隐藏前的视图\n"
             "真正退出：右键托盘图标并选择“退出桌面月历”\n\n"
             "桌面模式空闲时会待在普通应用窗口后面。单击月历后会临时进入前台，完成操作并切换到其他应用后自动回到桌面层；按 Esc 可立即归位。需要一直覆盖其他窗口时，再点击顶部“桌面”切换为置顶。",
             parent=self,
         )
 
-    def _call_main(self, callback: Callable[[], None]) -> None:
-        try:
-            self.after(0, callback)
-        except (RuntimeError, tk.TclError):
-            pass
 
     def open_release_history(self) -> None:
         ReleaseHistoryDialog(self, __version__, resource_path("CHANGELOG.md"), FONT)
@@ -7598,57 +7582,7 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
         )):
             popup.destroy()
 
-    def hide_to_tray(self) -> None:
-        if not self.tray_icon:
-            self._start_tray_icon()
-        if not self.tray_icon or self.tray_icon.error or not self.tray_icon.is_available:
-            messagebox.showwarning(APP_NAME, "系统通知区域图标暂时不可用，月历没有隐藏。", parent=self)
-            return
-        try:
-            self._save_window_settings()
-        except DataCompatibilityError as exc:
-            owned_messagebox(self, messagebox.showerror, APP_NAME, f"隐藏窗口前已拒绝不兼容的数据写入，窗口保持打开。\n\n{exc}")
-            return
-        except (OSError, tk.TclError):
-            pass
-        if self._lower_job:
-            try:
-                self.after_cancel(self._lower_job)
-            except tk.TclError:
-                pass
-            self._lower_job = None
-        self.desktop_session_active = False
-        self.withdraw()
 
-    def on_close(self) -> None:
-        if self._global_window_move is not None:
-            self._global_window_move.close()
-            self._global_window_move = None
-        self._clear_feedback()
-        self._cancel_schedule_drag()
-        if self.search_window and self.search_window.winfo_exists():
-            self.search_window.close(restore_focus=False)
-        if self.search_service is not None:
-            self.search_service.close()
-        try:
-            if not getattr(self, "_update_handoff", False):
-                self._save_window_settings()
-        except DataCompatibilityError as exc:
-            owned_messagebox(self, messagebox.showerror, APP_NAME, f"退出时已拒绝不兼容的数据写入。\n\n{exc}")
-        except (OSError, tk.TclError):
-            pass
-        if self.instance_guard:
-            self.instance_guard.close()
-        if self.tray_icon:
-            self.tray_icon.stop()
-            self.tray_icon = None
-        if self._startup_foreground_restore_job:
-            try:
-                self.after_cancel(self._startup_foreground_restore_job)
-            except tk.TclError:
-                pass
-            self._startup_foreground_restore_job = None
-        self.destroy()
 
 
 def main() -> None:
