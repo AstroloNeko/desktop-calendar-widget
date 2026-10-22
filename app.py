@@ -97,6 +97,8 @@ from update_manager import (
 from version import __version__
 from backup_ui import BackupActionsMixin
 from data_backup import automatic_backup
+from data_compat import DataCompatibilityError
+from update_state import update_in_progress
 from update_dialog import UpdateAvailableDialog
 from habit_schedule import schedule_label
 from habit_ui import HabitScheduleForm
@@ -3122,6 +3124,9 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
         super().__init__()
         self.dpi = DpiManager(self)
         self.store = store or Store()
+        if self.store.load_error:
+            self.destroy()
+            raise DataCompatibilityError(self.store.load_error)
         self.backup_warning = None
         if not self.store.load_error:
             try:
@@ -3255,8 +3260,6 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
         self.after(220, self._start_tray_icon)
         self.after(250, self._poll_tray_actions)
         self.after(1200, self.check_reminders)
-        if self.store.load_error:
-            self.after(250, lambda: messagebox.showwarning(APP_NAME, f"日历数据读取失败，已先打开空日历。\n\n{self.store.load_error}", parent=self))
 
     @staticmethod
     def _load_image(relative: str) -> Optional[tk.PhotoImage]:
@@ -7426,16 +7429,20 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
             self.after(100, self.apply_window_mode)
             return
         try:
+            # Finish all writes before handing control to another executable.
+            # A failed save must not leave an updater waiting for this process.
+            self._save_window_settings()
             if self.update_dialog:
                 self.update_dialog.set_progress(100)
                 self.update_dialog.set_status("校验通过，正在启动更新器…")
             launch_updater(archive)
-            self.store.save()
-            self.after(900, self.on_close)
-        except UpdateError as exc:
+            self._update_handoff = True
+            self.after_idle(self.on_close)
+        except (UpdateError, OSError, ValueError) as exc:
             self._close_update_dialog()
             self.update_busy = False
-            messagebox.showerror(APP_NAME, f"无法安装更新：\n\n{exc}", parent=self)
+            owned_messagebox(self, messagebox.showerror, APP_NAME,
+                             f"更新尚未完成，已中止交接。\n\n{exc}\n\n请勿用旧程序覆盖较新数据；必要时使用新版独立修复工具。")
 
     def check_reminders(self) -> None:
         now = datetime.now()
@@ -7594,6 +7601,9 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
             return
         try:
             self._save_window_settings()
+        except DataCompatibilityError as exc:
+            owned_messagebox(self, messagebox.showerror, APP_NAME, f"隐藏窗口前已拒绝不兼容的数据写入，窗口保持打开。\n\n{exc}")
+            return
         except (OSError, tk.TclError):
             pass
         if self._lower_job:
@@ -7616,7 +7626,10 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
         if self.search_service is not None:
             self.search_service.close()
         try:
-            self._save_window_settings()
+            if not getattr(self, "_update_handoff", False):
+                self._save_window_settings()
+        except DataCompatibilityError as exc:
+            owned_messagebox(self, messagebox.showerror, APP_NAME, f"退出时已拒绝不兼容的数据写入。\n\n{exc}")
         except (OSError, tk.TclError):
             pass
         if self.instance_guard:
@@ -7636,6 +7649,20 @@ class CalendarApp(BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin
 def main() -> None:
     enable_dpi_awareness()
     sys.excepthook = log_exception
+    try:
+        busy = update_in_progress()
+    except OSError as exc:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(APP_NAME, str(exc), parent=root)
+        root.destroy()
+        return
+    if busy:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo(APP_NAME, "更新尚未完成，请等待安装结束后再打开月历。", parent=root)
+        root.destroy()
+        return
     instance = SingleInstance()
     if instance.already_running:
         root = tk.Tk()
@@ -7644,7 +7671,15 @@ def main() -> None:
         root.destroy()
         instance.close()
         return
-    app = CalendarApp(instance=instance)
+    try:
+        app = CalendarApp(instance=instance)
+    except DataCompatibilityError as exc:
+        instance.close()
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(APP_NAME, f"无法安全打开日历。\n\n{exc}\n\n已拒绝不兼容的数据写入；请勿用旧程序覆盖或重建数据。", parent=root)
+        root.destroy()
+        return
     app.mainloop()
 
 

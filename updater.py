@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 from data_backup import automatic_backup
+from update_state import reserve_installation
 
 
 def show_error(message: str) -> None:
@@ -37,12 +38,38 @@ def wait_for_process(pid: int, timeout_seconds: int = 90) -> None:
     close_handle.restype = wintypes.BOOL
     handle = open_process(SYNCHRONIZE, False, pid)
     if not handle:
+        error = kernel32.GetLastError()
+        if error not in (0, 87):  # ERROR_INVALID_PARAMETER: process already gone.
+            raise OSError(error, "无法确认旧进程已退出，已取消更新。")
         return
     try:
-        if wait(wintypes.HANDLE(handle), timeout_seconds * 1000) == 0x00000102:  # WAIT_TIMEOUT
+        result = wait(wintypes.HANDLE(handle), timeout_seconds * 1000)
+        if result == 0x00000102:  # WAIT_TIMEOUT
             raise TimeoutError("月历或修复工具尚未退出，已取消覆盖运行中的程序。")
+        if result != 0:
+            raise OSError("无法可靠等待旧进程退出，已取消更新。")
     finally:
         close_handle(wintypes.HANDLE(handle))
+
+
+def ensure_no_calendar_instance() -> None:
+    """The parent may be a repair tool; another calendar must not be ignored."""
+    if os.name != "nt":
+        return
+    kernel32 = ctypes.windll.kernel32
+    open_mutex = kernel32.OpenMutexW
+    open_mutex.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    open_mutex.restype = wintypes.HANDLE
+    close = kernel32.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+    handle = open_mutex(0x00100000, False, "Local\\DesktopCalendarWidgetV2")
+    if handle:
+        close(handle)
+        raise RuntimeError("另一个月历实例仍在运行，更新尚未完成。请退出该实例后重试；未覆盖程序或日历数据。")
+    error = kernel32.GetLastError()
+    if error not in (0, 2):  # ERROR_FILE_NOT_FOUND: no named instance.
+        raise OSError(error, "无法确认其他月历实例状态，已取消更新。")
 
 
 def safe_extract(archive: Path, destination: Path) -> None:
@@ -103,11 +130,13 @@ def main() -> int:
     extracted = Path(tempfile.mkdtemp(prefix="DesktopCalendarExtract-"))
     try:
         wait_for_process(args.pid)
-        safe_extract(args.archive, extracted)
-        source = payload_root(extracted)
-        data_file = Path(os.getenv("APPDATA", str(Path.home()))) / "DesktopCalendar" / "calendar_data.json"
-        automatic_backup(data_file, reason="before-update", force=True)
-        copy_payload(source, args.install_dir, args.executable)
+        ensure_no_calendar_instance()
+        with reserve_installation():
+            safe_extract(args.archive, extracted)
+            source = payload_root(extracted)
+            data_file = Path(os.getenv("APPDATA", str(Path.home()))) / "DesktopCalendar" / "calendar_data.json"
+            automatic_backup(data_file, reason="before-update", force=True)
+            copy_payload(source, args.install_dir, args.executable)
         executable = args.install_dir / args.executable
         subprocess.Popen([str(executable)], cwd=str(args.install_dir), close_fds=True)
         args.archive.unlink(missing_ok=True)

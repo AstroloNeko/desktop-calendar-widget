@@ -46,6 +46,24 @@
 
 日程数据保存在 `%APPDATA%\DesktopCalendar\calendar_data.json`，升级软件不会覆盖个人数据。
 
+### 源码测试与正式版的数据隔离
+
+源码版与 EXE 默认使用同一个用户数据目录。较新的源码可能先升级数据 Schema；之后不能再用旧 EXE 打开该目录，也不能手工改低 `version`。请用支持该 Schema 的新版程序；无法更新主程序时使用新版独立修复工具，不要恢复或清空日历来消除版本错误。
+
+开发测试请先退出正式版，再在独立 PowerShell 进程中使用隔离 APPDATA（`build` 已被 Git 忽略）：
+
+```powershell
+$calendarOriginalAppData = $env:APPDATA
+try {
+    $env:APPDATA = Join-Path $PWD 'build\dev-profile'
+    py -3 .\app.py
+} finally {
+    $env:APPDATA = $calendarOriginalAppData
+}
+```
+
+该命令不会搬移或复制正式数据；测试数据、日志和备份都在隔离目录。当前仍有全局单实例保护，不应通过绕开该保护让新旧版本竞争真实数据。更新交接前必须先成功保存；保存失败会中止交接，不会继续覆盖安装。正常更新使用校验后 ZIP 内的新更新器，不再使用安装目录中可能过旧的更新器。
+
 ### Global 多选与批量操作
 
 月度排期与任务时间轴中，按住 Ctrl 单击事项可增减选择；同一个多日事项的不同片段只计一项。普通单击或拖动只处理当前事项，不移动整批选择。任务时间轴还支持 Shift 按当前事项顺序范围选择（Ctrl+Shift 为追加范围）。

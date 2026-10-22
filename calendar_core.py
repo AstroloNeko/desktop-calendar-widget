@@ -12,13 +12,14 @@ from typing import Any, Callable, Collection, Optional
 from holiday_data import is_workday as system_is_workday
 from ui_theme import DEFAULT_THEME_NAME, normalize_theme_name
 from habit_schedule import habit_scheduled_on, normalize_schedule
+from data_compat import DATA_SCHEMA_VERSION, DataCompatibilityError, decode_calendar_data
+from version import __version__
 
 
 APP_NAME = "桌面月历"
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "DesktopCalendar"
 DATA_FILE = DATA_DIR / "calendar_data.json"
-DATA_SCHEMA_VERSION = 8
 
 COLORS = {
     "海盐蓝": "#6687F2",
@@ -391,9 +392,11 @@ class Store:
         self.load()
 
     def load(self) -> None:
+        self.load_error = None
+        self._migration_backup_pending = False
         try:
-            raw = json.loads(self.data_file.read_text(encoding="utf-8"))
-            self._migration_backup_pending = raw.get("version", 1) != DATA_SCHEMA_VERSION
+            raw = decode_calendar_data(self.data_file.read_bytes(), supported=DATA_SCHEMA_VERSION, app_version=__version__)
+            self._migration_backup_pending = raw.get("version", 1) < DATA_SCHEMA_VERSION
             categories: list[EventCategory] = []
             seen_category_ids: set[str] = set()
             category_payload = raw.get("categories", [])
@@ -459,10 +462,23 @@ class Store:
             self.notified = {item for item in raw.get("notified", []) if isinstance(item, str)}
         except FileNotFoundError:
             return
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        except OSError as exc:
+            self.load_error = f"无法访问日历数据文件，请检查数据目录权限：{exc}"
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
             self.load_error = str(exc)
 
     def save(self) -> None:
+        # Refuse before creating a checkpoint, directory or temporary file.
+        # In particular a still-open older app must never downgrade data that
+        # another compatible process has subsequently migrated.
+        if self.load_error:
+            raise DataCompatibilityError(f"当前数据未能安全加载，已拒绝保存：{self.load_error}")
+        try:
+            disk = self.data_file.read_bytes()
+        except FileNotFoundError:
+            pass
+        else:
+            decode_calendar_data(disk, supported=DATA_SCHEMA_VERSION, app_version=__version__)
         if self._migration_backup_pending and self.data_file.exists():
             from data_backup import automatic_backup
             # Do not persist a schema migration unless its original data has

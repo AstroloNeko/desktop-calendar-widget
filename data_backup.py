@@ -11,9 +11,10 @@ import uuid
 import zipfile
 
 from version import __version__
+from data_compat import DATA_SCHEMA_VERSION, decode_calendar_data
 
 FORMAT_VERSION = 1
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = DATA_SCHEMA_VERSION
 MAX_DATA_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 40 * 1024 * 1024
 AUTO_KEEP = 10
@@ -28,12 +29,7 @@ def validate_data(data: bytes) -> dict:
     if len(data) > MAX_DATA_BYTES:
         raise BackupError("数据超过安全大小限制（32 MB）。")
     try:
-        raw = json.loads(data.decode("utf-8-sig"))
-        if not isinstance(raw, dict):
-            raise ValueError("数据根节点必须是对象")
-        schema = raw.get("version", 1)
-        if type(schema) is not int or not 1 <= schema <= SCHEMA_VERSION:
-            raise ValueError("数据版本不兼容，请使用支持该备份的新版月历")
+        raw = decode_calendar_data(data, supported=SCHEMA_VERSION, app_version=__version__)
         # Use the real legacy readers, but reject any record they would discard.
         from calendar_core import Event, EventCategory, RoutineItem
         for key, model in (("events", Event), ("categories", EventCategory), ("routines", RoutineItem)):
@@ -76,11 +72,12 @@ def read_backup(path: Path) -> tuple[dict, bytes]:
                     raise BackupError("备份包含异常大小、加密或不安全的文件。")
             manifest = json.loads(package.read("manifest.json").decode("utf-8"))
             data = package.read(DATA_MEMBER)
+        if not isinstance(manifest, dict) or manifest.get("format") != "DesktopCalendarBackup":
+            raise BackupError("备份文件格式无效。")
+        if type(manifest.get("format_version")) is not int or manifest["format_version"] != FORMAT_VERSION:
+            raise BackupError("备份容器格式版本不兼容，请使用支持此备份的版本。")
         raw = validate_data(data)
-        if (not isinstance(manifest, dict) or manifest.get("format") != "DesktopCalendarBackup"
-                or type(manifest.get("format_version")) is not int
-                or manifest["format_version"] != FORMAT_VERSION
-                or manifest.get("schema_version") != raw.get("version", 1)):
+        if manifest.get("schema_version") != raw.get("version", 1):
             raise BackupError("备份格式或数据版本信息无效。")
         created = datetime.fromisoformat(manifest["created_at"])
         if created.tzinfo is None or not isinstance(manifest.get("app_version"), str):

@@ -9,17 +9,16 @@ import queue
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import tkinter as tk
 import webbrowser
-import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from update_manager import GITHUB_REPOSITORY, UpdateInfo, check_for_update, download_update, version_tuple
 from version import __version__
+from update_payload import PayloadError, stage_verified_updater as _stage_verified_updater
 
 
 APP_EXE = "DesktopCalendar.exe"
@@ -82,35 +81,10 @@ def main_app_running() -> bool:
 
 def stage_verified_updater(archive: Path) -> Path:
     """Take the new updater from the checksum-verified release, not the broken install."""
-    app_member = f"DesktopCalendar/{APP_EXE}"
-    updater_member = f"DesktopCalendar/{UPDATER_EXE}"
     try:
-        with zipfile.ZipFile(archive) as package:
-            names = set(package.namelist())
-            if app_member not in names or updater_member not in names:
-                raise RepairError("发布包缺少主程序或更新器。")
-            if not any(name.startswith("DesktopCalendar/_internal/") for name in names):
-                raise RepairError("发布包缺少必要运行文件。")
-            if package.testzip() is not None:
-                raise RepairError("发布包损坏，已取消安装。")
-            member = package.getinfo(updater_member)
-            if member.is_dir() or (member.external_attr >> 16) & 0o170000 == 0o120000:
-                raise RepairError("发布包中的更新器无效。")
-            staging = Path(tempfile.mkdtemp(prefix="DesktopCalendarRepair-"))
-            target = staging / UPDATER_EXE
-            try:
-                with package.open(member) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
-                with target.open("rb") as executable:
-                    signature = executable.read(2)
-                if signature != b"MZ":
-                    raise RepairError("发布包中的更新器不是 Windows 可执行文件。")
-                return target
-            except Exception:
-                shutil.rmtree(staging, ignore_errors=True)
-                raise
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise RepairError(f"无法读取已下载的发布包：{exc}") from exc
+        return _stage_verified_updater(archive)
+    except PayloadError as exc:
+        raise RepairError(str(exc)) from exc
 
 
 def launch_repair_updater(updater: Path, archive: Path, install_dir: Path) -> None:

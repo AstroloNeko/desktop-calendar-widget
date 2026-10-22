@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from version import __version__
+from update_payload import PayloadError, stage_verified_updater
 
 
 GITHUB_REPOSITORY = "AstroloNeko/desktop-calendar-widget"
@@ -170,13 +170,12 @@ def launch_updater(archive: Path) -> None:
     if not running_as_packaged_app():
         raise UpdateError("源码运行模式不能自动覆盖安装；请在 GitHub Release 中下载发布版。")
     install_dir = Path(sys.executable).resolve().parent
-    bundled_updater = install_dir / "DesktopCalendarUpdater.exe"
-    if not bundled_updater.exists():
-        raise UpdateError("安装目录中缺少 DesktopCalendarUpdater.exe。")
-    staging = Path(tempfile.gettempdir()) / "DesktopCalendarUpdate"
-    staging.mkdir(parents=True, exist_ok=True)
-    staged_updater = staging / "DesktopCalendarUpdater.exe"
-    shutil.copy2(bundled_updater, staged_updater)
+    # The old bundled updater can have an older schema gate than the new
+    # payload. Never ask it to back up newer data or install that payload.
+    try:
+        staged_updater = stage_verified_updater(archive)
+    except PayloadError as exc:
+        raise UpdateError(str(exc)) from exc
     flags = 0
     if os.name == "nt":
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
@@ -192,7 +191,7 @@ def launch_updater(archive: Path) -> None:
             "--executable",
             Path(sys.executable).name,
         ],
-        cwd=str(staging),
+        cwd=str(staged_updater.parent),
         close_fds=True,
         creationflags=flags,
     )
