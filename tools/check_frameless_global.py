@@ -7,6 +7,7 @@ The 96..192 checks simulate DPI transitions; the native monitor DPI is reported.
 import argparse
 import ctypes
 from ctypes import wintypes
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import time
 import traceback
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,6 +26,118 @@ from dpi_utils import dpi_for_window, scaled_geometry
 from global_header import header_layout
 from tools.check_interactions import cleanup, pump
 from win_integration import is_window_topmost, window_handle
+
+
+class _MouseInput(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_int32), ("dy", ctypes.c_int32),
+                ("data", ctypes.c_uint32), ("flags", ctypes.c_uint32),
+                ("time", ctypes.c_uint32), ("extra", ctypes.c_size_t)]
+
+
+class _InputPayload(ctypes.Union):
+    _fields_ = [("mouse", _MouseInput)]
+
+
+class _NativeInput(ctypes.Structure):
+    _fields_ = [("kind", ctypes.c_uint32), ("payload", _InputPayload)]
+
+
+def wait_until(app, predicate, description, *, timeout=3):
+    """Wait for a result, not a guessed editor/shell creation duration."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"Timed out: {description}")
+        pump(app, .01)
+
+
+def native_click(widget, *, user=None):
+    """One native input batch; never yield between pointer-down and release.
+
+    The old SetCursorPos/down/pump/up sequence could release outside the button
+    or continue after SetCursorPos failed. Do not retry a click or bypass the
+    application's outside-release cancellation. Callers verify its UI result.
+    """
+    user = user if user is not None else ctypes.WinDLL("user32", use_last_error=True)
+    widget.update_idletasks()  # Resolve pending layout BEFORE reading coordinates.
+    x = widget.winfo_rootx() + widget.winfo_width() // 2
+    y = widget.winfo_rooty() + widget.winfo_height() // 2
+    user.WindowFromPoint.argtypes = [wintypes.POINT]
+    user.WindowFromPoint.restype = wintypes.HWND
+    hit = user.WindowFromPoint(wintypes.POINT(x, y))
+    assert hit == int(widget.winfo_id()), ("QA click target changed/covered", x, y, hit, widget.winfo_id())
+    user.GetSystemMetrics.argtypes = [ctypes.c_int]
+    user.GetSystemMetrics.restype = ctypes.c_int
+    left, top, width, height = (user.GetSystemMetrics(index) for index in (76, 77, 78, 79))
+    assert width > 1 and height > 1
+    assert left <= x < left+width and top <= y < top+height
+    inputs = (_NativeInput * 3)()
+    inputs[0].payload.mouse = _MouseInput(round((x-left)*65535/(width-1)),
+                                         round((y-top)*65535/(height-1)), 0, 0xC001, 0, 0)
+    inputs[1].payload.mouse.flags = 2
+    inputs[2].payload.mouse.flags = 4
+    user.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_NativeInput), ctypes.c_int]
+    user.SendInput.restype = wintypes.UINT
+    sent = user.SendInput(3, inputs, ctypes.sizeof(_NativeInput))
+    if sent == 2:
+        # Partial acceptance included our down but not our up; don't strand
+        # a native capture while reporting the failed test.
+        release = (_NativeInput * 1)()
+        release[0].payload.mouse.flags = 4
+        user.SendInput(1, release, ctypes.sizeof(_NativeInput))
+    assert sent == 3, ("Native input was not accepted; check interactive desktop", sent)
+
+
+def require_editor(app):
+    """None == None is never evidence that an editor owns the modal grab."""
+    editor = app.editor_window
+    assert editor is not None, "New-event callback did not publish an editor"
+    assert editor.winfo_exists(), "The published editor was destroyed"
+    assert editor.winfo_ismapped(), "The editor is not visible"
+    assert str(editor.transient()) == str(app), "Incorrect editor owner"
+    assert app.grab_current() is editor, "The editor does not own the modal grab"
+    return editor
+
+
+def click_new_event(app):
+    button = app.global_header.controls["create"]  # Fresh widget after each rebuild.
+    events, calls = [], []
+    bindings = []
+    command = button.command
+    def invoke():
+        calls.append(time.monotonic())
+        return command()
+    for sequence in ("<ButtonPress-1>", "<ButtonRelease-1>"):
+        bindings.append((sequence, button.bind(sequence, lambda event, kind=sequence:
+            events.append((kind, event.x, event.y, event.x_root, event.y_root)), add="+")))
+    button.command = invoke
+    try:
+        native_click(button)
+        def ready():
+            editor = app.editor_window
+            return editor is not None and editor.winfo_exists() and editor.winfo_ismapped()
+        try:
+            wait_until(app, ready, "real toolbar click must create a visible editor")
+        except AssertionError as error:
+            user = ctypes.windll.user32
+            user.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+            user.GetCapture.restype = wintypes.HWND
+            point = wintypes.POINT()
+            user.GetCursorPos(ctypes.byref(point))
+            raise AssertionError({"reason": str(error), "events": events, "callbacks": len(calls),
+                                  "cursor": (point.x, point.y), "capture": user.GetCapture(),
+                                  "grab": str(app.grab_current()), "focus": str(app.focus_get()),
+                                  "move": bool(app._global_window_move), "editor": str(app.editor_window)}) from error
+        editor = require_editor(app)
+        assert len(calls) == 1, ("Click must execute exactly once", calls, events)
+        assert {event[0] for event in events} == {"<ButtonPress-1>", "<ButtonRelease-1>"}, events
+        print("Native toolbar click:", app.theme_name, "editor HWND", window_handle(editor, refresh=False),
+              "owner", editor.transient(), "grab", app.grab_current(), flush=True)
+        return editor
+    finally:
+        button.command = command
+        for sequence, binding in bindings:
+            button.unbind(sequence, binding)
 
 
 def powershell(script):
@@ -51,8 +165,6 @@ def taskbar_restore(app, app_id):
     script = r"""Add-Type -AssemblyName UIAutomationClient
 Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class SmokeMouse {
  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
- [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
- [DllImport("user32.dll")] public static extern void mouse_event(uint f,uint x,uint y,uint d,UIntPtr e);
  [DllImport("user32.dll")] public static extern void keybd_event(byte a,byte b,uint c,UIntPtr d);
  [StructLayout(LayoutKind.Sequential)] public struct Point { public int X; public int Y; }
  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point p);
@@ -73,22 +185,22 @@ $buttons = $bar.FindAll([System.Windows.Automation.TreeScope]::Descendants,
 $button = $buttons | Where-Object { $_.Current.AutomationId -eq 'Appid: QA_APP_ID' } | Select-Object -First 1
 if ($null -eq $button) { throw 'Isolated QA taskbar button not found' }
 $r=$button.Current.BoundingRectangle
-$invoke = $button.GetSupportedPatterns() | Where-Object { $_.Id -eq [System.Windows.Automation.InvokePattern]::Pattern.Id }
-if ($null -ne $invoke) {
- $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-} else {
 $p = New-Object SmokeMouse+Point
 $p.X=[int]($r.X+$r.Width/2); $p.Y=[int]($r.Y+$r.Height/2)
 $target=[SmokeMouse]::GetAncestor([SmokeMouse]::WindowFromPoint($p),2)
 if ($target -ne [IntPtr]$bar.Current.NativeWindowHandle) { throw 'Taskbar is covered; refusing to click another application' }
-[SmokeMouse]::SetCursorPos($p.X,$p.Y) | Out-Null
-[SmokeMouse]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
-Start-Sleep -Milliseconds 60
-[SmokeMouse]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
-}
-$button.Current.Name
+@{name=$button.Current.Name; x=$p.X; y=$p.Y; bar=$bar.Current.NativeWindowHandle} | ConvertTo-Json -Compress
 """.replace("QA_APP_ID", app_id)
-    return wait_process(app, powershell(script))
+    target = json.loads(wait_process(app, powershell(script)))
+    user = ctypes.windll.user32
+    point = wintypes.POINT(target["x"], target["y"])
+    hit = user.WindowFromPoint(point)
+    assert user.GetAncestor(hit, 2) == target["bar"], "Taskbar target changed/covered"
+    # Use the same atomic input as the toolbar, not a separated down/wait/up.
+    native_click(SimpleNamespace(update_idletasks=lambda: None,
+                                winfo_rootx=lambda: point.x-1, winfo_rooty=lambda: point.y-1,
+                                winfo_width=lambda: 2, winfo_height=lambda: 2, winfo_id=lambda: hit))
+    return target["name"]
 
 
 def capture(app, path):
@@ -181,7 +293,7 @@ def main():
                     app.minimize_global()
                     pump(app, .12)
                     taskbar_restore(app, app_id)
-                    pump(app, .2)
+                    wait_until(app, lambda: app.state() == "normal", "initial taskbar restore")
                     assert app.state() == "normal"
                 for theme in (() if options.shell_only else ("modern", "aero", "paper", "frutiger")):
                     app.set_theme(theme)
@@ -222,16 +334,7 @@ def main():
                     create.event_generate("<ButtonRelease-1>", x=10, y=10)
                     pump(app)
                     assert app.editor_window is None
-                    point = wintypes.POINT(create.winfo_rootx()+create.winfo_width()//2,
-                                           create.winfo_rooty()+create.winfo_height()//2)
-                    assert user.GetAncestor(user.WindowFromPoint(point), 2) == window_handle(app)
-                    user.SetCursorPos(point.x, point.y)
-                    user.mouse_event(2, 0, 0, 0, 0)
-                    pump(app, .03)
-                    user.mouse_event(4, 0, 0, 0, 0)
-                    pump(app, .15)
-                    assert app.grab_current() is app.editor_window
-                    assert str(app.editor_window.transient()) == str(app)
+                    click_new_event(app)
                     assert not is_window_topmost(app)
                     app.editor_window.close()
                     pump(app, .25)

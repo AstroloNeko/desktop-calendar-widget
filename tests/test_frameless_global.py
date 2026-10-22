@@ -9,6 +9,84 @@ from app import CalendarApp, ThemeButton, Tooltip
 from global_header import GlobalHeader, HEADER_HEIGHT, header_layout
 from ui_draw import draw_compact_view_icon
 import win_integration as native
+from tools.check_frameless_global import native_click, require_editor, wait_until
+
+
+class GuiHarnessTests(unittest.TestCase):
+    def editor_app(self):
+        editor = SimpleNamespace(winfo_exists=lambda: True, winfo_ismapped=lambda: True,
+                                 transient=lambda: "owner")
+        class Owner:
+            editor_window = editor
+            def __str__(self):
+                return "owner"
+            def grab_current(self):
+                return self.editor_window
+        return Owner()
+
+    def test_missing_editor_and_missing_grab_cannot_pass_modal_check(self):
+        owner = self.editor_app()
+        owner.editor_window = None
+        with self.assertRaisesRegex(AssertionError, "did not publish"):
+            require_editor(owner)
+
+    def test_destroyed_or_hidden_editor_is_not_treated_as_live_modal(self):
+        owner = self.editor_app()
+        owner.editor_window.winfo_exists = lambda: False
+        with self.assertRaisesRegex(AssertionError, "destroyed"):
+            require_editor(owner)
+        owner.editor_window.winfo_exists = lambda: True
+        owner.editor_window.winfo_ismapped = lambda: False
+        with self.assertRaisesRegex(AssertionError, "visible"):
+            require_editor(owner)
+
+    def test_live_editor_must_have_correct_owner_and_grab(self):
+        owner = self.editor_app()
+        self.assertIs(require_editor(owner), owner.editor_window)
+        owner.editor_window.transient = lambda: "stale-owner"
+        with self.assertRaisesRegex(AssertionError, "owner"):
+            require_editor(owner)
+        owner.editor_window.transient = lambda: "owner"
+        owner.grab_current = lambda: None
+        with self.assertRaisesRegex(AssertionError, "grab"):
+            require_editor(owner)
+
+    def test_wait_tracks_result_instead_of_fixed_sleep_and_does_not_skip_timeout(self):
+        ready = []
+        with patch("tools.check_frameless_global.pump", side_effect=lambda *_: ready.append(True)) as pump:
+            wait_until(object(), lambda: bool(ready), "created")
+        pump.assert_called_once()
+        with patch("tools.check_frameless_global.time.monotonic", side_effect=[0, 0, 4]), patch("tools.check_frameless_global.pump"):
+            with self.assertRaisesRegex(AssertionError, "Timed out"):
+                wait_until(object(), lambda: False, "created")
+
+    def test_native_batch_targets_current_widget_and_rejects_partial_delivery(self):
+        widget = SimpleNamespace(update_idletasks=Mock(), winfo_rootx=lambda: -100,
+                                 winfo_rooty=lambda: 40, winfo_width=lambda: 80,
+                                 winfo_height=lambda: 40, winfo_id=lambda: 0x200123456789)
+        metrics = {76: -1920, 77: 0, 78: 4800, 79: 1620}
+        user = SimpleNamespace(WindowFromPoint=Mock(return_value=widget.winfo_id()),
+                               GetSystemMetrics=Mock(side_effect=metrics.__getitem__), SendInput=Mock(return_value=3))
+        native_click(widget, user=user)
+        widget.update_idletasks.assert_called_once()
+        count, batch, size = user.SendInput.call_args.args
+        self.assertEqual(count, 3)
+        self.assertEqual([item.payload.mouse.flags for item in batch], [0xC001, 2, 4])
+        self.assertGreater(size, 0)
+        user.SendInput.return_value = 2
+        with self.assertRaisesRegex(AssertionError, "not accepted"):
+            native_click(widget, user=user)
+        self.assertEqual(user.SendInput.call_args.args[0], 1)
+        self.assertEqual(user.SendInput.call_args.args[1][0].payload.mouse.flags, 4)
+
+    def test_native_click_refuses_stale_widget_coordinates_or_covering_window(self):
+        widget = SimpleNamespace(update_idletasks=Mock(), winfo_rootx=lambda: 10,
+                                 winfo_rooty=lambda: 10, winfo_width=lambda: 80,
+                                 winfo_height=lambda: 40, winfo_id=lambda: 100)
+        user = SimpleNamespace(WindowFromPoint=Mock(return_value=200), SendInput=Mock())
+        with self.assertRaisesRegex(AssertionError, "changed/covered"):
+            native_click(widget, user=user)
+        user.SendInput.assert_not_called()
 
 
 class GlobalHeaderTests(unittest.TestCase):

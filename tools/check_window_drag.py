@@ -53,6 +53,7 @@ def native_signatures():
         "SendMessageW": ([wt.HWND, wt.UINT, ctypes.c_size_t, ctypes.c_ssize_t], ctypes.c_ssize_t),
         "PostMessageW": ([wt.HWND, wt.UINT, ctypes.c_size_t, ctypes.c_ssize_t], wt.BOOL),
         "SetCursorPos": ([ctypes.c_int, ctypes.c_int], wt.BOOL),
+        "GetCursorPos": ([ctypes.POINTER(wt.POINT)], wt.BOOL),
         "mouse_event": ([wt.DWORD, wt.DWORD, wt.DWORD, wt.DWORD, ctypes.c_size_t], None),
         "GetDC": ([wt.HWND], wt.HDC),
         "ReleaseDC": ([wt.HWND, wt.HDC], ctypes.c_int),
@@ -154,21 +155,35 @@ def drag_header(app, dx=60, dy=30):
     bounds = header_layout(app.dpi.logical(header.winfo_width()))["drag"]
     start = (header.winfo_rootx()+app.dpi.px(bounds[0]+bounds[2]//2),
              header.winfo_rooty()+app.dpi.px(12))
+    hwnd = window_handle(app)
+    errors = []
     def input_worker():
-        U.SetCursorPos(*start)
-        U.mouse_event(2, 0, 0, 0, 0)
+        pressed = False
         try:
+            assert U.SetCursorPos(*start), "Native cursor positioning failed; interactive desktop required"
+            assert U.GetAncestor(U.WindowFromPoint(wt.POINT(*start)), 2) == hwnd
+            U.mouse_event(2, 0, 0, 0, 0)
+            pressed = True
+            deadline = time.monotonic()+2
+            while not (app._global_window_move and app._global_window_move.started):
+                if time.monotonic() >= deadline:
+                    raise AssertionError("Native drag press was not delivered")
+                threading.Event().wait(.005)
             threading.Event().wait(.1)
-            U.SetCursorPos(start[0]+dx, start[1]+dy)
+            assert U.SetCursorPos(start[0]+dx, start[1]+dy), "Native drag positioning failed"
             threading.Event().wait(.1)
+        except BaseException as error:
+            errors.append(error)
         finally:
-            U.mouse_event(4, 0, 0, 0, 0)
+            if pressed:
+                U.mouse_event(4, 0, 0, 0, 0)
     worker = threading.Thread(target=input_worker, daemon=True)
     worker.start()
     while worker.is_alive():
         pump(app)
     worker.join()
     pump(app, .2)
+    assert not errors, errors
     assert app._global_window_move is None
     assert app.grab_current() is None and app.editor_window is None and app.search_window is None
 
@@ -184,7 +199,7 @@ def gesture(app, area, start, name, *, native=False):
     error = []
     def input_worker():
         try:
-            U.SetCursorPos(*start)
+            assert U.SetCursorPos(*start), "Native cursor positioning failed; interactive desktop required"
             hit = U.WindowFromPoint(wt.POINT(*start))
             assert U.GetAncestor(hit, 2) == hwnd, ("drag point covered", start, hwnd, hit)
             U.mouse_event(2, 0, 0, 0, 0)
@@ -198,7 +213,7 @@ def gesture(app, area, start, name, *, native=False):
                 raise AssertionError("Drag press did not start a move")
             for index, point in enumerate(positions):
                 threading.Event().wait(.025)
-                U.SetCursorPos(*point)
+                assert U.SetCursorPos(*point), "Native cursor positioning failed during drag"
                 if index in (5, 15, 47):
                     pixels = screenshot(area)
                     current = rect(hwnd)
