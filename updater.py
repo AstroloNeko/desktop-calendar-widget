@@ -12,6 +12,8 @@ import time
 import zipfile
 from pathlib import Path
 
+from data_backup import automatic_backup
+
 
 def show_error(message: str) -> None:
     if os.name == "nt":
@@ -103,6 +105,8 @@ def main() -> int:
         wait_for_process(args.pid)
         safe_extract(args.archive, extracted)
         source = payload_root(extracted)
+        data_file = Path(os.getenv("APPDATA", str(Path.home()))) / "DesktopCalendar" / "calendar_data.json"
+        automatic_backup(data_file, reason="before-update", force=True)
         copy_payload(source, args.install_dir, args.executable)
         executable = args.install_dir / args.executable
         subprocess.Popen([str(executable)], cwd=str(args.install_dir), close_fds=True)

@@ -93,6 +93,8 @@ from update_manager import (
     running_as_packaged_app,
 )
 from version import __version__
+from backup_ui import BackupActionsMixin
+from data_backup import automatic_backup
 from update_dialog import UpdateAvailableDialog
 from ui_draw import (
     bevel_control,
@@ -3057,11 +3059,19 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.configure(value=value)
 
 
-class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
+class CalendarApp(BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
         self.dpi = DpiManager(self)
         self.store = store or Store()
+        self.backup_warning = None
+        if not self.store.load_error:
+            try:
+                automatic_backup(self.store.data_file)
+            except (OSError, ValueError) as exc:
+                # Daily backup failure does not hide the calendar or delete old
+                # backups. Mandatory restore/update checkpoints still fail closed.
+                self.backup_warning = str(exc)
         self.event_commands = EventCommandHistory(self.store)
         self._schedule_drag = None
         self._schedule_hits: list[ScheduleHit] = []
@@ -7121,7 +7131,13 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.holiday_var = tk.BooleanVar(value=self.show_holidays)
         menu.add_checkbutton(label="显示节假日与常用节日", variable=self.holiday_var, command=lambda: self.toggle_holidays(self.holiday_var.get()))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
-        menu.add_command(label="导出数据备份…", command=self.export_backup)
+        data_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        data_menu.add_command(label="备份数据…", command=self.export_backup)
+        data_menu.add_command(label="恢复数据…", command=self.restore_data_backup)
+        if self.backup_warning:
+            data_menu.add_command(label="自动备份暂不可用…", command=lambda: self._data_message(
+                messagebox.showwarning, f"最近自动备份未完成：{self.backup_warning}\n请检查磁盘空间或目录权限。"))
+        menu.add_cascade(label="数据管理", menu=data_menu)
         menu.add_separator()
         menu.add_command(label="快捷键与操作说明", command=self.show_help)
         menu.add_command(label="退出", command=self.on_close)
@@ -7209,17 +7225,8 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"设置开机启动失败：\n{exc}", parent=self)
 
-    def export_backup(self) -> None:
-        self.store.save()
-        filename = filedialog.asksaveasfilename(
-            parent=self,
-            title="导出日历备份",
-            defaultextension=".json",
-            filetypes=(("JSON 备份", "*.json"), ("所有文件", "*.*")),
-            initialfile=f"桌面月历备份-{date.today().isoformat()}.json",
-        )
-        if filename:
-            shutil.copy2(self.store.data_file, Path(filename))
+    def _owned_data_dialog(self, callback):
+        return run_owned_modal(self, callback)
 
     def show_help(self) -> None:
         messagebox.showinfo(
