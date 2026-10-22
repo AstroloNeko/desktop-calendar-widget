@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from ui_draw import blend, vertical_gradient
 from win_integration import IS_WINDOWS
 
 
@@ -12,7 +13,7 @@ def header_layout(width: int) -> dict[str, tuple[int, int, int, int]]:
     """Logical-pixel bounds; reserve a real drag gap even at minimum width."""
     compact = width < 900
     padding, gap = (8, 3) if compact else (12, 5)
-    title_width = 150 if compact else 192
+    title_width = 150 if compact else 176
     button_height = 32
     y = (HEADER_HEIGHT - button_height) // 2
     result = {"title": (padding, 4, title_width, 50)}
@@ -42,8 +43,12 @@ class GlobalHeader(tk.Frame):
         super().__init__(parent, bg=theme.header_background, height=app.dpi.px(HEADER_HEIGHT))
         self.app = app
         self.pack_propagate(False)
+        self.sheen = tk.Canvas(self, bg=theme.header_background, bd=0, highlightthickness=0)
+        self.sheen.place(x=0, y=0, relwidth=1, height=app.dpi.px(5))
+        self.edge = tk.Frame(self, bg=theme.header_border, height=app.dpi.px(1))
+        self.edge.place(x=0, rely=1, anchor="sw", relwidth=1)
         self.month = tk.Label(self, text="", bg=theme.header_background,
-                              fg=theme.header_text, font=(font_family, 14, "bold"), anchor="w")
+                              fg=theme.header_text, font=(font_family, 13, "normal" if theme.style == "aero" else "bold"), anchor="w")
         self.subtitle = tk.Label(self, text="", bg=theme.header_background,
                                  fg=theme.header_subtext, font=(font_family, 8), anchor="w")
         commands = (
@@ -65,8 +70,8 @@ class GlobalHeader(tk.Frame):
             button = button_factory(self, app, text, command, width=34, height=32,
                                     font_size=13 if key in ("previous", "following", "minimize") else 8,
                                     surface_background=theme.header_background,
-                                    accented=key == "create", outlined=key in ("habits", "ddl", "pin"),
-                                    icon="compact" if key == "compact" else None)
+                                    accented=key == "create", outlined=key == "pin",
+                                    icon=key if key in ("compact", "previous", "following", "minimize") else None)
             button.bind("<Configure>", lambda _e, control=button: control.draw(), add="+")
             self.controls[key] = button
             self.tooltips.append(tooltip_factory(button, tip))
@@ -76,6 +81,11 @@ class GlobalHeader(tk.Frame):
             if not IS_WINDOWS:
                 area.bind("<B1-Motion>", app._drag_window)
                 area.bind("<ButtonRelease-1>", app._end_drag)
+        # Thin decorative edge belongs to the same existing drag surface.
+        self.sheen.bind("<ButtonPress-1>", self._start_drag)
+        if not IS_WINDOWS:
+            self.sheen.bind("<B1-Motion>", app._drag_window)
+            self.sheen.bind("<ButtonRelease-1>", app._end_drag)
         self.bind("<Configure>", self._layout)
         self.bind("<Unmap>", lambda _e: self.hide_tooltips(), add="+")
         self.bind("<Destroy>", lambda e: self.hide_tooltips() if e.widget is self else None, add="+")
@@ -87,6 +97,13 @@ class GlobalHeader(tk.Frame):
 
     def _layout(self, _event=None):
         dp = self.app.dpi.px
+        theme = self.app.theme
+        self.sheen.delete("all")
+        if theme.style in ("aero", "frutiger"):
+            vertical_gradient(self.sheen, 0, 0, self.winfo_width(), dp(5),
+                              blend(theme.header_background, theme.header_highlight, .68), theme.header_background)
+        else:
+            self.sheen.create_line(0, 0, self.winfo_width(), 0, fill=theme.window_border_inner)
         bounds = header_layout(self.app.dpi.logical(self.winfo_width()))
         x, y, width, _ = bounds["title"]
         self.month.place(x=dp(x), y=dp(y), width=dp(width), height=dp(28))

@@ -17,7 +17,7 @@ from dpi_utils import DpiManager, LogicalCanvas, enable_dpi_awareness, scale_px,
 DPI_AWARENESS_MODE = enable_dpi_awareness()
 
 import tkinter as tk
-from tkinter import colorchooser, filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk, font as tkfont
 from typing import Callable, Optional
 
 from calendar_core import (
@@ -81,7 +81,7 @@ from schedule_drag import ScheduleHit
 from global_drag_ui import GlobalDragMixin
 from global_header import GlobalHeader
 from global_search_ui import GlobalSearchMixin
-from interaction_visuals import CanvasLayer, InteractionFeedbackMixin, visible_rows
+from interaction_visuals import CanvasLayer, InteractionFeedbackMixin, elide, visible_rows
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
 from update_manager import (
     UpdateError,
@@ -100,8 +100,10 @@ from ui_draw import (
     draw_calendar_date_ring,
     draw_calendar_date_state,
     draw_calendar_today_accent,
+    draw_control_icon,
     draw_color_swatch,
     draw_compact_view_icon,
+    readable_text,
     draw_ecology_horizon,
     glossy_control,
     rounded_rectangle,
@@ -564,6 +566,10 @@ class ThemeButton(LogicalCanvas):
             draw_compact_view_icon(self, width / 2, height / 2 + y_offset,
                                    foreground=text_color, background=background)
             return
+        if self.icon in ("previous", "following", "minimize"):
+            draw_control_icon(self, self.icon, width // 2, height // 2 + y_offset,
+                              foreground=text_color)
+            return
         self.create_text(
             width / 2,
             height / 2 + y_offset,
@@ -658,8 +664,11 @@ class Tooltip:
             bg=palette.tooltip_background,
             fg=palette.tooltip_text,
             font=(FONT, 8),
-            padx=scale_px(8),
-            pady=scale_px(4),
+            padx=scale_px(palette.metrics.tooltip_padding_x),
+            pady=scale_px(palette.metrics.tooltip_padding_y),
+            wraplength=scale_px(palette.metrics.tooltip_max_width),
+            highlightthickness=scale_px(1),
+            highlightbackground=palette.control_border,
         ).pack()
         self.window.update_idletasks()
         width, height = self.window.winfo_reqwidth(), self.window.winfo_reqheight()
@@ -707,9 +716,10 @@ class CanvasTooltip:
         text, x_root, y_root = self.pending
         palette = current_theme()
         self.window = tk.Toplevel(self.owner)
+        self.window.withdraw()
         self.window.overrideredirect(True)
-        self.window.attributes("-topmost", True)
-        self.window.geometry(position_at(x_root + 12, y_root + 16))
+        owner = self.owner.winfo_toplevel()
+        self.window.transient(owner)
         tk.Label(
             self.window,
             text=text,
@@ -717,9 +727,19 @@ class CanvasTooltip:
             bg=palette.tooltip_background,
             fg=palette.tooltip_text,
             font=(FONT, 8),
-            padx=8,
-            pady=6,
+            padx=scale_px(palette.metrics.tooltip_padding_x),
+            pady=scale_px(palette.metrics.tooltip_padding_y),
+            wraplength=scale_px(palette.metrics.tooltip_max_width),
+            highlightthickness=scale_px(1),
+            highlightbackground=palette.control_border,
         ).pack()
+        self.window.update_idletasks()
+        width, height = self.window.winfo_reqwidth(), self.window.winfo_reqheight()
+        x, y = clamp_to_work_area(x_root + scale_px(12), y_root + scale_px(16), width, height)
+        self.window.geometry(position_at(x, y))
+        self.window.deiconify()
+        make_tool_window(self.window)
+        self.window.lift(owner)
 
     def hide(self, _event=None) -> None:
         if self.after_id:
@@ -3511,7 +3531,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         Tooltip(self.global_flow_mode_button, "按周查看本月每天的安排")
         Tooltip(self.global_timeline_mode_button, "按事项查看持续时间与 DDL")
 
-        self.global_workspace = tk.Frame(self.shell, bg=theme.panel_background, padx=dp(10), pady=dp(9))
+        self.global_workspace = tk.Frame(self.shell, bg=theme.panel_background, padx=dp(theme.metrics.workspace_padding), pady=dp(theme.metrics.workspace_gap))
         self.global_workspace.pack(fill="both", expand=True)
         self.global_workspace.grid_rowconfigure(0, weight=1)
         self.global_workspace.grid_columnconfigure(0, weight=0)
@@ -3520,11 +3540,10 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
 
         self.global_category_sidebar = tk.Frame(
             self.global_workspace,
-            bg=theme.panel_secondary,
-            highlightthickness=dp(1),
-            highlightbackground=theme.divider,
+            bg=theme.workspace_sidebar,
+            highlightthickness=0,
         )
-        self.global_category_sidebar.grid(row=0, column=0, sticky="nsew", padx=(0, dp(8)))
+        self.global_category_sidebar.grid(row=0, column=0, sticky="nsew", padx=(0, dp(theme.metrics.workspace_gap)))
         self.global_category_sidebar.pack_propagate(False)
         self._refresh_global_category_sidebar()
 
@@ -3532,7 +3551,8 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             self.global_workspace,
             bg=theme.schedule_background,
             highlightthickness=dp(1),
-            highlightbackground=theme.divider,
+            highlightbackground=theme.workspace_grid,
+            highlightcolor=theme.workspace_grid,
         )
         self.global_timeline_shell.grid(row=0, column=1, sticky="nsew")
         self.global_timeline_shell.grid_rowconfigure(1, weight=1)
@@ -3582,7 +3602,8 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             self.global_workspace,
             bg=theme.schedule_background,
             highlightthickness=dp(1),
-            highlightbackground=theme.divider,
+            highlightbackground=theme.workspace_grid,
+            highlightcolor=theme.workspace_grid,
         )
         self.global_flow_shell.grid(row=0, column=1, sticky="nsew")
         self.global_flow_shell.grid_rowconfigure(1, weight=1)
@@ -3625,17 +3646,20 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.global_detail_frame = tk.Frame(
             self.global_workspace,
             width=dp(GLOBAL_TIMELINE_LAYOUT.detail_width),
-            bg=theme.panel_secondary,
+            bg=theme.workspace_detail,
             highlightthickness=dp(1),
-            highlightbackground=theme.divider,
+            highlightbackground=theme.workspace_grid,
+            highlightcolor=theme.workspace_grid,
             padx=dp(14),
             pady=dp(14),
         )
-        self.global_detail_frame.grid(row=0, column=2, sticky="nsew", padx=(dp(10), 0))
-        self.global_detail_frame.grid_propagate(False)
-        detail_heading = tk.Frame(self.global_detail_frame, bg=theme.panel_secondary)
+        self.global_detail_frame.grid(row=0, column=2, sticky="nsew", padx=(dp(theme.metrics.workspace_gap), 0))
+        # A theme/DPI rebuild creates a visible frame, independent of the old one.
+        self._global_detail_visible = True
+        self.global_detail_frame.pack_propagate(False)
+        detail_heading = tk.Frame(self.global_detail_frame, bg=theme.workspace_detail)
         detail_heading.pack(fill="x")
-        tk.Label(detail_heading, text="事项详情", bg=theme.panel_secondary, fg=theme.text_secondary, font=(FONT, 8, "bold"), anchor="w").pack(side="left")
+        tk.Label(detail_heading, text="事项详情", bg=theme.workspace_detail, fg=theme.text_secondary, font=(FONT, 8, "bold"), anchor="w").pack(side="left")
         self.global_detail_state_label = tk.Label(
             detail_heading,
             text="未选择",
@@ -3649,7 +3673,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.global_detail_title = tk.Label(
             self.global_detail_frame,
             text="选择一个事项查看详情",
-            bg=theme.panel_secondary,
+            bg=theme.workspace_detail,
             fg=theme.text_primary,
             font=(FONT, 12, "bold"),
             anchor="nw",
@@ -3657,14 +3681,14 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             wraplength=dp(220),
         )
         self.global_detail_title.pack(fill="x", pady=(dp(12), dp(8)))
-        detail_identity = tk.Frame(self.global_detail_frame, bg=theme.panel_secondary)
+        detail_identity = tk.Frame(self.global_detail_frame, bg=theme.workspace_detail)
         detail_identity.pack(fill="x", pady=(0, dp(9)))
         self.global_detail_category_dot = LogicalCanvas(
             detail_identity,
             dpi=self.dpi,
             width=18,
             height=18,
-            bg=theme.panel_secondary,
+            bg=theme.workspace_detail,
             bd=0,
             highlightthickness=0,
         )
@@ -3672,7 +3696,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.global_detail_category_label = tk.Label(
             detail_identity,
             text="无分类",
-            bg=theme.panel_secondary,
+            bg=theme.workspace_detail,
             fg=theme.text_secondary,
             font=(FONT, 8, "bold"),
             anchor="w",
@@ -3681,23 +3705,23 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.global_detail_color_label = tk.Label(
             detail_identity,
             text="",
-            bg=theme.panel_secondary,
+            bg=theme.workspace_detail,
             fg=theme.text_muted,
             font=(FONT, 7),
             anchor="e",
         )
         self.global_detail_color_label.pack(side="right")
-        self.global_detail_meta = tk.Label(self.global_detail_frame, text="", bg=theme.panel_secondary, fg=theme.text_secondary, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
+        self.global_detail_meta = tk.Label(self.global_detail_frame, text="", bg=theme.workspace_detail, fg=theme.text_secondary, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
         self.global_detail_meta.pack(fill="x")
-        self.global_detail_notes = tk.Label(self.global_detail_frame, text="", bg=theme.panel_secondary, fg=theme.text_muted, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
+        self.global_detail_notes = tk.Label(self.global_detail_frame, text="", bg=theme.workspace_detail, fg=theme.text_muted, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
         self.global_detail_notes.pack(fill="both", expand=True, pady=(dp(12), dp(8)))
-        detail_actions = tk.Frame(self.global_detail_frame, bg=theme.panel_secondary)
+        detail_actions = tk.Frame(self.global_detail_frame, bg=theme.workspace_detail)
         detail_actions.pack(side="bottom", fill="x")
-        self.global_detail_edit_button = ThemeButton(detail_actions, self, "编辑", self._edit_selected_timeline, width=58, height=29, font_size=8, surface_background=theme.panel_secondary, accented=True)
+        self.global_detail_edit_button = ThemeButton(detail_actions, self, "编辑", self._edit_selected_timeline, width=58, height=29, font_size=8, surface_background=theme.workspace_detail, accented=True)
         self.global_detail_edit_button.pack(side="left")
-        self.global_detail_toggle_button = ThemeButton(detail_actions, self, "完成", self._toggle_selected_timeline, width=64, height=29, font_size=8, surface_background=theme.panel_secondary, outlined=True)
+        self.global_detail_toggle_button = ThemeButton(detail_actions, self, "完成", self._toggle_selected_timeline, width=64, height=29, font_size=8, surface_background=theme.workspace_detail, outlined=True)
         self.global_detail_toggle_button.pack(side="left", padx=(dp(5), 0))
-        self.global_detail_delete_button = ThemeButton(detail_actions, self, "删除", self._delete_selected_timeline, width=54, height=29, font_size=8, foreground=theme.danger, surface_background=theme.panel_secondary, outlined=True)
+        self.global_detail_delete_button = ThemeButton(detail_actions, self, "删除", self._delete_selected_timeline, width=54, height=29, font_size=8, foreground=theme.danger, surface_background=theme.workspace_detail, outlined=True)
         self.global_detail_delete_button.pack(side="right")
 
         self.global_status_label = tk.Label(
@@ -4629,6 +4653,13 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self._global_content_width = content_width
         self._global_content_height = content_height
         theme = self.theme
+        if not hasattr(self, "_timeline_text_fonts") or self._timeline_text_fonts[0] != self.dpi.dpi:
+            self._timeline_text_fonts = (
+                self.dpi.dpi,
+                tkfont.Font(self, family=FONT, size=theme.metrics.timeline_label_font_size),
+                tkfont.Font(self, family=FONT, size=theme.metrics.timeline_bar_font_size),
+            )
+        _, title_font, bar_font = self._timeline_text_fonts
         selected = self.timeline_selection.get(model)
 
         for index, day_meta in enumerate(()) if rows_only else enumerate(model.days):
@@ -4646,12 +4677,12 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             date_tag = f"timeline-day:{day_meta.date.isoformat()}"
             date_canvas.create_rectangle(x1, 0, x2, header_height, fill=header_background, outline="", tags=(date_tag,))
             canvas.create_rectangle(x1, 0, x2, content_height, fill=background, outline="")
-            canvas.create_line(x1, 0, x1, content_height, fill=theme.divider)
-            date_canvas.create_line(x1, 0, x1, header_height, fill=theme.divider)
+            canvas.create_line(x1, 0, x1, content_height, fill=theme.workspace_grid)
+            date_canvas.create_line(x1, 0, x1, header_height, fill=theme.workspace_grid)
             if day_meta.is_today:
                 today_fill = blend(theme.schedule_background, theme.date_today_background, 0.18)
                 canvas.create_rectangle(x1, 0, x2, content_height, fill=today_fill, outline="")
-                canvas.create_line(x1 + dp(1), 0, x1 + dp(1), content_height, fill=theme.date_today_border, width=dp(2))
+                canvas.create_line(x1 + dp(1), 0, x1 + dp(1), content_height, fill=theme.date_today_border, width=dp(1))
                 date_canvas.create_rectangle(
                     x1 + dp(1),
                     dp(1),
@@ -4690,17 +4721,19 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             corner.create_rectangle(0, 0, title_width, header_height, fill=theme.panel_secondary, outline="")
             corner.create_text(dp(12), dp(18), text="事项", fill=theme.text_primary, font=(FONT, 9, "bold"), anchor="w")
             corner.create_text(dp(12), dp(39), text="名称固定 · 时间轴可滚动", fill=theme.text_muted, font=(FONT, 7), anchor="w")
-            corner.create_line(0, header_height - 1, title_width, header_height - 1, fill=theme.divider)
-            date_canvas.create_line(0, header_height - 1, content_width, header_height - 1, fill=theme.divider)
+            corner.create_line(0, header_height - 1, title_width, header_height - 1, fill=theme.workspace_grid)
+            date_canvas.create_line(0, header_height - 1, content_width, header_height - 1, fill=theme.workspace_grid)
         canvas, label_canvas = CanvasLayer(canvas.canvas, "timeline-rows"), CanvasLayer(label_canvas.canvas, "timeline-rows")
 
         if not model.items:
             canvas.create_text(
-                max(viewport_width // 2, content_width // 2),
+                round(x_position * content_width + viewport_width / 2),
                 dp(54),
                 text="这个月还没有事项 · 双击日期即可新建",
                 fill=theme.text_muted,
                 font=(FONT, 10),
+                width=max(1, viewport_width - dp(32)),
+                tags="timeline-empty",
             )
         window = visible_rows(len(model.items), y_position * content_height, canvas.winfo_height(), row_height)
         self._timeline_row_window = (window.start, window.stop)
@@ -4714,14 +4747,14 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                 label_canvas.create_rectangle(0, y1, title_width, y2, fill=theme.accent_soft, outline="", tags=(row_tag,))
             else:
                 label_canvas.create_rectangle(0, y1, title_width, y2, fill=theme.panel_background, outline="", tags=(row_tag,))
-            canvas.create_line(0, y2, content_width, y2, fill=theme.divider)
-            label_canvas.create_line(0, y2, title_width, y2, fill=theme.divider)
+            canvas.create_line(0, y2, content_width, y2, fill=theme.workspace_grid)
+            label_canvas.create_line(0, y2, title_width, y2, fill=theme.workspace_grid)
             label_canvas.create_rectangle(0, y1 + dp(6), dp(4), y2 - dp(6), fill=theme.event_done if item.completed else item.color, outline="", tags=(row_tag,))
             title_color = theme.text_done if item.completed else theme.text_primary
             label_canvas.create_text(
                 dp(12),
                 y1 + dp(13),
-                text=truncate(item.title, 25),
+                text=elide(item.title, title_font, title_width - dp(24)),
                 fill=title_color,
                 font=(FONT, 8, "overstrike" if item.completed else "normal"),
                 anchor="w",
@@ -4730,7 +4763,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             type_text = timeline_type_label(item)
             if item.is_urgent:
                 type_text = f"! {type_text}"
-            if item.ddl_date:
+            if item.ddl_date and not item.native_ddl:
                 type_text += " · DDL"
             label_canvas.create_text(
                 dp(12),
@@ -4771,9 +4804,9 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                 )
             if visible_segments:
                 label_x1, label_x2 = max(visible_segments, key=lambda bounds: bounds[1] - bounds[0])
-                label_text = timeline_bar_label(item.title, self.dpi.logical(label_x2 - label_x1))
+                label_text = elide(timeline_bar_label(item.title, self.dpi.logical(label_x2 - label_x1)), bar_font, label_x2 - label_x1 - dp(18))
                 if label_text:
-                    canvas.create_text(label_x1 + dp(9), (y1 + y2) // 2, text=label_text, fill=theme.text_on_accent, font=(FONT, 7), anchor="w", tags=(row_tag,))
+                    canvas.create_text(label_x1 + dp(9), (y1 + y2) // 2, text=label_text, fill=readable_text(bar_fill, theme.text_primary, theme.text_on_accent), font=bar_font, anchor="w", tags=(row_tag,))
             if item.continues_from_previous_period:
                 x = dp(3)
                 canvas.create_polygon(x, (y1 + y2) // 2, x + dp(7), y1 + dp(12), x + dp(7), y2 - dp(12), fill=outline, tags=(row_tag,))
@@ -4875,7 +4908,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         for column, weekday in enumerate(("周一", "周二", "周三", "周四", "周五", "周六", "周日")):
             x1 = column * column_width
             x2 = x1 + column_width
-            header.create_rectangle(x1, 0, x2, dp(34), fill=theme.panel_secondary, outline=theme.divider)
+            header.create_rectangle(x1, 0, x2, dp(34), fill=theme.panel_secondary, outline=theme.workspace_grid)
             header.create_text(
                 (x1 + x2) // 2,
                 dp(17),
@@ -4913,7 +4946,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                     x2,
                     row_y2,
                     fill=background,
-                    outline=theme.date_selected_border if in_drag_range else theme.divider,
+                    outline=theme.date_selected_border if in_drag_range else theme.workspace_grid,
                     width=dp(1),
                 )
                 if in_drag_range:
@@ -5066,7 +5099,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                     y1,
                     x2,
                     y2,
-                    dp(5),
+                    dp(theme.metrics.flow_card_radius),
                     fill=card_fill,
                     outline=outline,
                     width=card_width,
@@ -5097,7 +5130,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                         y1 + dp(4),
                         boundary_x,
                         y2 - dp(4),
-                        fill=blend(theme.divider, stripe_color, 0.18),
+                        fill=blend(card_fill, stripe_color, 0.16),
                         tags=(item_tag,),
                     )
                 logical_card_width = self.dpi.logical(x2 - x1)
@@ -5110,14 +5143,14 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                 available_width = max(20, logical_card_width - left_inset - right_reserve)
                 title_chars = max(2, available_width // 8)
                 title_text = truncate(f"↳ {item.title}" if block.continues_before else item.title, title_chars)
-                title_y = (y1 + y2) // 2 if detail_level == "compact" else y1 + dp(6)
+                title_y = (y1 + y2) // 2 if detail_level == "compact" else y1 + dp(theme.metrics.flow_title_y)
                 canvas.create_text(
                     x1 + dp(left_inset),
                     title_y,
                     text=title_text,
                     fill=theme.text_done if item.completed else theme.text_primary,
                     font=(FONT, 7, "overstrike" if item.completed else "bold"),
-                    anchor="w" if detail_level == "compact" else "nw",
+                    anchor="w",
                     tags=(item_tag,),
                 )
                 type_text = timeline_type_label(item)
@@ -5139,11 +5172,11 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                     )
                     canvas.create_text(
                         x1 + dp(left_inset),
-                        y2 - dp(4),
+                        y1 + dp(theme.metrics.flow_meta_y),
                         text=truncate(meta_text, meta_chars),
                         fill=meta_color,
                         font=(FONT, 6),
-                        anchor="sw",
+                        anchor="w",
                         tags=(item_tag,),
                     )
                 if block.continues_after:
@@ -5496,6 +5529,10 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
     def _sync_global_xscroll(self, first: str, last: str) -> None:
         self.global_hscroll.set(first, last)
         self.global_date_canvas.xview_moveto(float(first))
+        model = getattr(self, "timeline_model", None)
+        if model is not None and not model.items:
+            canvas = self.global_timeline_canvas
+            canvas.coords("timeline-empty", round(canvas.canvasx(0) + canvas.winfo_width() / 2), self.dpi.px(54))
 
     def _sync_global_yscroll(self, first: str, last: str) -> None:
         self.global_vscroll.set(first, last)
@@ -5628,7 +5665,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                     4,
                     14,
                     14,
-                    fill=self.theme.panel_secondary,
+                    fill=self.theme.workspace_detail,
                     outline=self.theme.text_muted,
                     width=1,
                 )
@@ -5657,18 +5694,19 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.global_detail_title.configure(text=item.title)
         state_text = detail_state_text(item)
         self.global_detail_meta.configure(
-            text=f"日期：{date_text}\n\n持续：{duration}\n\n事项性质：{timeline_type_label(item)}\n\n事项分类：{category_text}{ddl_text}\n\n状态：{state_text}"
+            text=f"日期\n{date_text}\n\n持续\n{duration}\n\n事项性质\n{timeline_type_label(item)}{ddl_text}"
         )
         self.global_detail_notes.configure(text=f"备注\n{item.notes}" if item.notes else "备注\n暂无备注")
         if hasattr(self, "global_detail_category_dot"):
-            category_color = getattr(item, "color", self.theme.text_muted)
+            category = store.category_by_id(source_event.category_id) if source_event is not None else None
+            category_color = category.color if category else self.theme.text_muted
             self.global_detail_category_dot.delete("all")
             self.global_detail_category_dot.create_oval(
                 4,
                 4,
                 14,
                 14,
-                fill=category_color if category_text != "无分类" else self.theme.panel_secondary,
+                fill=category_color if category_text != "无分类" else self.theme.workspace_detail,
                 outline=category_color,
                 width=2 if category_text == "无分类" else 1,
             )
@@ -6229,44 +6267,44 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
                 width=30,
                 height=28,
                 font_size=12,
-                surface_background=theme.panel_secondary,
+                surface_background=theme.workspace_sidebar,
                 outlined=True,
             ).pack(pady=(dp(8), dp(6)))
             for category in self.store.sorted_categories()[:8]:
-                dot = LogicalCanvas(sidebar, dpi=self.dpi, width=26, height=22, bg=theme.panel_secondary, bd=0, highlightthickness=0, cursor="hand2")
+                dot = LogicalCanvas(sidebar, dpi=self.dpi, width=26, height=22, bg=theme.workspace_sidebar, bd=0, highlightthickness=0, cursor="hand2")
                 dot.pack(pady=dp(1))
-                dot.create_oval(7, 5, 19, 17, fill=category.color if self._category_filter_enabled(category.id) else theme.panel_secondary, outline=category.color, width=2)
+                dot.create_oval(7, 5, 19, 17, fill=category.color if self._category_filter_enabled(category.id) else theme.workspace_sidebar, outline=category.color, width=2)
                 dot.bind("<Button-1>", lambda _event, category_id=category.id: self._toggle_global_category(category_id))
                 Tooltip(dot, category.name)
-            uncategorized = LogicalCanvas(sidebar, dpi=self.dpi, width=26, height=22, bg=theme.panel_secondary, bd=0, highlightthickness=0, cursor="hand2")
+            uncategorized = LogicalCanvas(sidebar, dpi=self.dpi, width=26, height=22, bg=theme.workspace_sidebar, bd=0, highlightthickness=0, cursor="hand2")
             uncategorized.pack(pady=dp(1))
-            uncategorized.create_oval(7, 5, 19, 17, fill=theme.panel_secondary, outline=theme.text_muted, width=2)
+            uncategorized.create_oval(7, 5, 19, 17, fill=theme.workspace_sidebar, outline=theme.text_muted, width=2)
             if self._global_include_uncategorized:
                 uncategorized.create_text(13, 11, text="✓", fill=theme.accent, font=(FONT, 6, "bold"))
             uncategorized.bind("<Button-1>", lambda _event: self._toggle_global_uncategorized())
             Tooltip(uncategorized, "无分类")
             return
 
-        header = tk.Frame(sidebar, bg=theme.panel_secondary, padx=dp(6), pady=dp(8))
+        header = tk.Frame(sidebar, bg=theme.workspace_sidebar, padx=dp(6), pady=dp(8))
         header.pack(fill="x")
-        tk.Label(header, text="事项分类", bg=theme.panel_secondary, fg=theme.text_primary, font=(FONT, 8, "bold")).pack(side="left")
-        ThemeButton(header, self, "‹", self._toggle_global_category_sidebar, width=23, height=23, font_size=10, surface_background=theme.panel_secondary).pack(side="right")
+        tk.Label(header, text="事项分类", bg=theme.workspace_sidebar, fg=theme.text_primary, font=(FONT, 8, "bold")).pack(side="left")
+        ThemeButton(header, self, "‹", self._toggle_global_category_sidebar, width=23, height=23, font_size=10, surface_background=theme.workspace_sidebar).pack(side="right")
 
-        actions = tk.Frame(sidebar, bg=theme.panel_secondary, padx=dp(5))
+        actions = tk.Frame(sidebar, bg=theme.workspace_sidebar, padx=dp(5))
         actions.pack(fill="x", pady=(0, dp(7)))
-        ThemeButton(actions, self, "全部", self._select_all_global_categories, width=58, height=23, font_size=7, surface_background=theme.panel_secondary, outlined=True).pack(side="left")
-        ThemeButton(actions, self, "全不选", self._clear_all_global_categories, width=58, height=23, font_size=7, surface_background=theme.panel_secondary, outlined=True).pack(side="right")
+        ThemeButton(actions, self, "全部", self._select_all_global_categories, width=58, height=23, font_size=7, surface_background=theme.workspace_sidebar, outlined=True).pack(side="left")
+        ThemeButton(actions, self, "全不选", self._clear_all_global_categories, width=58, height=23, font_size=7, surface_background=theme.workspace_sidebar, outlined=True).pack(side="right")
 
-        list_shell = tk.Frame(sidebar, bg=theme.panel_secondary)
+        list_shell = tk.Frame(sidebar, bg=theme.workspace_sidebar)
         list_shell.pack(fill="both", expand=True)
-        canvas = tk.Canvas(list_shell, bg=theme.panel_secondary, bd=0, highlightthickness=0)
+        canvas = tk.Canvas(list_shell, bg=theme.workspace_sidebar, bd=0, highlightthickness=0)
         scrollbar = ttk.Scrollbar(
             list_shell,
             orient="vertical",
             command=canvas.yview,
             style="Global.Vertical.TScrollbar",
         )
-        inner = tk.Frame(canvas, bg=theme.panel_secondary)
+        inner = tk.Frame(canvas, bg=theme.workspace_sidebar)
         window = canvas.create_window((0, 0), window=inner, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
@@ -6294,9 +6332,9 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             hollow=True,
         )
 
-        footer = tk.Frame(sidebar, bg=theme.panel_secondary, padx=dp(5), pady=dp(8))
+        footer = tk.Frame(sidebar, bg=theme.workspace_sidebar, padx=dp(5), pady=dp(8))
         footer.pack(fill="x", side="bottom")
-        ThemeButton(footer, self, "管理分类…", self.open_category_manager, width=126, height=26, font_size=7, surface_background=theme.panel_secondary).pack(fill="x")
+        ThemeButton(footer, self, "管理分类…", self.open_category_manager, width=126, height=26, font_size=7, surface_background=theme.workspace_sidebar).pack(fill="x")
 
     def _build_global_category_filter_row(
         self,
@@ -6311,7 +6349,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
     ) -> None:
         theme = self.theme
         dp = self.dpi.px
-        background = blend(theme.panel_secondary, theme.accent_soft, 0.28) if enabled else theme.panel_secondary
+        background = blend(theme.workspace_sidebar, theme.accent_soft, 0.28) if enabled else theme.workspace_sidebar
         hover_background = theme.control_hover
         row = tk.Frame(parent, bg=background, padx=dp(4), pady=dp(6), cursor="hand2")
         row.pack(fill="x", padx=dp(3), pady=(0, dp(2)))

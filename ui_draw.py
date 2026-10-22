@@ -21,6 +21,35 @@ def blend(first: str, second: str, amount: float) -> str:
     return "#" + "".join(f"{value:02X}" for value in values)
 
 
+def readable_text(background: str, dark: str, light: str) -> str:
+    """Choose the higher-contrast theme text for arbitrary user content colors."""
+    def luminance(color):
+        channels = [value / 255 for value in _rgb(color)]
+        linear = [value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4 for value in channels]
+        return sum(value * weight for value, weight in zip(linear, (.2126, .7152, .0722)))
+
+    base = luminance(background)
+    def contrast(color):
+        value = luminance(color)
+        return (max(base, value) + .05) / (min(base, value) + .05)
+    return max((dark, light), key=contrast)
+
+
+def draw_control_icon(canvas, kind, cx, cy, *, foreground, width=1):
+    """Small vector controls share an integer logical-pixel center."""
+    cx, cy = round(cx), round(cy)
+    if kind == "minimize":
+        canvas.create_line(cx - 5, cy + 3, cx + 5, cy + 3, fill=foreground, width=width)
+    elif kind in ("previous", "following"):
+        direction = -1 if kind == "previous" else 1
+        canvas.create_line(cx - direction * 2, cy - 4, cx + direction * 2, cy,
+                           cx - direction * 2, cy + 4, fill=foreground, width=width,
+                           capstyle="round", joinstyle="round")
+    elif kind == "search":
+        canvas.create_oval(cx - 6, cy - 6, cx + 2, cy + 2, outline=foreground, width=width)
+        canvas.create_line(cx + 1, cy + 1, cx + 5, cy + 5, fill=foreground, width=width, capstyle="round")
+
+
 def draw_compact_view_icon(canvas, cx: float, cy: float, *, foreground: str, background: str) -> None:
     """Two overlapping views, in logical pixels (not a fullscreen/minimize glyph)."""
     rounded_rectangle(canvas, cx - 9, cy - 8, cx + 5, cy + 3, 2,

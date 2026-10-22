@@ -85,7 +85,11 @@ class PaletteList(tk.Canvas):
         return theme.schedule_card_hover if index == self.hover else theme.panel_background
 
     def _paint_background(self, index):
-        self.itemconfigure(f"palette-bg:{index}", fill=self._background(index))
+        self.itemconfigure(f"palette-bg:{index}", fill=self._background(index), outline=self._outline(index))
+
+    def _outline(self, index):
+        theme = self.app.theme
+        return blend(theme.accent, theme.panel_background, .62) if index == self.index else theme.control_border if index == self.hover else self._background(index)
 
     def _set_hover(self, index):
         if index == self.hover:
@@ -106,11 +110,16 @@ class PaletteList(tk.Canvas):
 
     def _line(self, x, y, text, font, width, color):
         text = elide(text, font, width)
+        spans = match_spans(text, self.query) if not self.pending else ()
+        half_height = font.metrics("linespace") // 2
+        for first, last in spans:
+            self.create_rectangle(x + font.measure(text[:first]), y - half_height,
+                                  x + font.measure(text[:last]), y + half_height,
+                                  fill=self.app.theme.search_match_background, outline="")
         self.create_text(x, y, text=text, fill=color, font=font, anchor="w")
-        if not self.pending:
-            for first, last in match_spans(text, self.query):
-                self.create_text(x + font.measure(text[:first]), y, text=text[first:last],
-                                 fill=self.app.theme.accent, font=font, anchor="w")
+        for first, last in spans:
+            self.create_text(x + font.measure(text[:first]), y, text=text[first:last],
+                             fill=self.app.theme.search_match_text, font=font, anchor="w")
 
     def _draw(self):
         self._draw_job = None
@@ -133,9 +142,10 @@ class PaletteList(tk.Canvas):
             result = self.results[row.index]
             doc = result.document
             rounded_rectangle(self, dp(3), row.top + dp(2), width - dp(3), row.top + row.height - dp(2),
-                              dp(theme.metrics.control_radius), fill=self._background(row.index), outline="",
+                              dp(theme.metrics.control_radius), fill=self._background(row.index), outline=self._outline(row.index),
+                              width=dp(1),
                               tags=f"palette-bg:{row.index}")
-            color = doc.color if doc else theme.accent
+            color = theme.event_done if doc and doc.completed else doc.color if doc else theme.accent
             self.create_line(dp(11), row.top + dp(13), dp(11), row.top + row.height - dp(13), fill=color, width=dp(3))
             badge = ""
             if doc:

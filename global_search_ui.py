@@ -4,7 +4,9 @@ import tkinter as tk
 from tkinter import ttk
 
 from event_search import EventSearchService
+from dpi_utils import LogicalCanvas
 from search_palette_ui import PaletteList
+from ui_draw import draw_control_icon
 
 
 class GlobalSearchMixin:
@@ -105,21 +107,34 @@ class SearchDialog(tk.Toplevel):
         self.minsize(dp(300), dp(240))
         shell = tk.Frame(self, bg=theme.panel_background, padx=dp(14), pady=dp(12))
         shell.pack(fill="both", expand=True)
-        tk.Label(shell, text="搜索事项或执行命令…", anchor="w", bg=theme.panel_background,
-                 fg=theme.text_primary, font=(font, 10, "bold")).pack(fill="x", pady=(0, dp(9)))
+        heading = tk.Frame(shell, bg=theme.panel_background)
+        heading.pack(fill="x", pady=(0, dp(10)))
+        tk.Label(heading, text="搜索事项与命令", anchor="w", bg=theme.panel_background,
+                 fg=theme.text_primary, font=(font, 10, "bold")).pack(side="left")
+        tk.Label(heading, text="ESC 关闭", bg=theme.panel_background,
+                 fg=theme.text_muted, font=(font, 8)).pack(side="right")
         self.query = tk.StringVar()
-        self.entry = tk.Entry(shell, textvariable=self.query, bg=theme.input_background,
+        self.input_shell = tk.Frame(shell, bg=theme.input_background, padx=dp(5), pady=dp(4),
+                                    highlightthickness=dp(1), highlightbackground=theme.input_border,
+                                    highlightcolor=theme.input_focus)
+        self.input_shell.pack(fill="x", pady=(0, dp(7)))
+        search_icon = LogicalCanvas(self.input_shell, dpi=app.dpi, width=26, height=28,
+                                     bg=theme.input_background, bd=0, highlightthickness=0)
+        search_icon.pack(side="left", padx=(0, dp(5)))
+        draw_control_icon(search_icon, "search", 14, 14, foreground=theme.text_secondary)
+        self.entry = tk.Entry(self.input_shell, textvariable=self.query, bg=theme.input_background,
                               fg=theme.text_primary, insertbackground=theme.text_primary,
-                              relief="flat", highlightthickness=dp(1), highlightbackground=theme.input_border,
-                              highlightcolor=theme.input_focus, font=(font, 10))
-        self.entry.pack(fill="x", ipady=dp(7))
+                              relief="flat", highlightthickness=0, font=(font, 10))
+        self.entry.pack(side="left", fill="x", expand=True, ipady=dp(4))
+        self.entry.bind("<FocusIn>", lambda _event: self.input_shell.configure(highlightbackground=app.theme.input_focus))
+        self.entry.bind("<FocusOut>", lambda _event: self.input_shell.configure(highlightbackground=app.theme.input_border))
         self.hint = tk.Label(shell, text="搜索标题、备注、分类，或输入日期 / 快捷命令", anchor="w",
                              bg=theme.panel_background, fg=theme.text_muted, font=(font, 8))
-        self.hint.pack(fill="x", pady=dp(7))
+        self.hint.pack(side="bottom", fill="x", pady=(dp(8), 0))
         frame = tk.Frame(shell, bg=theme.panel_background)
         frame.pack(fill="both", expand=True)
         self.tree = PaletteList(frame, app, font)
-        scrollbar = ttk.Scrollbar(frame, command=self.tree.yview)
+        scrollbar = ttk.Scrollbar(frame, command=self.tree.yview, style="Global.Vertical.TScrollbar")
         self.tree.scrollbar = scrollbar
         scrollbar.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)

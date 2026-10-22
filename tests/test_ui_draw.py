@@ -1,6 +1,6 @@
 import unittest
 
-from ui_draw import draw_calendar_date_ring, draw_calendar_date_state, draw_color_swatch
+from ui_draw import draw_calendar_date_ring, draw_calendar_date_state, draw_color_swatch, readable_text
 from ui_theme import get_theme
 
 
@@ -29,6 +29,12 @@ class _RecordingCanvas:
 
 
 class CalendarDateDrawingTests(unittest.TestCase):
+    def test_user_bar_colors_keep_readable_text_without_changing_content_color(self) -> None:
+        for theme_name in ("modern", "aero", "paper", "frutiger"):
+            theme = get_theme(theme_name)
+            self.assertEqual(readable_text("#F4D258", theme.text_primary, theme.text_on_accent), theme.text_primary)
+            self.assertEqual(readable_text("#17212B", theme.text_primary, theme.text_on_accent), theme.text_on_accent)
+
     def test_selected_color_swatch_uses_checkmark_and_theme_tokens(self) -> None:
         canvas = _RecordingCanvas()
         theme = get_theme("paper")

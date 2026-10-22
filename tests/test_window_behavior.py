@@ -954,6 +954,8 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertEqual(actions, ["redraw"])
 
     def test_global_detail_keeps_existing_task_semantics(self) -> None:
+        from ui_theme import get_theme
+
         class Capture:
             def __init__(self) -> None:
                 self.values: dict[str, object] = {}
@@ -964,11 +966,21 @@ class WindowBehaviorTests(unittest.TestCase):
             def set_text(self, text: str) -> None:
                 self.values["text"] = text
 
+            def draw(self) -> None:
+                pass
+
         fake = SimpleNamespace(
             global_detail_title=Capture(),
             global_detail_meta=Capture(),
             global_detail_notes=Capture(),
             global_detail_toggle_button=Capture(),
+            global_detail_edit_button=Capture(),
+            global_detail_delete_button=Capture(),
+            global_detail_state_label=Capture(),
+            global_detail_category_label=Capture(),
+            global_detail_color_label=Capture(),
+            global_detail_category_dot=SimpleNamespace(delete=lambda *_a: None, create_oval=lambda *_a, **_kw: None),
+            theme=get_theme("modern"),
         )
         item = SimpleNamespace(
             title="跨周交付",
@@ -986,10 +998,10 @@ class WindowBehaviorTests(unittest.TestCase):
         detail = str(fake.global_detail_meta.values["text"])
         self.assertIn("2026-08-03 → 2026-08-07", detail)
         self.assertIn("5 个自然日 · 5 个有效工作日", detail)
-        self.assertIn("事项性质：紧急", detail)
-        self.assertIn("事项分类：无分类", detail)
+        self.assertIn("事项性质\n紧急", detail)
+        self.assertEqual(fake.global_detail_category_label.values["text"], "无分类")
         self.assertIn("DDL：2026-08-07", detail)
-        self.assertIn("状态：已逾期", detail)
+        self.assertEqual(fake.global_detail_state_label.values["text"], "已逾期")
         self.assertIn("交付前复核", str(fake.global_detail_notes.values["text"]))
 
     def test_global_workspace_wires_complete_toolbar_and_quick_add(self) -> None:

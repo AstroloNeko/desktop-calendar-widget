@@ -5,7 +5,7 @@ from tkinter import font as tkfont
 
 from schedule_drag import ScheduleDrag, hit_at
 from interaction_visuals import CanvasOverlay, elide, preview_bounds
-from ui_draw import blend, draw_drag_bubble
+from ui_draw import blend, draw_drag_bubble, pooled_rounded_rectangle, rounded_rectangle
 
 
 class GlobalDragMixin:
@@ -63,9 +63,10 @@ class GlobalDragMixin:
             x1, y1, x2, y2 = hit.bounds
             x = x1 if operation == "start" else x2
             item = self.timeline_model.item_by_id(hit.event_id)
-            canvas.create_rectangle(x - self.dpi.px(3), y1 + self.dpi.px(2), x + self.dpi.px(3), y2 - self.dpi.px(2),
-                                    fill=self.theme.control_hover, outline=item.color,
-                                    tags=("schedule-edge-hover", f"timeline-item:{hit.event_id}"))
+            rounded_rectangle(canvas, round(x - self.dpi.px(2)), round(y1 + self.dpi.px(4)),
+                              round(x + self.dpi.px(2)), round(y2 - self.dpi.px(4)), self.dpi.px(2),
+                              fill=self.theme.control_highlight, outline=item.color,
+                              tags=("schedule-edge-hover", f"timeline-item:{hit.event_id}"))
 
     def _hide_schedule_edge(self, event):
         self._schedule_hover_key = None
@@ -148,13 +149,16 @@ class GlobalDragMixin:
 
     def _decorate_schedule_handles(self, canvas):
         dp = self.dpi.px
+        selected = self.timeline_selection.get(self.timeline_model)
         for hit in self._schedule_hits:
+            if selected is None or selected.id != hit.event_id:
+                continue
             x1, y1, x2, y2 = hit.bounds
-            middle = (y1 + y2) / 2
+            middle = round((y1 + y2) / 2)
             for edge, enabled in ((x1 + dp(3), hit.true_start), (x2 - dp(3), hit.true_end)):
                 if enabled:
                     canvas.create_line(edge, middle - dp(4), edge, middle + dp(4),
-                                       fill=self.theme.text_primary, width=dp(2),
+                                       fill=blend(selected.color, self.theme.text_primary, .24), width=dp(1),
                                        tags=(f"timeline-item:{hit.event_id}", "schedule-handle"))
 
     def _schedule_navigate_month(self, delta):
@@ -231,8 +235,10 @@ class GlobalDragMixin:
                 week, column = locations[day]
                 x1 = column * self._global_flow_column_width + dp(2)
                 y1 = week * self._global_flow_week_height + dp(2)
-                pool.item(("snap", slot), "rectangle", (x1, y1, x1 + self._global_flow_column_width - dp(4), y1 + dp(27)),
-                          fill=blend(theme.schedule_background, color, .12), outline=color, width=dp(1))
+                pooled_rounded_rectangle(pool, ("snap", slot), x1, y1,
+                                         x1 + self._global_flow_column_width - dp(4), y1 + dp(27),
+                                         radius=dp(4), fill=blend(theme.schedule_background, color, .12),
+                                         outline=color, width=dp(1), dash=(dp(3), dp(2)))
                 slot += 1
                 if day == preview.deadline:
                     pool.item("deadline", "text", (x1 + self._global_flow_column_width - dp(12), y1 + dp(14)),
@@ -244,8 +250,10 @@ class GlobalDragMixin:
             for day in days:
                 if model.period_start <= day <= model.period_end:
                     x1 = (day - model.period_start).days * self._global_day_width + dp(2)
-                    pool.item(("snap", slot), "rectangle", (x1, y - dp(11), x1 + self._global_day_width - dp(4), y + dp(11)),
-                              fill=blend(theme.schedule_background, color, .18), outline=color, width=dp(1))
+                    pooled_rounded_rectangle(pool, ("snap", slot), round(x1), round(y - dp(11)),
+                                             round(x1 + self._global_day_width - dp(4)), round(y + dp(11)),
+                                             radius=dp(4), fill=blend(theme.schedule_background, color, .12),
+                                             outline=color, width=dp(1), dash=(dp(3), dp(2)))
                     slot += 1
             header = self.global_date_canvas
             if not hasattr(header, "_schedule_overlay"):
