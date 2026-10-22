@@ -43,6 +43,7 @@ $appBuildArguments = @(
     "--icon", (Join-Path $projectDir "assets\calendar.ico"),
     "--manifest", $manifestPath,
     "--add-data", "$projectDir\assets;assets",
+    "--add-data", "$projectDir\CHANGELOG.md;.",
     "--distpath", $distDir,
     "--workpath", (Join-Path $buildDir "app"),
     "--specpath", (Join-Path $buildDir "spec"),
@@ -78,6 +79,10 @@ Copy-Item (Join-Path $buildDir "updater-dist\DesktopCalendarUpdater.exe") $appDi
 Copy-Item (Join-Path $buildDir "repair-dist\DesktopCalendarRepair.exe") $appDir -Force
 Copy-Item (Join-Path $projectDir "README.md") $appDir -Force
 Copy-Item (Join-Path $projectDir "LICENSE") $appDir -Force
+# Program metadata for standalone Repair; never inferred from user data.
+$versionOutput = @(& $pythonExe -c "from version import __version__; print(__version__)")
+if ($LASTEXITCODE -ne 0) { throw "Unable to read build version" }
+$versionOutput[-1].Trim() | Set-Content -LiteralPath (Join-Path $appDir "app-version.txt") -Encoding ascii
 
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
 $repairAsset = Join-Path $releaseDir "DesktopCalendarRepair.exe"

@@ -1,60 +1,14 @@
 """Presentation-only release notes dialog. Remote content is never executed."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-import re
 import tkinter as tk
 from tkinter import ttk
+from pathlib import Path
 
 from dpi_utils import WorkArea
 from update_manager import UpdateInfo
-
-
-@dataclass(frozen=True)
-class NoteBlock:
-    text: str
-    style: str = "body"
-
-
-def _inline_text(text: str) -> str:
-    # Preserve inline code literally; render other common Markdown as plain text.
-    parts = re.split(r"(`+[^`\n]*`+)", text)
-    for index, part in enumerate(parts):
-        if part.startswith("`") and part.endswith("`"):
-            parts[index] = part.strip("`")
-        else:
-            part = re.sub(r"!?\[([^\]]*)\]\(([^)]*)\)", r"\1 (\2)", part)
-            part = re.sub(r"(\*\*|__)(.+?)\1", r"\2", part)
-            parts[index] = re.sub(r"\\([\\`*_{}\[\]()#+.!>-])", r"\1", part)
-    return "".join(parts)
-
-
-def release_note_blocks(notes: str) -> tuple[NoteBlock, ...]:
-    """No length limit: retain every paragraph, including the final one.
-
-    This deliberately small Markdown-to-readable-text converter is not HTML or
-    a browser renderer. Unknown syntax remains inert text, never a command/link.
-    """
-    if not notes.strip():
-        return (NoteBlock("这个版本没有附加说明。"),)
-    blocks = []
-    fenced = False
-    for line in notes.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if re.match(r"^\s*(```|~~~)", line):
-            fenced = not fenced
-            continue
-        if fenced:
-            blocks.append(NoteBlock(line, "code"))
-            continue
-        heading = re.match(r"^\s{0,3}(#{1,3})\s+(.+?)(?:\s+#+)?$", line)
-        if heading:
-            blocks.append(NoteBlock(_inline_text(heading[2]), f"h{len(heading[1])}"))
-            continue
-        bullet = re.match(r"^(\s*)[-+*]\s+(.+)$", line)
-        if bullet:
-            line = bullet[1] + "• " + bullet[2]
-        blocks.append(NoteBlock(_inline_text(line)))
-    return tuple(blocks)
+from release_notes import NoteBlock, inline_text as _inline_text, release_note_blocks, load_history
+from release_notes_ui import NotesDocument
 
 
 def dialog_geometry(area: WorkArea, dpi: int, parent_rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
@@ -73,7 +27,8 @@ def dialog_geometry(area: WorkArea, dpi: int, parent_rect: tuple[int, int, int, 
 class UpdateAvailableDialog(tk.Toplevel):
     """Shared modal ownership; fixed actions outside a readonly scrollable Text."""
 
-    def __init__(self, master, info: UpdateInfo, current_version: str, font_family: str) -> None:
+    def __init__(self, master, info: UpdateInfo, current_version: str, font_family: str,
+                 *, history: bool = False) -> None:
         super().__init__(master)
         self.withdraw()
         self.master_app = master
@@ -81,7 +36,7 @@ class UpdateAvailableDialog(tk.Toplevel):
         self._closing = False
         theme = master.theme
         px = master.dpi.px
-        self.title("发现桌面月历更新")
+        self.title("版本与更新日志" if history else "发现桌面月历更新")
         self.configure(bg=theme.panel_background)
         area = master.dpi.work_area()
         width, height, x, y = dialog_geometry(
@@ -96,7 +51,7 @@ class UpdateAvailableDialog(tk.Toplevel):
         self.actions = tk.Frame(self, bg=theme.panel_background)
         self.actions.pack(side="bottom", fill="x", padx=px(16), pady=px(12))
         self.later_button = tk.Button(
-            self.actions, text="稍后再说", command=self.close,
+            self.actions, text="关闭" if history else "稍后再说", command=self.close,
             bg=theme.control_background, fg=theme.control_text,
             activebackground=theme.control_hover, activeforeground=theme.control_text,
             relief="flat", font=(font_family, 9), padx=px(14), pady=px(7),
@@ -107,42 +62,27 @@ class UpdateAvailableDialog(tk.Toplevel):
             activebackground=theme.accent_hover, activeforeground=theme.text_on_accent,
             relief="flat", font=(font_family, 9, "bold"), padx=px(14), pady=px(7),
         )
-        self.update_button.pack(side="right")
+        if not history:
+            self.update_button.pack(side="right")
         self.later_button.pack(side="right", padx=(0, px(8)))
         header = tk.Frame(self, bg=theme.panel_background)
         header.pack(side="top", fill="x", padx=px(16), pady=(px(14), px(10)))
-        tk.Label(header, text="发现桌面月历新版本", anchor="w",
+        tk.Label(header, text="桌面月历 Desktop Calendar" if history else "发现桌面月历新版本", anchor="w",
                  bg=theme.panel_background, fg=theme.text_primary,
                  font=(font_family, 13, "bold")).pack(fill="x")
-        tk.Label(header, text=f"当前 v{current_version}  →  {info.tag}", anchor="w",
+        tk.Label(header, text=f"当前安装版本 v{current_version}" if history else f"当前 v{current_version}  →  {info.tag}", anchor="w",
                  bg=theme.panel_background, fg=theme.text_secondary,
                  font=(font_family, 9)).pack(fill="x", pady=(px(4), 0))
+        if not history:
+            tk.Label(header, text="来源：GitHub 目标版本 Release Notes", anchor="w",
+                     bg=theme.panel_background, fg=theme.text_muted,
+                     font=(font_family, 8)).pack(fill="x", pady=(px(4), 0))
         # The full release title and body both live in the scrollable document.
-        document = tk.Frame(self, bg=theme.panel_background)
-        document.pack(fill="both", expand=True, padx=px(16))
-        self.notes = tk.Text(
-            document, wrap="word", height=1, width=1, undo=False,
-            bg=theme.input_background, fg=theme.text_primary,
-            selectbackground=theme.accent, selectforeground=theme.text_on_accent,
-            relief="flat", borderwidth=0, highlightthickness=px(1),
-            highlightbackground=theme.input_border, highlightcolor=theme.input_focus,
-            padx=px(12), pady=px(10), font=(font_family, 9),
-            spacing1=px(2), spacing3=px(3), cursor="arrow",
-        )
-        self.scrollbar = ttk.Scrollbar(document, orient="vertical", command=self.notes.yview)
-        self.scrollbar.pack(side="right", fill="y")
-        self.notes.pack(side="left", fill="both", expand=True)
-        self.notes.configure(yscrollcommand=self.scrollbar.set)
-        for level, size in ((1, 12), (2, 11), (3, 10)):
-            self.notes.tag_configure(f"h{level}", font=(font_family, size, "bold"),
-                                     spacing1=px(9), spacing3=px(5))
-        self.notes.tag_configure("code", font=("Consolas", 9))
-        if info.name and info.name != info.tag:
-            self.notes.insert("end", _inline_text(info.name) + "\n\n", "h1")
-        for block in release_note_blocks(info.notes):
-            self.notes.insert("end", block.text + "\n", block.style)
-        self.notes.configure(state="disabled")
-        self.notes.bind("<MouseWheel>", self._wheel)
+        self.document = NotesDocument(self, theme, px, font_family)
+        self.document.pack(fill="both", expand=True, padx=px(16))
+        self.notes = self.document.text
+        self.scrollbar = self.document.scrollbar
+        self.document.show(info.notes, info.name if info.name != info.tag else "")
         self.bind("<Escape>", lambda _event: self.close())
         self.protocol("WM_DELETE_WINDOW", self.close)
         master.present_modal(self, master)
@@ -166,3 +106,30 @@ class UpdateAvailableDialog(tk.Toplevel):
         self.master_app._leave_modal(self)
         self.destroy()
         # The app's registered-overlay destroy hook restores the saved band.
+
+
+class ReleaseHistoryDialog(UpdateAvailableDialog):
+    """Offline history with the existing app's modal lifecycle and Text renderer."""
+
+    def __init__(self, master, current_version: str, path: Path, font_family: str):
+        self.entries = load_history(path, current_version)
+        current = next(entry for entry in self.entries if entry.version == current_version)
+        info = UpdateInfo(f"v{current.version}", current.version, current.title, current.notes, "", "", "")
+        super().__init__(master, info, current_version, font_family, history=True)
+        px, theme = master.dpi.px, master.theme
+        selector = tk.Frame(self, bg=theme.panel_background)
+        selector.pack(fill="x", padx=px(16), pady=(0, px(8)), before=self.document)
+        tk.Label(selector, text="查看版本", bg=theme.panel_background,
+                 fg=theme.text_secondary, font=(font_family, 9)).pack(side="left")
+        self.version_selector = ttk.Combobox(selector, state="readonly",
+                                            values=[entry.title for entry in self.entries])
+        self.version_selector.pack(side="left", fill="x", expand=True, padx=(px(8), 0))
+        self.version_selector.current(self.entries.index(current))
+        self.version_selector.bind("<<ComboboxSelected>>", self._select_version)
+        tk.Label(selector, text="来源：本地随附 CHANGELOG · 离线可用", anchor="w",
+                 bg=theme.panel_background, fg=theme.text_muted,
+                 font=(font_family, 8)).pack(side="bottom", fill="x", pady=(px(5), 0))
+
+    def _select_version(self, _event=None):
+        entry = self.entries[self.version_selector.current()]
+        self.document.show(entry.notes, entry.title)
