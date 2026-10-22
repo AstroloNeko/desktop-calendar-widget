@@ -93,6 +93,7 @@ from update_manager import (
     running_as_packaged_app,
 )
 from version import __version__
+from update_dialog import UpdateAvailableDialog
 from ui_draw import (
     bevel_control,
     blend,
@@ -3129,7 +3130,7 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
         self.category_editor: Optional[CategoryEditor] = None
         self.day_detail_window: Optional[DayDetailDialog] = None
         self.ddl_list_window: Optional[DDLListDialog] = None
-        self.update_dialog: Optional[UpdateProgressDialog] = None
+        self.update_dialog: Optional[UpdateProgressDialog | UpdateAvailableDialog] = None
         self.update_busy = False
         self._dpi_check_job: Optional[str] = None
         self._dpi_rebuilding = False
@@ -7283,14 +7284,15 @@ class CalendarApp(InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, 
             messagebox.showinfo(APP_NAME, f"当前已经是最新版 v{__version__}。", parent=self)
             self.after(100, self.apply_window_mode)
             return
-        notes = info.notes.strip() or "这个版本没有附加说明。"
-        notes = truncate(notes.replace("\r", ""), 420)
-        question = (
-            f"发现新版本 {info.tag}\n\n"
-            f"{notes}\n\n"
-            "是否立即下载、安装并重启桌面月历？"
-        )
-        if messagebox.askyesno("发现桌面月历更新", question, parent=self):
+        self.update_busy = True
+        try:
+            dialog = UpdateAvailableDialog(self, info, __version__, FONT)
+            self.update_dialog = dialog
+            self.wait_window(dialog)
+        finally:
+            self.update_dialog = None
+            self.update_busy = False
+        if dialog.accepted:
             self._start_update_download(info)
         else:
             self.after(100, self.apply_window_mode)
