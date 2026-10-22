@@ -348,6 +348,9 @@ def main():
                     app.enter_global_view()
                     app.set_theme(theme)
                     for dpi in (96, 120, 144, 168, 192):
+                        # Bound each case, not the whole 20-case DPI matrix.
+                        # Otherwise normal progress can exhaust the startup timer.
+                        faulthandler.dump_traceback_later(15, exit=True)
                         with patch.object(app.dpi, "current_window_dpi", return_value=dpi):
                             app._apply_dpi_change(dpi)
                             app.geometry(scaled_geometry(720, 520, 160, 100, dpi))
@@ -371,6 +374,7 @@ def main():
                                 assert save.call_count == 1, ("move should persist only once", saves)
                             assert not errors, errors
                             print(theme, "simulated DPI", dpi, "native move/end/one save: passed", flush=True)
+                        faulthandler.cancel_dump_traceback_later()
         finally:
             cleanup(app)
             backdrop.destroy()
