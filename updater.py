@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import os
 import shutil
 import subprocess
@@ -10,6 +11,8 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+
+from data_backup import automatic_backup
 
 
 def show_error(message: str) -> None:
@@ -22,13 +25,24 @@ def wait_for_process(pid: int, timeout_seconds: int = 90) -> None:
         time.sleep(2)
         return
     SYNCHRONIZE = 0x00100000
-    handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    kernel32 = ctypes.windll.kernel32
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    wait = kernel32.WaitForSingleObject
+    wait.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    wait.restype = wintypes.DWORD
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    handle = open_process(SYNCHRONIZE, False, pid)
     if not handle:
         return
     try:
-        ctypes.windll.kernel32.WaitForSingleObject(handle, timeout_seconds * 1000)
+        if wait(wintypes.HANDLE(handle), timeout_seconds * 1000) == 0x00000102:  # WAIT_TIMEOUT
+            raise TimeoutError("月历或修复工具尚未退出，已取消覆盖运行中的程序。")
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        close_handle(wintypes.HANDLE(handle))
 
 
 def safe_extract(archive: Path, destination: Path) -> None:
@@ -91,6 +105,8 @@ def main() -> int:
         wait_for_process(args.pid)
         safe_extract(args.archive, extracted)
         source = payload_root(extracted)
+        data_file = Path(os.getenv("APPDATA", str(Path.home()))) / "DesktopCalendar" / "calendar_data.json"
+        automatic_backup(data_file, reason="before-update", force=True)
         copy_payload(source, args.install_dir, args.executable)
         executable = args.install_dir / args.executable
         subprocess.Popen([str(executable)], cwd=str(args.install_dir), close_fds=True)

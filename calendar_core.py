@@ -372,11 +372,13 @@ class Store:
         self.settings = dict(DEFAULT_SETTINGS)
         self.notified: set[str] = set()
         self.load_error: Optional[str] = None
+        self._migration_backup_pending = False
         self.load()
 
     def load(self) -> None:
         try:
             raw = json.loads(self.data_file.read_text(encoding="utf-8"))
+            self._migration_backup_pending = raw.get("version", 1) != 7
             categories: list[EventCategory] = []
             seen_category_ids: set[str] = set()
             category_payload = raw.get("categories", [])
@@ -446,6 +448,12 @@ class Store:
             self.load_error = str(exc)
 
     def save(self) -> None:
+        if self._migration_backup_pending and self.data_file.exists():
+            from data_backup import automatic_backup
+            # Do not persist a schema migration unless its original data has
+            # first been protected. Failed checkpoints leave the old file intact.
+            automatic_backup(self.data_file, reason="before-migration", force=True)
+            self._migration_backup_pending = False
         self.data_file.parent.mkdir(parents=True, exist_ok=True)
         notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
         payload = {

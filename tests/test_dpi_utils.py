@@ -49,11 +49,11 @@ class DpiBuildConfigurationTests(unittest.TestCase):
         self.assertIn("PerMonitorV2, PerMonitor", contents)
         self.assertIn("true/pm", contents)
 
-    def test_release_build_embeds_manifest_in_both_executables(self) -> None:
+    def test_release_build_embeds_manifest_in_all_executables(self) -> None:
         project = Path(__file__).resolve().parents[1]
         build_script = (project / "build_release.ps1").read_text(encoding="utf-8")
         self.assertIn('windows_per_monitor_v2.manifest', build_script)
-        self.assertEqual(build_script.count('"--manifest", $manifestPath'), 2)
+        self.assertEqual(build_script.count('"--manifest", $manifestPath'), 3)
 
     def test_release_build_splats_complete_python_argument_arrays(self) -> None:
         project = Path(__file__).resolve().parents[1]

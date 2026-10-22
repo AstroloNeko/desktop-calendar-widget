@@ -1,8 +1,12 @@
 import hashlib
+import ctypes
+from ctypes import wintypes
+import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from update_manager import (
     CHECKSUM_ASSET_NAME,
@@ -13,7 +17,7 @@ from update_manager import (
     verify_archive,
     version_tuple,
 )
-from updater import payload_root, safe_extract
+from updater import payload_root, safe_extract, wait_for_process
 
 
 class UpdateManagerTests(unittest.TestCase):
@@ -63,6 +67,28 @@ class UpdateManagerTests(unittest.TestCase):
             payload = root / "DesktopCalendar"
             payload.mkdir()
             self.assertEqual(payload_root(root), payload)
+
+    @unittest.skipUnless(os.name == "nt", "Win32 handle test")
+    def test_updater_wait_accepts_pointer_sized_process_handle(self):
+        kernel32 = ctypes.windll.kernel32
+        with patch.object(kernel32, "OpenProcess", return_value=0x100000000) as open_process, \
+             patch.object(kernel32, "WaitForSingleObject", return_value=0) as wait, \
+             patch.object(kernel32, "CloseHandle", return_value=1) as close:
+            wait_for_process(1234, timeout_seconds=2)
+        self.assertEqual(open_process.restype, wintypes.HANDLE)
+        self.assertEqual(wait.call_args.args[0].value, 0x100000000)
+        self.assertEqual(wait.call_args.args[1], 2000)
+        self.assertEqual(close.call_args.args[0].value, 0x100000000)
+
+    @unittest.skipUnless(os.name == "nt", "Win32 wait test")
+    def test_updater_refuses_to_copy_while_parent_still_running(self):
+        kernel32 = ctypes.windll.kernel32
+        with patch.object(kernel32, "OpenProcess", return_value=0x10001), \
+             patch.object(kernel32, "WaitForSingleObject", return_value=0x00000102), \
+             patch.object(kernel32, "CloseHandle") as close:
+            with self.assertRaises(TimeoutError):
+                wait_for_process(1234, timeout_seconds=1)
+            close.assert_called_once()
 
 
 if __name__ == "__main__":
