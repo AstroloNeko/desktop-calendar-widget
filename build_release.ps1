@@ -36,6 +36,10 @@ function Invoke-PythonBuild {
 Set-Location $projectDir
 New-Item -ItemType Directory -Path (Join-Path $buildDir "spec") -Force | Out-Null
 
+# Build the small in-box WinRT transport with the existing Windows SDK/MSVC.
+# Nothing is downloaded or installed; fail clearly if a toolchain is missing.
+& (Join-Path $projectDir "build_native_notifications.ps1")
+
 Write-Host "Python interpreter: $pythonExe"
 $appBuildArguments = @(
     "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--onedir",
@@ -44,6 +48,7 @@ $appBuildArguments = @(
     "--manifest", $manifestPath,
     "--add-data", "$projectDir\assets;assets",
     "--add-data", "$projectDir\CHANGELOG.md;.",
+    "--add-data", "$projectDir\build\native-notifications\DesktopCalendarNotifications.dll;.",
     "--distpath", $distDir,
     "--workpath", (Join-Path $buildDir "app"),
     "--specpath", (Join-Path $buildDir "spec"),

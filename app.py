@@ -58,6 +58,7 @@ from global_timeline_ui import (
 )
 from tray_icon import TrayIcon
 from app_lifecycle import ApplicationLifecycleMixin
+from reminder_ui import NativeReminderMixin
 from win_integration import (
     IS_WINDOWS,
     NativeWindowMove,
@@ -3120,7 +3121,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.configure(value=value)
 
 
-class CalendarApp(ApplicationLifecycleMixin, BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
+class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMixin, BackupActionsMixin, InteractionFeedbackMixin, GlobalSearchMixin, GlobalDragMixin, tk.Tk):
     def __init__(self, store: Optional[Store] = None, instance: Optional[SingleInstance] = None) -> None:
         super().__init__()
         self._init_lifecycle()
@@ -3261,6 +3262,7 @@ class CalendarApp(ApplicationLifecycleMixin, BulkActionsMixin, BackupActionsMixi
         self.after(80, self._finish_window_setup)
         self.after(220, self._start_tray_icon)
         self._tray_poll_job = self.after(250, self._poll_tray_actions)
+        self._init_native_reminders(resource_path("."))
         self.after(1200, self.check_reminders)
 
     @staticmethod
@@ -4553,6 +4555,8 @@ class CalendarApp(ApplicationLifecycleMixin, BulkActionsMixin, BackupActionsMixi
         return "break"
 
     def render(self) -> None:
+        if hasattr(self, "invalidate_reminders"):
+            self.invalidate_reminders()
         if getattr(self, "_schedule_drag", None):
             self._cancel_schedule_drag()
         if self.view_mode == "global":
@@ -6717,6 +6721,8 @@ class CalendarApp(ApplicationLifecycleMixin, BulkActionsMixin, BackupActionsMixi
         return True
 
     def _refresh_event_change(self, change: EventChange | BatchChange, *, focus_day: Optional[date] = None) -> None:
+        if hasattr(self, "invalidate_reminders"):
+            self.invalidate_reminders()
         if getattr(self, "search_service", None) is not None:
             self._invalidate_search()
         if getattr(self, "_schedule_drag", None):
@@ -7232,6 +7238,8 @@ class CalendarApp(ApplicationLifecycleMixin, BulkActionsMixin, BackupActionsMixi
         menu.add_checkbutton(label="显示节假日与常用节日", variable=self.holiday_var, command=lambda: self.toggle_holidays(self.holiday_var.get()))
         menu.add_command(label="版本与更新日志…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_release_history))
+        menu.add_command(label="提醒设置…",
+                         command=lambda: self._queue_context_menu_action(menu, self.open_reminder_settings))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
         data_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         data_menu.add_command(label="备份数据…", command=self.export_backup)
@@ -7435,36 +7443,14 @@ class CalendarApp(ApplicationLifecycleMixin, BulkActionsMixin, BackupActionsMixi
 
     def check_reminders(self) -> None:
         now = datetime.now()
+        delay = self._native_reminders_tick()
         changed = False
-        for event in list(self.store.events):
-            if event.done:
-                continue
-            trigger: Optional[datetime] = None
-            kind = "reminder"
-            if event.snooze_until:
-                try:
-                    trigger = datetime.fromisoformat(event.snooze_until)
-                    kind = "snooze"
-                except ValueError:
-                    event.snooze_until = None
-            elif event.reminder is not None:
-                trigger = self.store.event_starts_at(event) - timedelta(minutes=event.reminder)
-            if trigger is None:
-                continue
-            key = f"{event.id}:{kind}:{trigger.isoformat(timespec='minutes')}"
-            latest = self.store.event_starts_at(event) + timedelta(hours=2) if kind == "reminder" else trigger + timedelta(minutes=10)
-            if trigger <= now <= latest and key not in self.store.notified:
-                self.store.notified.add(key)
-                if kind == "snooze":
-                    event.snooze_until = None
-                self.show_notification(event)
-                changed = True
         if self._check_routine_reminder(now):
             changed = True
         if changed:
             self.store.save()
             self.render()
-        self.after(15000, self.check_reminders)
+        self.after(delay, self.check_reminders)
 
     def _check_routine_reminder(self, now: datetime) -> bool:
         due = self.store.due_routine_reminders(now)
@@ -7586,6 +7572,10 @@ class CalendarApp(ApplicationLifecycleMixin, BulkActionsMixin, BackupActionsMixi
 
 
 def main() -> None:
+    # Late activation after an opted-in app exits must not read/migrate data,
+    # create another calendar instance, or register/schedule notifications.
+    if "--native-notification-activation" in sys.argv:
+        return
     enable_dpi_awareness()
     sys.excepthook = log_exception
     try:

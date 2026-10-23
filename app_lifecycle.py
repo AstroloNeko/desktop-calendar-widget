@@ -200,6 +200,9 @@ class ApplicationLifecycleMixin:
                     self.report_callback_exception(*sys.exc_info())
                 if self.lifecycle.exiting or self.lifecycle.stopped:
                     return
+            notification_poll = getattr(self, "poll_native_notifications", None)
+            if notification_poll is not None:
+                notification_poll()
             if self.lifecycle.hidden:
                 available = bool(self.tray_icon and self.tray_icon.is_available)
                 if available and time.monotonic() >= self.lifecycle.next_tray_probe:
@@ -267,6 +270,9 @@ class ApplicationLifecycleMixin:
             self.search_window.close(restore_focus=False)
         if self.search_service is not None:
             self.search_service.close()
+        notification_stop = getattr(self, "stop_native_reminders", None)
+        if notification_stop is not None:
+            notification_stop()
         if self.tray_icon:
             self.tray_icon.stop()
             self.tray_icon = None
