@@ -25,16 +25,24 @@ from app import (
 )
 from calendar_core import Event, RoutineItem
 from dpi_utils import WorkArea
+from app_lifecycle import LifecycleState
 
 
 class _AvailableTray:
     error = None
     is_available = True
 
+    def probe_available(self):
+        return self.is_available
+
 
 class _FakeCalendar:
     def __init__(self) -> None:
         self.tray_icon = _AvailableTray()
+        self.lifecycle = LifecycleState()
+        self.view_mode = "compact"
+        self._global_window_move = None
+        self._startup_foreground_active = False
         self._lower_job = None
         self.desktop_session_active = True
         self.saved = False
@@ -45,6 +53,18 @@ class _FakeCalendar:
 
     def _save_window_settings(self) -> None:
         self.saved = True
+
+    def _lifecycle_blocker(self):
+        return None
+
+    def _cancel_schedule_drag(self):
+        pass
+
+    def state(self):
+        return "normal"
+
+    def _capture_window_geometry(self):
+        return (372, 548, 20, 20)
 
     def withdraw(self) -> None:
         self.hidden = True
@@ -1271,8 +1291,9 @@ class WindowBehaviorTests(unittest.TestCase):
     def test_hide_to_tray_keeps_app_alive(self) -> None:
         fake = _FakeCalendar()
         CalendarApp.hide_to_tray(fake)
-        self.assertTrue(fake.saved)
+        self.assertFalse(fake.saved)  # Hide no longer writes user data/settings.
         self.assertTrue(fake.hidden)
+        self.assertTrue(fake.lifecycle.hidden)
         self.assertFalse(fake.desktop_session_active)
         self.assertIsNotNone(fake.tray_icon)
 

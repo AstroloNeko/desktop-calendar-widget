@@ -1,289 +1,295 @@
+"""Native Shell icon and menu, isolated from Tk and user data.
+
+One hidden Win32 helper window runs on one message-loop thread. Its callback
+only submits strings to a command sink; the application supplies Queue.put.
+"""
 from __future__ import annotations
-
 import ctypes
+from ctypes import wintypes as w
 import os
-import threading
-from ctypes import wintypes
 from pathlib import Path
-from typing import Callable, Optional
-
+import threading
+import uuid
 
 IS_WINDOWS = os.name == "nt"
-WPARAM_T = ctypes.c_size_t
-LPARAM_T = ctypes.c_ssize_t
-
+WPARAM_T, LPARAM_T = ctypes.c_size_t, ctypes.c_ssize_t
 
 if IS_WINDOWS:
     class GUID(ctypes.Structure):
-        _fields_ = [
-            ("Data1", wintypes.DWORD),
-            ("Data2", wintypes.WORD),
-            ("Data3", wintypes.WORD),
-            ("Data4", ctypes.c_ubyte * 8),
-        ]
-
+        _fields_ = [("Data1", w.DWORD), ("Data2", w.WORD), ("Data3", w.WORD), ("Data4", ctypes.c_ubyte * 8)]
 
     class NOTIFYICONDATAW(ctypes.Structure):
-        _fields_ = [
-            ("cbSize", wintypes.DWORD),
-            ("hWnd", wintypes.HWND),
-            ("uID", wintypes.UINT),
-            ("uFlags", wintypes.UINT),
-            ("uCallbackMessage", wintypes.UINT),
-            ("hIcon", wintypes.HICON),
-            ("szTip", wintypes.WCHAR * 128),
-            ("dwState", wintypes.DWORD),
-            ("dwStateMask", wintypes.DWORD),
-            ("szInfo", wintypes.WCHAR * 256),
-            ("uTimeoutOrVersion", wintypes.UINT),
-            ("szInfoTitle", wintypes.WCHAR * 64),
-            ("dwInfoFlags", wintypes.DWORD),
-            ("guidItem", GUID),
-            ("hBalloonIcon", wintypes.HICON),
-        ]
+        _fields_ = [("cbSize", w.DWORD), ("hWnd", w.HWND), ("uID", w.UINT), ("uFlags", w.UINT),
+                    ("uCallbackMessage", w.UINT), ("hIcon", w.HICON), ("szTip", w.WCHAR * 128),
+                    ("dwState", w.DWORD), ("dwStateMask", w.DWORD), ("szInfo", w.WCHAR * 256),
+                    ("uTimeoutOrVersion", w.UINT), ("szInfoTitle", w.WCHAR * 64),
+                    ("dwInfoFlags", w.DWORD), ("guidItem", GUID), ("hBalloonIcon", w.HICON)]
+
+    class NOTIFYICONIDENTIFIER(ctypes.Structure):
+        _fields_ = [("cbSize", w.DWORD), ("hWnd", w.HWND), ("uID", w.UINT), ("guidItem", GUID)]
+
+    WNDPROC = ctypes.WINFUNCTYPE(LPARAM_T, w.HWND, w.UINT, WPARAM_T, LPARAM_T)
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [("style", w.UINT), ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+                    ("cbWndExtra", ctypes.c_int), ("hInstance", w.HINSTANCE), ("hIcon", w.HICON),
+                    ("hCursor", w.HANDLE), ("hbrBackground", w.HBRUSH),
+                    ("lpszMenuName", w.LPCWSTR), ("lpszClassName", w.LPCWSTR)]
+
+
+class WindowsTrayAPI:
+    """Private caches and explicit pointer-wide prototypes; no global mutation."""
+    def __init__(self):
+        self.user = ctypes.WinDLL("user32", use_last_error=True)
+        self.shell = ctypes.WinDLL("shell32", use_last_error=True)
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        for dll, name, args, result in (
+            (self.kernel, "GetModuleHandleW", [w.LPCWSTR], w.HINSTANCE),
+            (self.shell, "Shell_NotifyIconW", [w.DWORD, ctypes.POINTER(NOTIFYICONDATAW)], w.BOOL),
+            (self.shell, "Shell_NotifyIconGetRect", [ctypes.POINTER(NOTIFYICONIDENTIFIER), ctypes.POINTER(w.RECT)], ctypes.c_long),
+            (self.user, "RegisterClassW", [ctypes.POINTER(WNDCLASSW)], w.ATOM),
+            (self.user, "UnregisterClassW", [w.LPCWSTR, w.HINSTANCE], w.BOOL),
+            (self.user, "RegisterWindowMessageW", [w.LPCWSTR], w.UINT),
+            (self.user, "CreateWindowExW", [w.DWORD, w.LPCWSTR, w.LPCWSTR, w.DWORD, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, w.HWND, w.HMENU, w.HINSTANCE, w.LPVOID], w.HWND),
+            (self.user, "DefWindowProcW", [w.HWND, w.UINT, WPARAM_T, LPARAM_T], LPARAM_T),
+            (self.user, "DestroyWindow", [w.HWND], w.BOOL),
+            (self.user, "IsWindow", [w.HWND], w.BOOL),
+            (self.user, "PostMessageW", [w.HWND, w.UINT, WPARAM_T, LPARAM_T], w.BOOL),
+            (self.user, "PostQuitMessage", [ctypes.c_int], None),
+            (self.user, "GetMessageW", [ctypes.POINTER(w.MSG), w.HWND, w.UINT, w.UINT], ctypes.c_int),
+            (self.user, "TranslateMessage", [ctypes.POINTER(w.MSG)], w.BOOL),
+            (self.user, "DispatchMessageW", [ctypes.POINTER(w.MSG)], LPARAM_T),
+            (self.user, "LoadImageW", [w.HINSTANCE, w.LPCWSTR, w.UINT, ctypes.c_int, ctypes.c_int, w.UINT], w.HANDLE),
+            (self.user, "LoadIconW", [w.HINSTANCE, w.LPCWSTR], w.HICON),
+            (self.user, "DestroyIcon", [w.HICON], w.BOOL),
+            (self.user, "GetSystemMetrics", [ctypes.c_int], ctypes.c_int),
+            (self.user, "CreatePopupMenu", [], w.HMENU),
+            (self.user, "AppendMenuW", [w.HMENU, w.UINT, WPARAM_T, w.LPCWSTR], w.BOOL),
+            (self.user, "TrackPopupMenu", [w.HMENU, w.UINT, ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_int, w.HWND, w.LPVOID], w.UINT),
+            (self.user, "DestroyMenu", [w.HMENU], w.BOOL),
+            (self.user, "EndMenu", [], w.BOOL),
+            (self.user, "SetForegroundWindow", [w.HWND], w.BOOL),
+            (self.user, "GetCursorPos", [ctypes.POINTER(w.POINT)], w.BOOL),
+        ):
+            function = getattr(dll, name)
+            function.argtypes, function.restype = args, result
 
 
 class TrayIcon:
-    """Small native Windows tray icon with no third-party runtime dependency."""
-
-    WM_USER = 0x0400
-    CALLBACK_MESSAGE = WM_USER + 27
-    WM_COMMAND = 0x0111
-    WM_DESTROY = 0x0002
-    WM_CLOSE = 0x0010
-    WM_NULL = 0x0000
-    WM_LBUTTONUP = 0x0202
-    WM_LBUTTONDBLCLK = 0x0203
-    WM_RBUTTONUP = 0x0205
-    WM_CONTEXTMENU = 0x007B
-    NIM_ADD = 0
-    NIM_MODIFY = 1
-    NIM_DELETE = 2
-    NIM_SETVERSION = 4
-    NIF_MESSAGE = 0x1
-    NIF_ICON = 0x2
-    NIF_TIP = 0x4
-    NIF_INFO = 0x10
+    CALLBACK_MESSAGE = 0x0400 + 27
+    WM_COMMAND, WM_DESTROY, WM_CLOSE, WM_NULL = 0x111, 2, 0x10, 0
+    WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_CONTEXTMENU = 0x202, 0x203, 0x205, 0x7B
+    NIN_KEYSELECT = 0x401
+    NIM_ADD, NIM_MODIFY, NIM_DELETE, NIM_SETVERSION = 0, 1, 2, 4
+    NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_SHOWTIP = 1, 2, 4, 0x80
     NOTIFYICON_VERSION_4 = 4
-    IMAGE_ICON = 1
-    LR_LOADFROMFILE = 0x10
-    LR_DEFAULTSIZE = 0x40
-    MF_STRING = 0x0
-    MF_SEPARATOR = 0x800
-    TPM_RIGHTBUTTON = 0x2
-    TPM_RETURNCMD = 0x100
-    NIIF_INFO = 0x1
+    MENU = ((1001, "显示桌面月历", "show"), (1002, "打开全局视图", "global"),
+            (1003, "隐藏到托盘", "hide"), (0, None, None), (1005, "退出桌面月历", "exit"))
+    COMMANDS = {identifier: command for identifier, _label, command in MENU if command}
 
-    COMMANDS = {
-        1001: "show",
-        1002: "new",
-        1003: "today",
-        1004: "update",
-        1005: "exit",
-    }
-
-    def __init__(
-        self,
-        tooltip: str,
-        icon_path: Path,
-        on_action: Callable[[str], None],
-        *,
-        startup_message: Optional[str] = None,
-    ) -> None:
-        self.tooltip = tooltip[:127]
-        self.icon_path = Path(icon_path)
-        self.on_action = on_action
+    def __init__(self, tooltip, icon_path: Path, on_action, *, startup_message=None):
+        self.tooltip, self.icon_path, self.on_action = tooltip[:127], Path(icon_path), on_action
+        # Compatibility only: Phase 1A does not introduce balloon notifications.
         self.startup_message = startup_message
-        self._thread: Optional[threading.Thread] = None
-        self._hwnd: Optional[int] = None
-        self._ready = threading.Event()
-        self._wndproc = None
-        self._icon = None
-        self._nid = None
-        self.error: Optional[str] = None
-        self._class_name = f"DesktopCalendarTray_{os.getpid()}"
-
-    def start(self) -> bool:
-        if not IS_WINDOWS:
-            return False
-        if self._thread and self._thread.is_alive():
-            return True
-        self._thread = threading.Thread(target=self._run, name="calendar-tray", daemon=True)
-        self._thread.start()
-        self._ready.wait(2.0)
-        return bool(self._hwnd)
+        self._thread = self._hwnd = self._wndproc = self._nid = self._icon = self._api = None
+        self._ready, self._available, self._stopping = threading.Event(), threading.Event(), threading.Event()
+        self._class_name = f"DesktopCalendarTray_{os.getpid()}_{uuid.uuid4().hex}"
+        self._taskbar_created = 0
+        self.error = None
 
     @property
-    def is_available(self) -> bool:
-        return bool(self._hwnd)
+    def is_available(self):
+        return bool(self._available.is_set() and self._hwnd and self._thread
+                    and self._thread.is_alive() and not self._stopping.is_set())
 
-    def stop(self) -> None:
-        if IS_WINDOWS and self._hwnd:
-            post_message = ctypes.windll.user32.PostMessageW
-            post_message.argtypes = [wintypes.HWND, wintypes.UINT, WPARAM_T, LPARAM_T]
-            post_message(wintypes.HWND(self._hwnd), self.WM_CLOSE, 0, 0)
-        if self._thread and self._thread.is_alive() and self._thread is not threading.current_thread():
-            self._thread.join(timeout=1.5)
-        self._hwnd = None
+    def start(self):
+        if not IS_WINDOWS or self._stopping.is_set():
+            return False
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name="calendar-tray", daemon=True)
+            try:
+                self._thread.start()
+            except (RuntimeError, OSError) as exc:
+                self.error = f"无法启动托盘线程：{exc}"
+                self._ready.set()
+                return False
+        self._ready.wait(2)
+        if not self._ready.is_set():
+            self.error = "系统托盘初始化超时"
+            self.stop()
+        return self.is_available
 
-    def _run(self) -> None:
-        user32 = ctypes.windll.user32
-        shell32 = ctypes.windll.shell32
-        kernel32 = ctypes.windll.kernel32
-        shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
-        shell32.Shell_NotifyIconW.restype = wintypes.BOOL
-        kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
-        user32.CreateWindowExW.argtypes = [
-            wintypes.DWORD,
-            wintypes.LPCWSTR,
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.HWND,
-            wintypes.HMENU,
-            wintypes.HINSTANCE,
-            wintypes.LPVOID,
-        ]
-        user32.CreateWindowExW.restype = wintypes.HWND
-        user32.DestroyWindow.argtypes = [wintypes.HWND]
-        user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
-        user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, WPARAM_T, LPARAM_T]
-        user32.DefWindowProcW.restype = ctypes.c_ssize_t
-        user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
-        user32.LoadImageW.restype = wintypes.HANDLE
-        user32.LoadIconW.restype = wintypes.HICON
-        wndproc_type = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, WPARAM_T, LPARAM_T)
+    def probe_available(self):
+        """Read-only Shell check before hiding, or at a slow hidden health interval.
 
-        def wndproc(hwnd, message, wparam, lparam):
-            if message == self.CALLBACK_MESSAGE:
-                event = int(lparam) & 0xFFFF
-                if event in (self.WM_LBUTTONUP, self.WM_LBUTTONDBLCLK):
-                    self._emit("show")
-                elif event in (self.WM_RBUTTONUP, self.WM_CONTEXTMENU):
-                    self._show_menu(hwnd)
-                return 0
-            if message == self.WM_COMMAND:
-                action = self.COMMANDS.get(int(wparam) & 0xFFFF)
-                if action:
-                    self._emit(action)
-                return 0
-            if message == self.WM_DESTROY:
+        Explorer can disappear before it broadcasts TaskbarCreated. A live
+        helper HWND alone must not strand a hidden application in that gap.
+        """
+        if not self.is_available:
+            return False
+        identifier = NOTIFYICONIDENTIFIER()
+        identifier.cbSize, identifier.hWnd, identifier.uID = ctypes.sizeof(identifier), self._hwnd, 1
+        rectangle = w.RECT()
+        if self._api.shell.Shell_NotifyIconGetRect(ctypes.byref(identifier), ctypes.byref(rectangle)) != 0:
+            self._available.clear()
+            self.error = "Windows 通知区域图标已失效"
+            self._emit("tray_unavailable")
+            return False
+        return True
+
+    def stop(self):
+        self._stopping.set()
+        self._available.clear()
+        if self._api and self._hwnd:
+            self._api.user.PostMessageW(self._hwnd, self.WM_CLOSE, 0, 0)
+        if self._thread and self._thread is not threading.current_thread() and self._thread.is_alive():
+            self._thread.join(timeout=2)
+        return not self._thread or not self._thread.is_alive()
+
+    def _emit(self, action):
+        if not self._stopping.is_set():
+            try:
+                self.on_action(action)
+            except Exception as exc:
+                self.error = f"托盘命令投递失败：{exc}"
+
+    def _register_icon(self):
+        self._available.clear()
+        if self._stopping.is_set():
+            return False
+        self._nid.uTimeoutOrVersion = 0
+        if not self._api.shell.Shell_NotifyIconW(self.NIM_ADD, ctypes.byref(self._nid)):
+            self.error = "Windows 通知区域暂时不可用"
+            self._emit("tray_unavailable")
+            return False
+        self._nid.uTimeoutOrVersion = self.NOTIFYICON_VERSION_4
+        if not self._api.shell.Shell_NotifyIconW(self.NIM_SETVERSION, ctypes.byref(self._nid)):
+            self._api.shell.Shell_NotifyIconW(self.NIM_DELETE, ctypes.byref(self._nid))
+            self.error = "Windows 通知区域回调注册失败"
+            self._emit("tray_unavailable")
+            return False
+        self.error = None
+        self._available.set()
+        return True
+
+    def _handle_message(self, hwnd, message, wparam, lparam):
+        user = self._api.user
+        if message == self._taskbar_created and self._taskbar_created:
+            self._register_icon()
+            return 0
+        if message == self.CALLBACK_MESSAGE:
+            event = int(lparam) & 0xFFFF
+            if event in (self.WM_LBUTTONDBLCLK, self.NIN_KEYSELECT):
+                self._emit("show")
+            elif event == self.WM_CONTEXTMENU:
+                self._show_menu(hwnd)
+            return 0
+        if message == self.WM_COMMAND:
+            action = self.COMMANDS.get(int(wparam) & 0xFFFF)
+            if action:
+                self._emit(action)
+            return 0
+        if message == self.WM_CLOSE:
+            user.EndMenu()
+            user.DestroyWindow(hwnd)
+            return 0
+        if message == self.WM_DESTROY:
+            user.PostQuitMessage(0)
+            return 0
+        return user.DefWindowProcW(hwnd, message, wparam, lparam)
+
+    def _run(self):
+        instance = None
+        registered = owns_icon = False
+        try:
+            self._api = WindowsTrayAPI()
+            user = self._api.user
+            instance = self._api.kernel.GetModuleHandleW(None)
+            self._taskbar_created = user.RegisterWindowMessageW("TaskbarCreated")
+            if not self._taskbar_created:
+                raise OSError("RegisterWindowMessageW failed")
+
+            def dispatch(hwnd, message, wparam, lparam):
+                try:
+                    return self._handle_message(hwnd, message, wparam, lparam)
+                except Exception as exc:
+                    self.error = f"托盘消息处理失败：{exc}"
+                    self._available.clear()
+                    self._emit("tray_unavailable")
+                    user.PostMessageW(hwnd, self.WM_CLOSE, 0, 0)
+                    return 0
+
+            self._wndproc = WNDPROC(dispatch)
+            window_class = WNDCLASSW(0, self._wndproc, 0, 0, instance, None, None, None, None, self._class_name)
+            if not user.RegisterClassW(ctypes.byref(window_class)):
+                raise OSError("RegisterClassW failed")
+            registered = True
+            self._hwnd = user.CreateWindowExW(0, self._class_name, self.tooltip, 0,
+                                             0, 0, 0, 0, None, None, instance, None)
+            if not self._hwnd:
+                raise OSError("CreateWindowExW failed")
+            size = max(16, user.GetSystemMetrics(49))
+            self._icon = user.LoadImageW(None, str(self.icon_path), 1, size, size, 0x10)
+            owns_icon = bool(self._icon)
+            if not self._icon:
+                self._icon = user.LoadIconW(None, ctypes.cast(ctypes.c_void_p(32512), w.LPCWSTR))
+            if not self._icon:
+                raise OSError("Unable to load tray icon")
+            self._nid = NOTIFYICONDATAW()
+            self._nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+            self._nid.hWnd, self._nid.uID = self._hwnd, 1
+            self._nid.uFlags = self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP | self.NIF_SHOWTIP
+            self._nid.uCallbackMessage, self._nid.hIcon = self.CALLBACK_MESSAGE, self._icon
+            self._nid.szTip = self.tooltip
+            if not self._register_icon():
+                return
+            self._ready.set()
+            message = w.MSG()
+            while not self._stopping.is_set():
+                result = user.GetMessageW(ctypes.byref(message), None, 0, 0)
+                if result == -1:
+                    raise OSError("GetMessageW failed")
+                if result == 0:
+                    break
+                user.TranslateMessage(ctypes.byref(message))
+                user.DispatchMessageW(ctypes.byref(message))
+        except Exception as exc:
+            self.error = f"系统托盘不可用：{exc}"
+        finally:
+            self._available.clear()
+            if self._api:
                 if self._nid is not None:
-                    shell32.Shell_NotifyIconW(self.NIM_DELETE, ctypes.byref(self._nid))
-                user32.PostQuitMessage(0)
-                return 0
-            return user32.DefWindowProcW(hwnd, message, wparam, lparam)
-
-        self._wndproc = wndproc_type(wndproc)
-
-        class WNDCLASSW(ctypes.Structure):
-            _fields_ = [
-                ("style", wintypes.UINT),
-                ("lpfnWndProc", wndproc_type),
-                ("cbClsExtra", ctypes.c_int),
-                ("cbWndExtra", ctypes.c_int),
-                ("hInstance", wintypes.HINSTANCE),
-                ("hIcon", wintypes.HICON),
-                ("hCursor", wintypes.HANDLE),
-                ("hbrBackground", wintypes.HBRUSH),
-                ("lpszMenuName", wintypes.LPCWSTR),
-                ("lpszClassName", wintypes.LPCWSTR),
-            ]
-
-        instance = kernel32.GetModuleHandleW(None)
-        window_class = WNDCLASSW(0, self._wndproc, 0, 0, instance, None, None, None, None, self._class_name)
-        atom = user32.RegisterClassW(ctypes.byref(window_class))
-        if not atom:
-            self.error = "RegisterClassW failed"
-            self._ready.set()
-            return
-        hwnd = user32.CreateWindowExW(0, self._class_name, self.tooltip, 0, 0, 0, 0, 0, None, None, instance, None)
-        if not hwnd:
-            self.error = "CreateWindowExW failed"
-            user32.UnregisterClassW(self._class_name, instance)
-            self._ready.set()
-            return
-        self._hwnd = int(hwnd)
-        self._icon = user32.LoadImageW(None, str(self.icon_path), self.IMAGE_ICON, 0, 0, self.LR_LOADFROMFILE | self.LR_DEFAULTSIZE)
-        if not self._icon:
-            self._icon = user32.LoadIconW(None, ctypes.c_void_p(32512))
-
-        nid = NOTIFYICONDATAW()
-        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-        nid.hWnd = hwnd
-        nid.uID = 1
-        nid.uFlags = self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP
-        nid.uCallbackMessage = self.CALLBACK_MESSAGE
-        nid.hIcon = self._icon
-        nid.szTip = self.tooltip
-        if self.startup_message:
-            nid.uFlags |= self.NIF_INFO
-            nid.szInfo = self.startup_message[:255]
-            nid.szInfoTitle = "桌面月历正在运行"
-            nid.dwInfoFlags = self.NIIF_INFO
-        self._nid = nid
-        if not shell32.Shell_NotifyIconW(self.NIM_ADD, ctypes.byref(nid)):
-            self.error = f"Shell_NotifyIconW(NIM_ADD) failed (IsWindow={bool(user32.IsWindow(hwnd))}, hwnd={int(hwnd)})"
-            user32.DestroyWindow(hwnd)
-            user32.UnregisterClassW(self._class_name, instance)
+                    self._api.shell.Shell_NotifyIconW(self.NIM_DELETE, ctypes.byref(self._nid))
+                if self._hwnd and self._api.user.IsWindow(self._hwnd):
+                    self._api.user.DestroyWindow(self._hwnd)
+                if self._icon and owns_icon:
+                    self._api.user.DestroyIcon(self._icon)
+                if registered:
+                    self._api.user.UnregisterClassW(self._class_name, instance)
             self._hwnd = None
             self._ready.set()
-            return
-        nid.uTimeoutOrVersion = self.NOTIFYICON_VERSION_4
-        shell32.Shell_NotifyIconW(self.NIM_SETVERSION, ctypes.byref(nid))
-        self._ready.set()
+            if not self._stopping.is_set():
+                self.error = self.error or "托盘事件线程意外结束"
+                self._emit("tray_unavailable")
 
-        message = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(message))
-            user32.DispatchMessageW(ctypes.byref(message))
-
-        if self._icon:
-            user32.DestroyIcon(self._icon)
-        user32.UnregisterClassW(self._class_name, instance)
-        self._hwnd = None
-
-    def _emit(self, action: str) -> None:
-        try:
-            self.on_action(action)
-        except Exception:
-            pass
-
-    def _show_menu(self, hwnd: int) -> None:
-        user32 = ctypes.windll.user32
-        user32.CreatePopupMenu.restype = wintypes.HMENU
-        user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
-        user32.TrackPopupMenu.argtypes = [
-            wintypes.HMENU,
-            wintypes.UINT,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.HWND,
-            wintypes.LPVOID,
-        ]
-        user32.DestroyMenu.argtypes = [wintypes.HMENU]
-        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, WPARAM_T, LPARAM_T]
-        menu = user32.CreatePopupMenu()
+    def _show_menu(self, hwnd):
+        user = self._api.user
+        menu = user.CreatePopupMenu()
         if not menu:
             return
-        user32.AppendMenuW(menu, self.MF_STRING, 1001, "显示月历")
-        user32.AppendMenuW(menu, self.MF_STRING, 1002, "新建日程")
-        user32.AppendMenuW(menu, self.MF_STRING, 1003, "回到今天")
-        user32.AppendMenuW(menu, self.MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, self.MF_STRING, 1004, "检查更新")
-        user32.AppendMenuW(menu, self.MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, self.MF_STRING, 1005, "退出桌面月历")
-        point = wintypes.POINT()
-        user32.GetCursorPos(ctypes.byref(point))
-        user32.SetForegroundWindow(hwnd)
-        command = user32.TrackPopupMenu(menu, self.TPM_RIGHTBUTTON | self.TPM_RETURNCMD, point.x, point.y, 0, hwnd, None)
-        user32.DestroyMenu(menu)
-        user32.PostMessageW(hwnd, self.WM_NULL, 0, 0)
+        try:
+            for identifier, label, _command in self.MENU:
+                if not user.AppendMenuW(menu, 0 if label else 0x800, identifier, label):
+                    raise OSError("AppendMenuW failed")
+            point = w.POINT()
+            user.GetCursorPos(ctypes.byref(point))
+            user.SetForegroundWindow(hwnd)
+            command = user.TrackPopupMenu(menu, 0x102, point.x, point.y, 0, hwnd, None)
+        finally:
+            user.DestroyMenu(menu)
+            user.PostMessageW(hwnd, self.WM_NULL, 0, 0)
         action = self.COMMANDS.get(int(command))
         if action:
             self._emit(action)

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import ctypes
 import json
 import os
+import queue
 from pathlib import Path
 import shutil
 import subprocess
@@ -192,9 +193,11 @@ class HandoffTests(unittest.TestCase):
 
     def test_exit_after_handoff_never_saves_again(self):
         from app import CalendarApp
+        from app_lifecycle import LifecycleState
         app = SimpleNamespace(_global_window_move=None, _clear_feedback=Mock(), _cancel_schedule_drag=Mock(),
             search_window=None, search_service=None, _save_window_settings=Mock(), _update_handoff=True,
-            instance_guard=Mock(), tray_icon=None, _startup_foreground_restore_job=None, destroy=Mock())
+            instance_guard=Mock(), tray_icon=None, _startup_foreground_restore_job=None, destroy=Mock(),
+            lifecycle=LifecycleState(), _cancel_lifecycle_callbacks=Mock(), _ui_actions=queue.Queue())
         CalendarApp.on_close(app)
         app._save_window_settings.assert_not_called()
         app.instance_guard.close.assert_called_once()
