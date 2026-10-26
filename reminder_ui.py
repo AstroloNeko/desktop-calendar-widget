@@ -12,6 +12,24 @@ from calendar_core import normalize_reminder_time
 from notification_backend import WindowsNotificationBackend
 from reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
 from update_dialog import dialog_geometry
+from ui_draw import blend
+
+
+def reminder_button(parent, app, text, command, *, primary=False):
+    """Small native-keyboard control with the existing theme's interaction colors."""
+    theme, dp = app.theme, app.dpi.px
+    background = theme.accent if primary else theme.control_background
+    foreground = theme.text_on_accent if primary else theme.control_text
+    button = tk.Button(parent, text=text, command=command, font=(app.search_font, 9),
+                       bg=background, fg=foreground, activebackground=theme.accent_hover if primary else theme.control_pressed,
+                       activeforeground=foreground, disabledforeground=theme.text_disabled,
+                       relief="flat", bd=0, highlightthickness=dp(1),
+                       highlightbackground=theme.accent if primary else theme.control_border,
+                       highlightcolor=theme.input_focus, padx=dp(10), pady=dp(5), cursor="hand2")
+    button.bind("<Enter>", lambda _e: button.configure(bg=(theme.accent_hover if primary else theme.control_hover))
+                if str(button.cget("state")) != "disabled" else None)
+    button.bind("<Leave>", lambda _e: button.configure(bg=background))
+    return button
 
 
 class NativeReminderMixin:
@@ -240,24 +258,31 @@ class ReminderSettingsDialog(tk.Toplevel):
         self.rule_days = tk.StringVar(value="0")
         actions = tk.Frame(self, bg=theme.panel_background)
         actions.pack(side="bottom", fill="x", padx=dp(14), pady=dp(10))
-        def button(parent, text, command):
-            return tk.Button(parent, text=text, command=command, bg=theme.control_background,
-                             fg=theme.control_text, activebackground=theme.control_hover,
-                             activeforeground=theme.control_text, relief="flat", font=(font, 9), padx=dp(10), pady=dp(5))
+        def button(parent, text, command, **options):
+            return reminder_button(parent, app, text, command, **options)
         button(actions, "关闭", self.close).pack(side="right")
-        button(actions, "保存设置", self.save).pack(side="right", padx=dp(6))
+        self.save_button = button(actions, "保存设置", self.save, primary=True)
+        self.save_button.pack(side="right", padx=dp(6))
         button(actions, "保存并查看计划", self.show_plans).pack(side="left")
         tk.Label(self, textvariable=self.status, bg=theme.panel_background, fg=theme.text_secondary,
-                 wraplength=width - dp(30), anchor="w", font=(font, 8)).pack(side="bottom", fill="x", padx=dp(14))
+                 wraplength=width - dp(30), anchor="w", justify="left", font=(font, 8)).pack(side="bottom", fill="x", padx=dp(14))
+        tk.Frame(self, bg=theme.divider, height=dp(1)).pack(side="bottom", fill="x")
+        header = tk.Frame(self, bg=theme.panel_background)
+        header.pack(fill="x", padx=dp(16), pady=(dp(14), dp(10)))
+        tk.Label(header, text="后台与提醒", bg=theme.panel_background, fg=theme.text_primary,
+                 font=(font, 14, "bold"), anchor="w").pack(fill="x")
+        tk.Label(header, text="后台运行 · 日程通知 · 隐私与规则", bg=theme.panel_background,
+                 fg=theme.text_secondary, font=(font, 9), anchor="w").pack(fill="x", pady=(dp(3), 0))
         frame = tk.Frame(self, bg=theme.panel_background)
         frame.pack(fill="both", expand=True)
         canvas = tk.Canvas(frame, bg=theme.panel_background, highlightthickness=0)
         self.scroll_canvas = canvas
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview, style="Global.Vertical.TScrollbar")
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-        content = tk.Frame(canvas, bg=theme.panel_background, padx=dp(16), pady=dp(12))
+        content = tk.Frame(canvas, bg=theme.panel_background, padx=dp(16), pady=dp(2))
+        self.content = content
         window = canvas.create_window(0, 0, anchor="nw", window=content)
         content.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
@@ -265,60 +290,100 @@ class ReminderSettingsDialog(tk.Toplevel):
             canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
             return "break"
         self.bind("<MouseWheel>", wheel)
+        self.sections = []
+        wrapped = []
+        field_labels = []
+        def section(title, subtitle):
+            block = tk.Frame(content, bg=theme.workspace_detail, padx=dp(10), pady=dp(8),
+                             highlightthickness=dp(1), highlightbackground=theme.divider)
+            block.pack(fill="x", pady=(0, dp(10)))
+            self.sections.append(block)
+            tk.Label(block, text=title, anchor="w", bg=theme.workspace_detail,
+                     fg=theme.text_primary, font=(font, 10, "bold")).pack(fill="x")
+            hint = tk.Label(block, text=subtitle, anchor="w", justify="left", bg=theme.workspace_detail,
+                            fg=theme.text_secondary, font=(font, 8), wraplength=width-dp(76))
+            hint.pack(fill="x", pady=(dp(2), dp(6)))
+            wrapped.append(hint)
+            return block
+        body = section("后台运行", "隐藏到托盘不等于退出；彻底退出后不再提醒。")
         def label(text):
-            tk.Label(content, text=text, anchor="w", justify="left", wraplength=width - dp(50),
-                     bg=theme.panel_background, fg=theme.text_primary, font=(font, 9)).pack(fill="x", pady=dp(4))
-        def check(text, variable):
-            tk.Checkbutton(content, text=text, variable=variable, bg=theme.panel_background,
-                           fg=theme.text_primary, activebackground=theme.panel_background,
-                           selectcolor=theme.input_background, font=(font, 9)).pack(anchor="w", pady=dp(4))
-        def field(text, variable, values=None):
-            label(text)
-            if values is not None:
-                widget = ttk.Combobox(content, textvariable=variable, values=values, state="readonly", font=(font, 9))
-            else:
-                widget = tk.Entry(content, textvariable=variable, bg=theme.input_background, fg=theme.text_primary,
-                                  insertbackground=theme.text_primary, font=(font, 9))
-            widget.pack(fill="x", pady=(0, dp(5)))
+            widget = tk.Label(body, text=text, anchor="w", justify="left", wraplength=width - dp(76),
+                              bg=theme.workspace_detail, fg=theme.text_secondary, font=(font, 8))
+            widget.pack(fill="x", pady=dp(3))
+            wrapped.append(widget)
             return widget
-        label("后台运行与窗口关闭")
-        label("隐藏到系统托盘后，月历仍在运行，提醒可以继续。双击托盘图标可恢复隐藏前的视图；右键可打开全局视图或彻底退出。")
-        label("当前关闭窗口会" + ("隐藏到系统托盘。" if app.lifecycle.close_hides else "彻底退出。")
-              + "全局视图的最小化按钮仍然最小化到任务栏。彻底退出或关机后不会发送提醒。")
-        label("日程提醒（习惯提醒仍在习惯编辑器单独设置）")
-        check("启用日程提醒（程序运行或隐藏到托盘时有效）", self.enabled)
-        field("无具体时间事项的提醒时间（不是截止时间，HH:MM）", self.clock)
-        field("一般 / 紧急事项：提前天数", self.general, tuple(map(str, LEADS)))
-        field("DDL / 多日末日 DDL：提前天数", self.ddl, tuple(map(str, LEADS)))
+        def check(text, variable):
+            widget = tk.Checkbutton(body, text=text, variable=variable, bg=theme.workspace_detail,
+                           fg=theme.text_primary, activebackground=theme.workspace_detail,
+                           activeforeground=theme.accent, selectcolor=theme.input_background,
+                           font=(font, 9), cursor="hand2", anchor="w", wraplength=width-dp(90))
+            widget.pack(fill="x", pady=dp(4))
+            wrapped.append(widget)
+        def entry(parent, variable):
+            return tk.Entry(parent, textvariable=variable, bg=theme.input_background, fg=theme.text_primary,
+                            insertbackground=theme.text_primary, font=(font, 9), relief="flat", bd=0,
+                            highlightthickness=dp(1), highlightbackground=theme.input_border,
+                            highlightcolor=theme.input_focus)
+        def field(text, variable, values=None, *, wide=False):
+            row = tk.Frame(body, bg=theme.workspace_detail)
+            row.pack(fill="x", pady=dp(4))
+            caption = tk.Label(row, text=text, anchor="w", justify="left", bg=theme.workspace_detail,
+                               fg=theme.text_primary, font=(font, 9), wraplength=dp(230))
+            caption.pack(side="top" if wide else "left", anchor="w", pady=(0, dp(3)) if wide else 0)
+            if not wide:
+                field_labels.append(caption)
+            if values is not None:
+                widget = ttk.Combobox(row, textvariable=variable, values=values, state="readonly", font=(font, 9), width=13)
+            else:
+                widget = entry(row, variable)
+                widget.configure(width=15)
+            widget.pack(side="top" if wide else "right", fill="x" if wide else "none")
+            return widget
+        label("关闭窗口 → " + ("隐藏到系统托盘" if app.lifecycle.close_hides else "彻底退出")
+              + "\n双击托盘图标恢复；右键托盘菜单可彻底退出。")
+        label("全局视图最小化 → 任务栏（保持现有行为）")
+        body = section("日程提醒", "先开启日程提醒，再设置默认时间；习惯提醒在习惯编辑器单独管理。")
+        check("启用日程提醒", self.enabled)
+        field("默认提醒时间", self.clock)
+        label("HH:MM · 用于无具体时间事项，不是截止时间。")
+        field("一般 / 紧急 · 提前天数", self.general, tuple(map(str, LEADS)))
+        field("DDL / 末日 DDL · 提前天数", self.ddl, tuple(map(str, LEADS)))
         check("隐私保护：通知中隐藏事项标题", self.private)
-        label("有具体时间的事项，默认沿用编辑器原有的提醒提前量；选择“不提醒”时保持不提醒。\n单事项规则可在下面覆盖。习惯提醒保持原有设置。")
-        self.test_button = button(content, "发送测试通知（不含日历内容）", app.test_native_notification)
+        label("有具体时间的事项沿用编辑器的提醒提前量；选择“不提醒”时保持不提醒。")
+        body = section("测试通知", "只测试 Windows 通知通道，不包含日历内容，也不会开启真实提醒。")
+        self.test_button = button(body, "发送测试通知", app.test_native_notification)
         self.test_button.configure(state="disabled" if app._notification_test_pending else "normal")
         self.test_button.pack(anchor="w", pady=dp(5))
-        tk.Label(content, textvariable=self.test_status, anchor="w", justify="left", wraplength=width - dp(50),
-                 bg=theme.panel_background, fg=theme.text_secondary, font=(font, 9)).pack(fill="x")
-        label("测试可在提醒总开关关闭时使用，不会开启真实提醒。若未看到通知，请检查 Windows 通知权限、专注/勿扰和 Win+N 通知中心。Windows 接受提交不等于通知一定可见。")
-        selector = field("单事项规则（选择后可覆盖默认设置）", self.event_choice, tuple(self.event_labels))
+        self.test_status_label = tk.Label(body, textvariable=self.test_status, anchor="w", justify="left",
+                 wraplength=width - dp(76), bg=blend(theme.accent_soft, theme.workspace_detail, .4),
+                 fg=theme.text_primary, font=(font, 9), padx=dp(8), pady=dp(7))
+        self.test_status_label.pack(fill="x", pady=(dp(4), dp(2)))
+        wrapped.append(self.test_status_label)
+        label("提交 Windows ≠ 已显示或已阅读。未看到时，请检查通知权限、专注/勿扰与 Win+N。")
+        body = section("单事项规则", "可覆盖默认提醒，不改变事项日期或 DDL；未选择时不写入规则。")
+        selector = field("选择事项", self.event_choice, tuple(self.event_labels), wide=True)
         selector.bind("<<ComboboxSelected>>", self.select_event)
         mode = field("提醒规则", self.rule_mode, tuple(self.MODES))
         mode.bind("<<ComboboxSelected>>", lambda _e: self.update_custom())
-        self.custom = tk.Frame(content, bg=theme.panel_background)
+        self.custom = tk.Frame(body, bg=theme.workspace_detail)
         self.custom.pack(fill="x")
-        tk.Label(self.custom, text="提前天数 / 本地提醒时间", bg=theme.panel_background, fg=theme.text_primary,
-                 font=(font, 9)).pack(anchor="w")
-        ttk.Combobox(self.custom, textvariable=self.rule_days, values=tuple(map(str, LEADS)),
-                     state="readonly", font=(font, 9)).pack(side="left", fill="x", expand=True)
-        tk.Entry(self.custom, textvariable=self.rule_clock, bg=theme.input_background, fg=theme.text_primary,
-                 insertbackground=theme.text_primary, font=(font, 9)).pack(side="left", fill="x", expand=True)
-        self.cancel_button = button(content, "取消该事项的稍后提醒", self.cancel_snooze)
+        self.custom.columnconfigure((0, 1), weight=1)
+        for column, text in enumerate(("提前天数", "本地提醒时间 · HH:MM")):
+            tk.Label(self.custom, text=text, bg=theme.workspace_detail, fg=theme.text_secondary,
+                     font=(font, 8), anchor="w").grid(row=0, column=column, sticky="w", pady=(dp(4), dp(3)))
+        ttk.Combobox(self.custom, textvariable=self.rule_days, values=tuple(map(str, LEADS)), width=8,
+                     state="readonly", font=(font, 9)).grid(row=1, column=0, sticky="ew", padx=(0, dp(6)))
+        entry(self.custom, self.rule_clock).grid(row=1, column=1, sticky="ew")
+        self.cancel_button = button(body, "取消该事项的稍后提醒", self.cancel_snooze)
         self.cancel_button.pack(anchor="w", pady=dp(10))
         def rewrap(event):
             if event.widget is self:
                 # Labels inside the scrolling area must follow the viewport,
                 # not their initial size (small work areas / manual resizing).
-                for widget in content.winfo_children():
-                    if isinstance(widget, tk.Label):
-                        widget.configure(wraplength=max(dp(120), event.width - dp(60)))
+                for widget in wrapped:
+                    widget.configure(wraplength=max(dp(120), event.width - dp(76)))
+                for widget in field_labels:
+                    widget.configure(wraplength=max(dp(90), event.width-dp(240)))
                 for widget in self.winfo_children():
                     if isinstance(widget, tk.Label):
                         widget.configure(wraplength=max(dp(120), event.width - dp(30)))
