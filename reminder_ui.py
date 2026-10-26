@@ -20,6 +20,14 @@ class NativeReminderMixin:
         self.notification_backend = WindowsNotificationBackend(resource_root, self.store.data_file)
         self.reminder_engine = ReminderEngine(self.store, self.notification_backend)
         self.notification_settings_window = None
+        self.notification_plan_window = None
+        self._reminder_views_dirty = True
+        self._notification_test_token = None
+        self._notification_test_pending = False
+        self._notification_test_clicked = False
+        self._notification_test_until = 0
+        self._notification_test_deadline = 0
+        self._notification_test_status = "尚未发送测试通知"
         self._reminder_refresh_job = None
         self._pending_notification_actions = deque(maxlen=16)
         self._notification_activation_times = {}
@@ -29,6 +37,7 @@ class NativeReminderMixin:
         if engine is None or self.lifecycle.exiting:
             return
         engine.invalidate()
+        self._reminder_views_dirty = True
         if self._reminder_refresh_job is None:
             def flush():
                 self._reminder_refresh_job = None
@@ -41,7 +50,8 @@ class NativeReminderMixin:
             return 15000
         try:
             delay = engine.tick(datetime.now())
-            if not engine.config()["enabled"] and self.notification_backend._thread is not None:
+            if (not engine.config()["enabled"] and self.notification_backend._thread is not None
+                    and time.monotonic() >= self._notification_test_until):
                 self.notification_backend.close()
                 self.notification_backend = WindowsNotificationBackend(self._notification_root, self.store.data_file)
                 engine.backend = self.notification_backend
@@ -63,6 +73,18 @@ class NativeReminderMixin:
                 if kind == "delivery":
                     key, success = value
                     engine.acknowledge(key, success, datetime.now())
+                elif kind == "test_error":
+                    token, error = value
+                    if token == self._notification_test_token:
+                        self._set_test_status("测试未成功：" + str(error))
+                elif kind == "test_delivery":
+                    token, success = value
+                    if token == self._notification_test_token:
+                        self._notification_test_pending = False
+                        if success and not self._notification_test_clicked:
+                            self._set_test_status("已提交给 Windows；请检查右下角或 Win+N。这不代表系统已显示通知。")
+                        else:
+                            self._set_test_status(self._notification_test_status)
                 elif kind in ("status", "error"):
                     engine.error = value if kind == "error" else ""
                     dialog = self.notification_settings_window
@@ -71,6 +93,11 @@ class NativeReminderMixin:
                 elif kind == "native":
                     event_kind, arguments = value
                     if event_kind == 1:
+                        if self._notification_test_token and arguments == "test=" + self._notification_test_token:
+                            self._notification_test_pending = False
+                            self._notification_test_clicked = True
+                            self._set_test_status("已收到测试通知点击，通知接收与回调正常。")
+                            continue
                         action = parse_activation(arguments)
                         now = time.monotonic()
                         previous = self._notification_activation_times.get(arguments, -10)
@@ -80,11 +107,19 @@ class NativeReminderMixin:
                             self._pending_notification_actions.append(action)
                     elif event_kind == 2:
                         tag = arguments.split(":", 1)[0]
+                        if self._notification_test_token and tag == "test" + self._notification_test_token[:12]:
+                            self._notification_test_pending = False
+                            self._set_test_status("Windows 报告测试通知失败，请检查通知权限或专注设置。")
+                            continue
                         for key in engine._state()["deliveries"]:
                             if key.startswith(tag) and len(tag) == 16:
                                 engine.acknowledge(key, False, datetime.now())
             except (OSError, ValueError, RuntimeError) as error:
                 engine.error = str(error)
+        if self._notification_test_pending and time.monotonic() >= self._notification_test_deadline:
+            self._notification_test_pending = False
+            self._set_test_status("暂未收到 Windows 提交结果；请检查通知设置后重试，不能据此确认已显示。")
+        self._refresh_reminder_views()
         if not self._pending_notification_actions or self._lifecycle_blocker() is not None:
             return
         action = self._pending_notification_actions.popleft()
@@ -123,6 +158,46 @@ class NativeReminderMixin:
             return
         self.notification_settings_window = ReminderSettingsDialog(self)
 
+    def open_reminder_plans(self):
+        if self._active_modal_window() is not None or self.update_busy:
+            return
+        try:
+            self.reminder_engine.overview(datetime.now())
+        except (OSError, ValueError) as error:
+            self._show_feedback(str(error))
+            return
+        from reminder_center import ReminderPlanDialog
+        self.notification_plan_window = ReminderPlanDialog(self)
+
+    def _set_test_status(self, text):
+        self._notification_test_status = text
+        dialog = self.notification_settings_window
+        if dialog and dialog.winfo_exists():
+            dialog.test_status.set(text)
+            dialog.test_button.configure(state="disabled" if self._notification_test_pending else "normal")
+
+    def test_native_notification(self):
+        # User-requested synthetic test, even when real event reminders are off.
+        if self.lifecycle.exiting or self._notification_test_pending:
+            return
+        try:
+            self._notification_test_token = self.notification_backend.send_test()
+            self._notification_test_pending = True
+            self._notification_test_clicked = False
+            self._notification_test_deadline = time.monotonic() + 15
+            self._notification_test_until = time.monotonic() + 60
+            self._set_test_status("正在提交测试通知；不包含事项内容，不改变提醒开关或计划。")
+        except (OSError, ValueError, RuntimeError) as error:
+            self._set_test_status("测试未成功：" + str(error))
+
+    def _refresh_reminder_views(self):
+        dialog = self.notification_plan_window
+        if dialog and dialog.winfo_exists():
+            if (self._reminder_views_dirty or dialog.revision != self.reminder_engine.revision
+                    or time.monotonic() - dialog.refreshed_at >= 15):
+                dialog.refresh()
+                self._reminder_views_dirty = False
+
     def stop_native_reminders(self):
         backend = getattr(self, "notification_backend", None)
         if backend is not None:
@@ -137,19 +212,19 @@ class ReminderSettingsDialog(tk.Toplevel):
         self.withdraw()
         self.app, self._closing = app, False
         theme, dp, font = app.theme, app.dpi.px, app.search_font
-        self.title("日程提醒设置")
+        self.title("后台与提醒")
         self.configure(bg=theme.panel_background)
         area = app.dpi.work_area()
         width, height, x, y = dialog_geometry(area, app.dpi.dpi,
                                              (app.winfo_rootx(), app.winfo_rooty(), app.winfo_width(), app.winfo_height()))
         self.geometry(f"{width}x{height}{x:+d}{y:+d}")
         self.minsize(min(width, dp(320)), min(height, dp(260)))
-        failures = sum(isinstance(entry, dict) and entry.get("status") in ("failed", "exhausted")
-                       for entry in app.reminder_engine._state()["deliveries"].values())
+        attention = sum(row.group == "attention" for row in app.reminder_engine.overview(datetime.now()).rows)
         initial_status = app.reminder_engine.error or (
-            f"有 {failures} 条提醒派发失败或已停止重试；请检查系统通知权限，调整提醒时间/日期可生成新计划。"
-            if failures else app.notification_backend.status)
+            f"有 {attention} 项当前提醒需要处理；可保存并查看提醒计划，了解失败、错过或稍后提醒状态。"
+            if attention else app.notification_backend.status)
         self.status = tk.StringVar(value=initial_status)
+        self.test_status = tk.StringVar(value=app._notification_test_status)
         config = app.reminder_engine.config()
         self.rules = deepcopy(config["events"])
         self.enabled = tk.BooleanVar(value=config["enabled"])
@@ -171,6 +246,7 @@ class ReminderSettingsDialog(tk.Toplevel):
                              activeforeground=theme.control_text, relief="flat", font=(font, 9), padx=dp(10), pady=dp(5))
         button(actions, "关闭", self.close).pack(side="right")
         button(actions, "保存设置", self.save).pack(side="right", padx=dp(6))
+        button(actions, "保存并查看计划", self.show_plans).pack(side="left")
         tk.Label(self, textvariable=self.status, bg=theme.panel_background, fg=theme.text_secondary,
                  wraplength=width - dp(30), anchor="w", font=(font, 8)).pack(side="bottom", fill="x", padx=dp(14))
         frame = tk.Frame(self, bg=theme.panel_background)
@@ -205,12 +281,23 @@ class ReminderSettingsDialog(tk.Toplevel):
                                   insertbackground=theme.text_primary, font=(font, 9))
             widget.pack(fill="x", pady=(0, dp(5)))
             return widget
+        label("后台运行与窗口关闭")
+        label("隐藏到系统托盘后，月历仍在运行，提醒可以继续。双击托盘图标可恢复隐藏前的视图；右键可打开全局视图或彻底退出。")
+        label("当前关闭窗口会" + ("隐藏到系统托盘。" if app.lifecycle.close_hides else "彻底退出。")
+              + "全局视图的最小化按钮仍然最小化到任务栏。彻底退出或关机后不会发送提醒。")
+        label("日程提醒（习惯提醒仍在习惯编辑器单独设置）")
         check("启用日程提醒（程序运行或隐藏到托盘时有效）", self.enabled)
         field("无具体时间事项的提醒时间（不是截止时间，HH:MM）", self.clock)
         field("一般 / 紧急事项：提前天数", self.general, tuple(map(str, LEADS)))
         field("DDL / 多日末日 DDL：提前天数", self.ddl, tuple(map(str, LEADS)))
         check("隐私保护：通知中隐藏事项标题", self.private)
         label("有具体时间的事项，默认沿用编辑器原有的提醒提前量；选择“不提醒”时保持不提醒。\n单事项规则可在下面覆盖。习惯提醒保持原有设置。")
+        self.test_button = button(content, "发送测试通知（不含日历内容）", app.test_native_notification)
+        self.test_button.configure(state="disabled" if app._notification_test_pending else "normal")
+        self.test_button.pack(anchor="w", pady=dp(5))
+        tk.Label(content, textvariable=self.test_status, anchor="w", justify="left", wraplength=width - dp(50),
+                 bg=theme.panel_background, fg=theme.text_secondary, font=(font, 9)).pack(fill="x")
+        label("测试可在提醒总开关关闭时使用，不会开启真实提醒。若未看到通知，请检查 Windows 通知权限、专注/勿扰和 Win+N 通知中心。Windows 接受提交不等于通知一定可见。")
         selector = field("单事项规则（选择后可覆盖默认设置）", self.event_choice, tuple(self.event_labels))
         selector.bind("<<ComboboxSelected>>", self.select_event)
         mode = field("提醒规则", self.rule_mode, tuple(self.MODES))
@@ -225,6 +312,17 @@ class ReminderSettingsDialog(tk.Toplevel):
                  insertbackground=theme.text_primary, font=(font, 9)).pack(side="left", fill="x", expand=True)
         self.cancel_button = button(content, "取消该事项的稍后提醒", self.cancel_snooze)
         self.cancel_button.pack(anchor="w", pady=dp(10))
+        def rewrap(event):
+            if event.widget is self:
+                # Labels inside the scrolling area must follow the viewport,
+                # not their initial size (small work areas / manual resizing).
+                for widget in content.winfo_children():
+                    if isinstance(widget, tk.Label):
+                        widget.configure(wraplength=max(dp(120), event.width - dp(60)))
+                for widget in self.winfo_children():
+                    if isinstance(widget, tk.Label):
+                        widget.configure(wraplength=max(dp(120), event.width - dp(30)))
+        self.bind("<Configure>", rewrap, add="+")
         self.update_custom()
         self.bind("<Escape>", lambda _e: self.close())
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -277,8 +375,14 @@ class ReminderSettingsDialog(tk.Toplevel):
                                                 "ddl_days": int(self.ddl.get()), "events": self.rules})
             self.app.invalidate_reminders()
             self.close()
+            return True
         except (OSError, ValueError) as error:
             self.status.set(f"设置未保存：{error}")
+            return False
+
+    def show_plans(self):
+        if self.save():
+            self.app.open_reminder_plans()
 
     def cancel_snooze(self):
         if not self.current_id:

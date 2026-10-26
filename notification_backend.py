@@ -13,6 +13,7 @@ from pathlib import Path
 import queue
 import sys
 import threading
+import uuid
 
 from native_notifications import NativeNotificationError, WinRTTransport, toast_xml
 from reminder_engine import notification_arguments
@@ -121,6 +122,13 @@ class WindowsNotificationBackend:
         self._cancelled_tags.discard(plan.tag)
         self._jobs.put(("show", (plan, title, text, actions)))
 
+    def send_test(self):
+        """Explicit synthetic test, independent of opt-in and event ledgers."""
+        self.start()
+        token = uuid.uuid4().hex
+        self._jobs.put(("test", token))
+        return token
+
     def remove(self, tag):
         self._cancelled_tags.add(tag)
         if self._thread and not self._stopped:
@@ -174,10 +182,18 @@ class WindowsNotificationBackend:
                     break
                 if self._stopped:
                     continue
-                if action == "show":
-                    plan, title, text, actions = value
+                if action in ("show", "test"):
+                    testing = action == "test"
+                    if testing:
+                        tag, arguments = "test" + value[:12], "test=" + value
+                        title = "桌面月历 · 测试通知"
+                        text = "这是一条不含日历数据的测试通知。点击可确认接收；不会修改事项或提醒计划。"
+                        actions = []
+                    else:
+                        plan, title, text, actions = value
+                        tag, arguments = plan.tag, notification_arguments(plan)
                     try:
-                        if plan.tag in self._cancelled_tags:
+                        if tag in self._cancelled_tags:
                             continue
                         if initialization_error:
                             raise RuntimeError(initialization_error)
@@ -189,12 +205,15 @@ class WindowsNotificationBackend:
                             permission = None  # Unknown, not Enabled; Windows still applies policy.
                         if permission is not None and permission != 0:
                             raise RuntimeError(f"Windows 已限制通知（状态 {permission}）；未派发。")
-                        transport.show(plan.tag, toast_xml(title, text, notification_arguments(plan),
+                        transport.show(tag, toast_xml(title, text, arguments,
                                                            self.root / "assets/calendar.png", actions))
-                        self.events.put(("delivery", (plan.key, True)))
+                        self.events.put(("test_delivery" if testing else "delivery", (value if testing else plan.key, True)))
                     except Exception as error:
-                        self.events.put(("error", str(error)))
-                        self.events.put(("delivery", (plan.key, False)))
+                        if testing:
+                            self.events.put(("test_error", (value, str(error))))
+                        else:
+                            self.events.put(("error", str(error)))
+                        self.events.put(("test_delivery" if testing else "delivery", (value if testing else plan.key, False)))
                 elif action == "remove":
                     try:
                         if not initialization_error:

@@ -118,6 +118,37 @@ class NotificationBackendTests(unittest.TestCase):
         self.backend.close()
         self.transport.show.assert_not_called()
 
+    def test_synthetic_test_does_not_emit_event_delivery_or_actions(self):
+        token = self.backend.send_test()
+        self.assertEqual(self.result("test_delivery"), (token, True))
+        tag, xml = self.transport.show.call_args.args
+        self.assertEqual(tag, "test" + token[:12])
+        self.assertIn("test=" + token, xml)
+        self.assertIn("不含日历数据", xml)
+        self.assertNotIn("<action ", xml)
+        remaining = []
+        while not self.backend.events.empty():
+            remaining.append(self.backend.events.get_nowait()[0])
+        self.assertNotIn("delivery", remaining)
+
+    def test_synthetic_test_failure_reports_separate_error(self):
+        self.transport.setting.return_value = 2
+        token = self.backend.send_test()
+        error_token, message = self.result("test_error")
+        self.assertEqual(error_token, token)
+        self.assertIn("限制", message)
+        self.assertEqual(self.result("test_delivery"), (token, False))
+        self.transport.show.assert_not_called()
+
+    def test_test_then_real_send_share_same_worker(self):
+        self.backend.send_test()
+        self.result("test_delivery")
+        owner = self.backend._thread
+        self.backend.send(self.plan, "real synthetic event", "synthetic body", [])
+        self.result("delivery")
+        self.assertIs(owner, self.backend._thread)
+        self.assertEqual(self.load.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

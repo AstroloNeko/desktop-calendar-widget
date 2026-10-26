@@ -74,6 +74,17 @@ class ReminderPlan:
         return self.key[:16]
 
 
+def snoozed_plan(plan, entry):
+    """Resolve persisted Snooze identically for dispatch and read-only views."""
+    if not isinstance(entry, dict) or entry.get("base") != plan.key:
+        return plan
+    key = entry.get("key")
+    if not isinstance(key, str) or len(key) != 64 or any(ch not in "0123456789abcdef" for ch in key):
+        raise ValueError("Invalid snooze identity")
+    when = local_wall(datetime.fromisoformat(entry["at"]))
+    return ReminderPlan(plan.event_id, key, when, plan.anchor, plan.ddl)
+
+
 def _plan_for_event(store, event, config):
     if event.done:
         return None
@@ -153,6 +164,7 @@ class ReminderEngine:
         self.queue = []
         self.error = ""
         self.rebuild_count = 0
+        self.revision = 0
 
     def config(self):
         return normalize_config(self.store.settings.get(CONFIG_KEY))
@@ -180,6 +192,7 @@ class ReminderEngine:
             else:
                 self.store.settings[key] = previous
             raise
+        self.revision += 1
 
     def configure(self, config):
         normalized = normalize_config(config)
@@ -198,10 +211,32 @@ class ReminderEngine:
             if current is None or current.key != old.key:
                 self.backend.remove(old.tag)
         state = self._state()
+        changed = self._import_legacy(self.plans, state)
+        for identifier, entry in list(state["snoozes"].items()):
+            current = self.plans.get(identifier)
+            if not isinstance(entry, dict) or current is None or entry.get("base") != current.key:
+                if isinstance(entry, dict) and isinstance(entry.get("key"), str):
+                    self.backend.remove(entry["key"][:16])
+                del state["snoozes"][identifier]
+                changed = True
+        if changed:
+            self._save(STATE_KEY, state)
+        self.queue = []
+        for plan in self.plans.values():
+            try:
+                plan = snoozed_plan(plan, state["snoozes"].get(plan.event_id))
+            except (ValueError, TypeError, KeyError):
+                continue  # Corrupt snooze is not silently sent as a base reminder.
+            heapq.heappush(self.queue, (plan.when, plan.key, plan))
+        self.rebuild_count += 1
+        self.dirty = False
+
+    def _import_legacy(self, plans, state):
+        """Modify only the caller's detached state; reads never save/import it."""
         changed = False
         # Import only exactly matching legacy reminders/Snooze after explicit
         # opt-in. Never rewrite Event or its original legacy fields.
-        for identifier, plan in self.plans.items():
+        for identifier, plan in plans.items():
             if plan.key in state["deliveries"] or identifier in state["snoozes"]:
                 continue
             event = self.store.event_by_id(identifier)
@@ -217,29 +252,15 @@ class ReminderEngine:
             elif f"{identifier}:reminder:{plan.when.isoformat(timespec='minutes')}" in self.store.notified:
                 state["deliveries"][plan.key] = {"status": "accepted", "at": plan.when.isoformat(), "attempts": 0}
                 changed = True
-        for identifier, entry in list(state["snoozes"].items()):
-            current = self.plans.get(identifier)
-            if not isinstance(entry, dict) or current is None or entry.get("base") != current.key:
-                if isinstance(entry, dict) and isinstance(entry.get("key"), str):
-                    self.backend.remove(entry["key"][:16])
-                del state["snoozes"][identifier]
-                changed = True
-        if changed:
-            self._save(STATE_KEY, state)
-        self.queue = []
-        for plan in self.plans.values():
-            entry = state["snoozes"].get(plan.event_id)
-            if isinstance(entry, dict) and entry.get("base") == plan.key:
-                try:
-                    if not isinstance(entry.get("key"), str) or len(entry["key"]) != 64 or any(ch not in "0123456789abcdef" for ch in entry["key"]):
-                        raise ValueError("Invalid snooze identity")
-                    when = datetime.fromisoformat(entry["at"])
-                    plan = ReminderPlan(plan.event_id, entry["key"], local_wall(when), plan.anchor, plan.ddl)
-                except (ValueError, TypeError, KeyError):
-                    continue  # Corrupt snooze is not silently sent as a base reminder.
-            heapq.heappush(self.queue, (plan.when, plan.key, plan))
-        self.rebuild_count += 1
-        self.dirty = False
+        return changed
+
+    def overview(self, now):
+        """Detached read-only projection; no rebuild, writes, send or removal."""
+        from reminder_overview import build_overview
+        config, state = self.config(), self._state()
+        plans = plans_for_store(self.store, config)
+        self._import_legacy({plan.event_id: plan for plan in plans}, state)
+        return build_overview(self.store, plans, state, local_wall(now), config["enabled"])
 
     def tick(self, now):
         now = local_wall(now)
@@ -352,6 +373,12 @@ class ReminderEngine:
 
     def cancel_snooze(self, event_id):
         state = self._state()
+        if event_id not in state["snoozes"] and self.config()["enabled"]:
+            # A read-only plan view can expose a legacy Snooze before the first
+            # scheduling tick. Cancel it atomically without ticking/sending.
+            plans = {plan.event_id: plan for plan in plans_for_store(self.store, self.config())
+                     if plan.event_id == event_id}
+            self._import_legacy(plans, state)
         previous = state["snoozes"].pop(event_id, None)
         if previous:
             self._save(STATE_KEY, state)

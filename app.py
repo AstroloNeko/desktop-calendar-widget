@@ -7238,8 +7238,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         menu.add_checkbutton(label="显示节假日与常用节日", variable=self.holiday_var, command=lambda: self.toggle_holidays(self.holiday_var.get()))
         menu.add_command(label="版本与更新日志…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_release_history))
-        menu.add_command(label="提醒设置…",
+        menu.add_command(label="后台与提醒…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_settings))
+        menu.add_command(label="提醒计划…",
+                         command=lambda: self._queue_context_menu_action(menu, self.open_reminder_plans))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
         data_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
         data_menu.add_command(label="备份数据…", command=self.export_backup)
