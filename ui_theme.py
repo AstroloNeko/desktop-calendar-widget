@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -606,7 +606,39 @@ FRUTIGER = Theme(
 )
 
 
-THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER, FRUTIGER)}
+# Opt-in design study. Inherit the flat material, never mutate the default.
+GEMINI = replace(
+    MODERN, name="gemini_reviewing", display_name="Gemini reviewing", style="review",
+    window_background="#F8FAFC", window_border_outer="#CBD5E1", panel_background="#F8FAFC",
+    panel_secondary="#F1F5F9", divider="#E2E8F0", workspace_sidebar="#F8FAFC",
+    workspace_detail="#FFFFFF", workspace_grid="#EDF1F5", header_background="#FFFFFF",
+    header_gradient_start="#FFFFFF", header_gradient_mid="#FFFFFF", header_gradient_end="#FFFFFF",
+    header_border="#E2E8F0", header_text="#0F172A", header_subtext="#475569",
+    text_primary="#0F172A", text_secondary="#475569", text_muted="#68798D",
+    text_disabled="#94A3B8", control_background="#F1F5F9", control_hover="#EEF2FF",
+    control_pressed="#E0E7FF", control_border="#E2E8F0", control_text="#475569",
+    calendar_background="#FFFFFF", weekday_text="#64748B", date_text="#0F172A",
+    date_other_month="#94A3B8", date_hover_background="#F8FAFC", date_hover_border="#E2E8F0",
+    date_selected_background="#F1F5F9", date_selected_border="#CBD5E1",
+    date_today_background="#EEF2FF", date_today_border="#4F46E5", date_selected_today="#4F46E5",
+    date_weekend_text="#C73758", weekend="#C73758", schedule_background="#F8FAFC",
+    schedule_card_hover="#F1F5F9", schedule_card_border="#E2E8F0", schedule_time_text="#475569",
+    input_background="#F1F5F9", input_border="#E2E8F0", input_hover_border="#CBD5E1",
+    input_focus="#4F46E5", accent="#4F46E5", accent_hover="#4338CA", accent_soft="#EEF2FF",
+    danger="#DC2626", danger_soft="#FEF2F2", ddl_indicator="#DC2626", ddl_indicator_highlight="#FECACA",
+    event_type_general="#64748B", event_type_urgent="#925409", event_type_ddl="#B91C1C",
+    event_type_urgent_background="#FEF3C7", event_type_urgent_border="#FDE68A",
+    event_type_ddl_background="#FEF2F2", event_type_ddl_border="#FECACA",
+    ddl_pinned_background="#FEF2F2", ddl_pinned_border="#FECACA", ddl_regular_background="#F8FAFC",
+    ddl_regular_border="#E2E8F0", ddl_overdue_background="#FEF2F2", ddl_due_background="#FFF7E8",
+    checkbox_border="#94A3B8", checkbox_checked="#4F46E5", quick_success="#047857",
+    todo_tag_background="#ECFDF5", todo_tag_text="#047857", card_done_background="#F1F5F9",
+    text_done="#64748B", event_done="#94A3B8", search_match_background="#E0E7FF",
+    search_match_text="#3730A3", metrics=replace(MODERN.metrics, corner_radius=10,
+        control_radius=6, date_radius=8, flow_card_radius=5),
+)
+
+THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER, FRUTIGER, GEMINI)}
 VALID_THEME_NAMES = tuple(THEMES)
 DEFAULT_THEME_NAME = MODERN.name
 # v0.6 and earlier builds saved ``win7_aero``.  ``aero`` is the stable

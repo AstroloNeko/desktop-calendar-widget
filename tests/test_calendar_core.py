@@ -163,7 +163,7 @@ class StoreTests(unittest.TestCase):
 
     def test_theme_round_trips(self):
         store = Store(self.data_file)
-        for theme_name in ("modern", "aero", "paper", "frutiger"):
+        for theme_name in ("modern", "aero", "paper", "frutiger", "gemini_reviewing"):
             store.settings["theme"] = theme_name
             store.save()
             loaded = Store(self.data_file)

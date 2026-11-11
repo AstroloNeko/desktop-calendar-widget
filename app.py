@@ -559,6 +559,8 @@ class ThemeButton(LogicalCanvas):
                 background = self.surface_background or theme.header_background
             else:
                 background = theme.control_hover if self.state == "hover" else theme.control_pressed if self.state == "pressed" else theme.control_background
+            if theme.style == "review" and getattr(self, "segment_active", False):
+                background = theme.schedule_card_background if self.state == "normal" else theme.control_hover
             self.configure(bg=self.surface_background or theme.header_background)
             rounded_rectangle(
                 self,
@@ -568,7 +570,7 @@ class ThemeButton(LogicalCanvas):
                 height - 2,
                 theme.metrics.control_radius,
                 fill=background,
-                outline=theme.control_border if self.outlined else "",
+                outline=theme.control_border if self.outlined and theme.style != "review" else "",
                 width=1,
             )
         y_offset = 1 if self.state == "pressed" and theme.style != "frutiger" else 0
@@ -849,7 +851,8 @@ class DayCell(LogicalCanvas):
         # Date states always frame the number only. Holiday text has its own
         # baseline below, so selecting a festival never changes the box size.
         date_y = 11
-        if self.hovered and not self.selected:
+        review = theme.style == "review"
+        if self.hovered and not self.selected and not self.today:
             draw_calendar_date_state(
                 self,
                 center_x - DATE_STATE_HALF_WIDTH,
@@ -876,8 +879,8 @@ class DayCell(LogicalCanvas):
                 DATE_STATE_TOP,
                 center_x + DATE_STATE_HALF_WIDTH,
                 DATE_STATE_BOTTOM,
-                fill=theme.date_selected_background,
-                border=theme.date_selected_border,
+                fill=theme.accent if review and self.today else theme.date_selected_background,
+                border=theme.accent if review and self.today else theme.date_selected_border,
                 radius=max(4, theme.metrics.date_radius - 1) if selected_glass else theme.metrics.date_radius,
                 gradient_start=theme.date_selected_gradient_start if selected_glass or selected_paper else None,
                 gradient_end=theme.date_selected_gradient_end if selected_glass or selected_paper else None,
@@ -896,7 +899,7 @@ class DayCell(LogicalCanvas):
                 center_x + DATE_STATE_HALF_WIDTH,
                 DATE_STATE_BOTTOM,
                 fill=theme.date_today_background,
-                border=theme.date_today_background if self.ddl else theme.date_today_border,
+                border=theme.date_today_background if self.ddl or review else theme.date_today_border,
                 radius=theme.metrics.date_radius,
                 top_highlight=(
                     blend(theme.date_today_background, theme.control_highlight, 0.48)
@@ -907,7 +910,11 @@ class DayCell(LogicalCanvas):
                 ),
             )
 
-        if self.ddl:
+        if self.ddl and review:
+            x = center_x + DATE_STATE_HALF_WIDTH - 2
+            self.create_oval(x-2.5, 1, x+2.5, 6, fill=theme.ddl_indicator,
+                             outline=theme.calendar_background, tags="date_marker")
+        elif self.ddl:
             # DDL owns an outer ring, leaving selected/today layers and the
             # holiday baseline untouched. Aero gets one restrained inner glint.
             draw_calendar_date_ring(
@@ -924,7 +931,7 @@ class DayCell(LogicalCanvas):
                 inner_highlight=theme.ddl_indicator_highlight if theme.style == "aero" else None,
             )
 
-        if self.today and (self.selected or self.ddl):
+        if not review and self.today and (self.selected or self.ddl):
             draw_calendar_today_accent(
                 self,
                 center_x - DATE_STATE_HALF_WIDTH,
@@ -953,7 +960,11 @@ class DayCell(LogicalCanvas):
                 tags="date_marker",
             )
 
-        if self.selected:
+        if review and self.today:
+            color = theme.text_on_accent if self.selected else theme.accent
+        elif review and self.selected:
+            color = theme.text_primary
+        elif self.selected:
             color = theme.header_text if theme.style == "aero" else theme.text_on_accent
         elif not self.in_month:
             color = theme.date_other_month
@@ -990,10 +1001,17 @@ class DayCell(LogicalCanvas):
 
         if self.event_colors:
             gap = 7
-            start = center_x - (len(self.event_colors) - 1) * gap / 2
+            colors = self.event_colors
+            start = center_x - (len(colors) - 1) * gap / 2
             indicator_bottom = self.logical_height() - 1
-            for index, event_color in enumerate(self.event_colors):
+            if review and not (self.holiday and self.in_month):
+                indicator_bottom = min(indicator_bottom, DATE_STATE_BOTTOM + 5)
+            for index, event_color in enumerate(colors):
                 x = start + index * gap
+                if review:
+                    self.create_oval(x-2, indicator_bottom-4, x+2, indicator_bottom,
+                                     fill=event_color, outline="", tags="date_event")
+                    continue
                 self.create_rectangle(
                     x - 2,
                     indicator_bottom - 1,
@@ -3545,7 +3563,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             highlightcolor=theme.input_focus,
             font=(FONT, 9),
         )
-        self.quick_entry.pack(side="left", fill="x", expand=True, ipady=dp(6))
+        self._place_quick_entry(quick_frame)
         self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
         self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
         self.quick_entry.bind("<Enter>", lambda _event: self._quick_entry_hover(True))
@@ -3575,9 +3593,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                     font_size=8, surface_background=theme.panel_secondary, outlined=True).pack(side="right", padx=(dp(8), 0))
         mode_switch = tk.Frame(
             info_bar,
-            bg=theme.divider,
-            padx=dp(1),
-            pady=dp(1),
+            bg=theme.control_background if theme.style == "review" else theme.divider,
+            padx=dp(3 if theme.style == "review" else 1),
+            pady=dp(3 if theme.style == "review" else 1),
         )
         mode_switch.pack(side="right", padx=(dp(8), 0))
         self.global_flow_mode_button = ThemeButton(
@@ -3966,7 +3984,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         frame = tk.Frame(
             parent,
             bg=background,
-            highlightthickness=dp(1),
+            highlightthickness=0 if theme.style == "review" else dp(1),
             highlightbackground=border,
         )
         ddl_header = tk.Frame(frame, bg=background, padx=dp(8), pady=dp(3))
@@ -3995,7 +4013,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             highlightthickness=0,
             height=dp(DDL_ROW_HEIGHT),
         )
-        scrollbar = ttk.Scrollbar(ddl_body, orient="vertical", command=canvas.yview)
+        scrollbar = ttk.Scrollbar(ddl_body, orient="vertical", command=canvas.yview, style="DDL.Vertical.TScrollbar")
         inner = tk.Frame(canvas, bg=background)
         canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
@@ -4032,7 +4050,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             highlightcolor=theme.input_focus,
             font=(FONT, 9),
         )
-        self.quick_entry.pack(side="left", fill="x", expand=True, ipady=dp(6))
+        self._place_quick_entry(self.quick_frame)
         self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
         self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
         self.quick_entry.bind("<Enter>", lambda _event: self._quick_entry_hover(True))
@@ -4103,7 +4121,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.daily_list_shell = tk.Frame(self.collapsible_frame, bg=theme.schedule_background, padx=dp(10))
         self.daily_list_shell.pack(fill="both", expand=True)
         self.agenda_canvas = tk.Canvas(self.daily_list_shell, bg=theme.schedule_background, bd=0, highlightthickness=0, width=dp(340), height=dp(126))
-        self.agenda_scrollbar = ttk.Scrollbar(self.daily_list_shell, orient="vertical", command=self.agenda_canvas.yview)
+        self.agenda_scrollbar = ttk.Scrollbar(self.daily_list_shell, orient="vertical", command=self.agenda_canvas.yview,
+                                              style="Global.Vertical.TScrollbar")
         self.agenda_inner = tk.Frame(self.agenda_canvas, bg=theme.schedule_background)
         self.agenda_window = self.agenda_canvas.create_window((0, 0), window=self.agenda_inner, anchor="nw")
         self.agenda_canvas.configure(yscrollcommand=self.agenda_scrollbar.set)
@@ -4686,6 +4705,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 button.accented = active
                 button.outlined = not active
                 button.foreground = None
+                if self.theme.style == "review":
+                    button.segment_active = active
+                    button.accented = button.outlined = False
+                    button.foreground = self.theme.text_primary if active else self.theme.text_secondary
                 button.draw()
 
     def _draw_active_global_view(self) -> None:
@@ -4871,6 +4894,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 tags=(row_tag,),
             )
             bar_fill = blend(item.color, theme.schedule_background, 0.68) if item.completed else item.color
+            if theme.style == "review":
+                bar_fill = theme.card_done_background if item.completed else blend(theme.schedule_card_background, item.color, .22)
             outline = (
                 theme.accent
                 if selected and selected.id == item.id and not hasattr(self, "bulk_selection")
@@ -4984,7 +5009,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         column_width = max(dp(58), viewport_width // 7)
         content_width = column_width * 7
         day_header_height = dp(30)
-        card_height = dp(28)
+        card_height = dp(25 if theme.style == "review" else 28)
         lane_gap = dp(3)
         week_height = day_header_height + layout.max_visible_lanes * (card_height + lane_gap) + dp(15)
         content_height = max(canvas.winfo_height(), len(layout.weeks) * week_height)
@@ -5056,7 +5081,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                         fill=theme.accent,
                         width=dp(2),
                     )
-                if day in ddl_dates:
+                if day in ddl_dates and theme.style != "review":
                     rounded_rectangle(
                         canvas,
                         x1 + dp(3),
@@ -5076,7 +5101,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                         fill=theme.ddl_indicator_highlight,
                         width=dp(1),
                     )
-                if day == self.selected and not in_drag_range:
+                if day == self.selected and not in_drag_range and (theme.style != "review" or day != today):
                     selected_inset = dp(7) if day in ddl_dates else dp(2)
                     rounded_rectangle(
                         canvas,
@@ -5108,9 +5133,12 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                             if theme.style in ("aero", "frutiger")
                             else None
                         ),
-                        today_ring=theme.date_today_border,
+                        today_ring=None if theme.style == "review" else theme.date_today_border,
                         tags=(date_tag,),
                     )
+                if day in ddl_dates and theme.style == "review":
+                    canvas.create_oval(x1+dp(31), row_y1+dp(4), x1+dp(36), row_y1+dp(9),
+                                       fill=theme.ddl_indicator, outline="", tags=(date_tag,))
                 canvas.create_text(
                     x1 + dp(8),
                     row_y1 + dp(8),
@@ -5178,6 +5206,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 else:
                     card_fill = blend(theme.schedule_card_background, item.color, 0.09)
                     outline = blend(theme.schedule_card_border, stripe_color, 0.34)
+                if theme.style == "review" and not item.completed:
+                    card_fill = blend(theme.schedule_card_background, item.color, .15)
+                    outline = card_fill
                 if is_selected:
                     card_fill = blend(card_fill, theme.accent_soft, 0.48)
                     outline = theme.accent
@@ -5236,6 +5267,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                     logical_card_width,
                     span_columns=block.end_column - block.start_column + 1,
                 )
+                if theme.style == "review":
+                    detail_level = "compact"
                 left_inset = 19 if block.continues_before else 11
                 right_reserve = 18 if block.continues_after or block.ddl_date else 8
                 available_width = max(20, logical_card_width - left_inset - right_reserve)
@@ -6050,17 +6083,37 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def _open_ddl_detail(self, event: Event) -> None:
         self.open_day_detail(self.store.event_end_date(event))
 
+    def _agenda_card_surface(self, background):
+        theme, dp = self.theme, self.dpi.px
+        if theme.style != "review":
+            card = tk.Frame(self.agenda_inner, bg=background, highlightthickness=1,
+                            highlightbackground=theme.schedule_card_border, cursor="hand2")
+            card.pack(fill="x", pady=(0, 5), padx=1)
+            return card
+        shell = tk.Canvas(self.agenda_inner, bd=0, highlightthickness=0,
+                          bg=theme.schedule_background, cursor="hand2")
+        shell.pack(fill="x", padx=dp(1), pady=(0, dp(6)))
+        card = tk.Frame(shell, bg=background, cursor="hand2")
+        card.pack(fill="both", expand=True, padx=dp(6), pady=dp(3))
+        def paint(_event=None):
+            shell.delete("surface")
+            rounded_rectangle(shell, 1, 1, shell.winfo_width()-1, shell.winfo_height()-1,
+                              dp(8), fill=card.cget("bg"), outline=theme.schedule_card_border, tags="surface")
+        shell.bind("<Configure>", paint)
+        card.bind("<Configure>", paint)
+        shell.bindtags((str(shell), str(card), *shell.bindtags()[1:]))
+        return card
+
     def _build_event_card(self, item: Event) -> None:
         theme = self.theme
         card_bg = theme.card_done_background if item.done else theme.schedule_card_background
-        card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground=theme.schedule_card_border, cursor="hand2")
-        card.pack(fill="x", pady=(0, 5), padx=1)
+        card = self._agenda_card_surface(card_bg)
         stripe = tk.Frame(
             card,
             bg=event_stripe_color(theme, item, self.store.effective_event_color(item)),
             width=EVENT_STRIPE_WIDTH,
         )
-        stripe.pack(side="left", fill="y")
+        stripe.pack(side="left", fill="y", pady=self.dpi.px(3) if theme.style == "review" else 0)
         stripe.pack_propagate(False)
         check = TaskCheck(
             card,
@@ -6095,7 +6148,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 font=(FONT, 7),
                 padx=4,
                 pady=0,
-                highlightthickness=1,
+                highlightthickness=0 if theme.style == "review" else 1,
                 highlightbackground=badge_border,
                 cursor="hand2",
             )
@@ -6126,8 +6179,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         theme = self.theme
         done = item.is_done_on(self.selected)
         card_bg = theme.card_done_background if done else theme.schedule_card_background
-        card = tk.Frame(self.agenda_inner, bg=card_bg, highlightthickness=1, highlightbackground=theme.schedule_card_border, cursor="hand2")
-        card.pack(fill="x", pady=(0, 5), padx=1)
+        card = self._agenda_card_surface(card_bg)
         stripe = tk.Frame(card, bg=theme.event_done if done else item.color, width=EVENT_STRIPE_WIDTH)
         stripe.pack(side="left", fill="y")
         stripe.pack_propagate(False)
@@ -6892,6 +6944,31 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         y = self.quick_options_button.winfo_rooty() + self.quick_options_button.winfo_height()
         menu.tk_popup(x, y)
 
+    def _place_quick_entry(self, parent) -> None:
+        dp = self.dpi.px
+        if self.theme.style != "review":
+            self.quick_entry.pack(side="left", fill="x", expand=True, ipady=dp(6))
+            return
+        entry, theme = self.quick_entry, self.theme
+        entry.configure(bd=0, highlightthickness=0)
+        shell = tk.Canvas(parent, height=entry.winfo_reqheight()+dp(12), width=1,
+                          bg=parent.cget("bg"), bd=0, highlightthickness=0)
+        shell.pack(side="left", fill="x", expand=True)
+        def paint(event=None):
+            focused = entry.focus_get() == entry
+            fill = theme.schedule_card_background if focused else theme.input_background
+            border = theme.input_focus if focused else theme.input_hover_border if self._quick_entry_hovered else fill
+            shell.delete("field")
+            rounded_rectangle(shell, dp(1), dp(1), shell.winfo_width()-dp(1),
+                              shell.winfo_height()-dp(1), dp(6), fill=fill,
+                              outline=border, width=dp(1), tags="field")
+            entry.configure(bg=fill)
+        shell.bind("<Configure>", paint)
+        shell.bind("<Button-1>", lambda _e: entry.focus_set())
+        entry.place(in_=shell, x=dp(8), rely=.5, anchor="w", relwidth=1, width=-dp(16))
+        entry.lift()
+        self._paint_review_input = paint
+
     def _set_quick_placeholder(self) -> None:
         if self.focus_get() == self.quick_entry and not self.quick_placeholder_active:
             return
@@ -6903,6 +6980,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
     def _quick_entry_hover(self, hovered: bool) -> None:
         self._quick_entry_hovered = hovered
+        if self.theme.style == "review":
+            self._paint_review_input()
         if self.focus_get() == self.quick_entry:
             return
         self.quick_entry.configure(
@@ -6910,6 +6989,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         )
 
     def _quick_focus_in(self, _event=None) -> None:
+        if self.theme.style == "review":
+            self._paint_review_input()
         if self.quick_placeholder_active:
             self.quick_var.set("")
             self.quick_placeholder_active = False
@@ -6920,6 +7001,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         )
 
     def _quick_focus_out(self, _event=None) -> None:
+        if self.theme.style == "review":
+            self._paint_review_input()
         if not self.quick_var.get().strip():
             self._set_quick_placeholder()
         self.quick_entry.configure(

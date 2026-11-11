@@ -4,8 +4,10 @@ from ui_theme import DEFAULT_THEME_NAME, FRUTIGER, PAPER, THEMES, WIN7_AERO, get
 
 
 class ThemeRegistryTests(unittest.TestCase):
-    def test_four_themes_are_registered_in_menu_order(self):
-        self.assertEqual(tuple(THEMES), ("modern", "aero", "paper", "frutiger"))
+    def test_experiment_is_opt_in_and_appended_in_menu_order(self):
+        self.assertEqual(tuple(THEMES), ("modern", "aero", "paper", "frutiger", "gemini_reviewing"))
+        self.assertEqual(get_theme("gemini_reviewing").display_name, "Gemini reviewing")
+        self.assertEqual(DEFAULT_THEME_NAME, "modern")
         self.assertEqual(WIN7_AERO.display_name, "Windows 7 Glass")
         self.assertEqual(PAPER.display_name, "Paper")
         self.assertEqual(PAPER.style, "paper")

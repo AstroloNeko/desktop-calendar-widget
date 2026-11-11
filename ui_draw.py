@@ -496,18 +496,14 @@ def _calendar_rounded_rectangle(
 ) -> int:
     """Draw a bounded, pixel-symmetric rounded polygon for date states."""
     radius = max(1, min(int(radius), (right - left) // 2, (bottom - top) // 2))
-    offsets = [round(math.sqrt(max(0, radius * radius - (radius - step) ** 2))) for step in range(radius + 1)]
-    corners = (
-        ((right - radius + offsets[step], top + step) for step in range(radius + 1)),
-        ((right - radius + offsets[radius - step], bottom - radius + step) for step in range(radius + 1)),
-        ((left + radius - offsets[step], bottom - step) for step in range(radius + 1)),
-        ((left + radius - offsets[radius - step], top + radius - step) for step in range(radius + 1)),
-    )
-    points: list[int] = []
-    for corner in corners:
-        for point in corner:
-            if points[-2:] != list(point):
-                points.extend(point)
+    # Sample in angle, not in rounded logical rows: on scaled canvases the
+    # latter magnify a small-radius corner into a staircase.
+    points = []
+    for cx, cy, start in ((right-radius, top+radius, -90), (right-radius, bottom-radius, 0),
+                          (left+radius, bottom-radius, 90), (left+radius, top+radius, 180)):
+        for step in range(11):
+            angle = math.radians(start + 9 * step)
+            points.extend((cx + round(radius * math.cos(angle)), cy + round(radius * math.sin(angle))))
     return canvas.create_polygon(points, smooth=False, **kwargs)
 
 
