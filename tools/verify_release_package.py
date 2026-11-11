@@ -76,7 +76,7 @@ def main():
                            "data_compat", "update_state", "release_notes", "release_notes_ui"):
                 assert module in pyz.toc, module
             constants = pyz.extract("ui_theme").co_consts
-            assert all(theme in constants for theme in ("modern", "aero", "paper", "frutiger"))
+            assert all(theme in constants for theme in ("modern", "aero", "paper", "frutiger", "slate"))
         if name == "DesktopCalendarRepair.exe":
             assert "app" not in pyz.toc and "calendar_core" not in pyz.toc
             assert "release_notes" in pyz.toc and "release_notes_ui" in pyz.toc
