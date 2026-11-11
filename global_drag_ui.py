@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 from schedule_drag import ScheduleDrag, hit_at
+from calendar_flow_layout import highlight_range_day
 from interaction_visuals import CanvasOverlay, elide, preview_bounds
 from ui_draw import blend, draw_drag_bubble, pooled_rounded_rectangle, rounded_rectangle
 
@@ -97,7 +98,7 @@ class GlobalDragMixin:
         slot = 0
         for week in self.calendar_flow_layout.weeks:
             for column, day in enumerate(week.dates):
-                if first <= day <= last:
+                if highlight_range_day(day, (first, last)):
                     x = column * self._global_flow_column_width
                     y = week.index * self._global_flow_week_height
                     pool.item(slot, "rectangle", (x + dp(4), y + dp(4), x + self._global_flow_column_width - dp(4),

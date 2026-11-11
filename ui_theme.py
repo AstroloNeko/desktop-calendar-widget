@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -147,9 +147,16 @@ class Theme:
     todo_tag_background: str
     todo_tag_text: str
     metrics: ThemeMetrics
+    workspace_weekend_fill: str | None = None
+    workspace_adjacent_month_fill: str | None = None
+    ddl_marker_style: str = "ring"
+    soft_task_bars: bool = False
+    quiet_button_edges: bool = False
+    rounded_widget_shells: bool = False
 
 
 MODERN = Theme(
+    rounded_widget_shells=True,
     name="modern",
     display_name="Modern",
     style="flat",
@@ -196,13 +203,13 @@ MODERN = Theme(
     date_other_month="#C2C3C7",
     date_hover_background="#F1F0F8",
     date_hover_border="#E0DFF0",
-    date_selected_background="#6673D8",
-    date_selected_border="#5B67C8",
+    date_selected_background="#F1F2F7",
+    date_selected_border="#BEC3D8",
     date_selected_gradient_start="#6273D9",
     date_selected_gradient_end="#6273D9",
     date_selected_inner_border="#6273D9",
-    date_today_background="#FFF8E8",
-    date_today_border="#E1A24B",
+    date_today_background="#F1F2FC",
+    date_today_border="#6273D9",
     date_event_indicator="#6273D9",
     date_weekend_text="#BC6B6B",
     date_selected_today="#F0B457",
@@ -308,13 +315,13 @@ WIN7_AERO = Theme(
     date_other_month="#ACB2B3",
     date_hover_background="#F7FBFB",
     date_hover_border="#D6E5E6",
-    date_selected_background="#C3CFD1",
+    date_selected_background="#ECF2F3",
     date_selected_border="#AAC4C7",
     date_selected_gradient_start="#EAF0F0",
     date_selected_gradient_end="#B9C7C9",
     date_selected_inner_border="#D9E2E3",
-    date_today_background="#FFF8EA",
-    date_today_border="#C99A55",
+    date_today_background="#EDF5F6",
+    date_today_border="#4C8998",
     date_event_indicator="#5A9DAC",
     date_weekend_text="#986D70",
     date_selected_today="#D8A357",
@@ -423,8 +430,8 @@ PAPER = Theme(
     date_other_month="#B9AFA2",
     date_hover_background="#F3E8D9",
     date_hover_border="#DDCDB7",
-    date_selected_background="#617663",
-    date_selected_border="#526657",
+    date_selected_background="#F5F1E7",
+    date_selected_border="#C5B9A4",
     date_selected_gradient_start="#637865",
     date_selected_gradient_end="#5E7260",
     date_selected_inner_border="#849786",
@@ -538,13 +545,13 @@ FRUTIGER = Theme(
     date_other_month="#A3C0C4",
     date_hover_background="#DDF7F8",
     date_hover_border="#87D3DC",
-    date_selected_background="#39B5D3",
-    date_selected_border="#168FB3",
+    date_selected_background="#E8F5F6",
+    date_selected_border="#A2CFD7",
     date_selected_gradient_start="#8CE5F1",
     date_selected_gradient_end="#2498C2",
     date_selected_inner_border="#BFF5F8",
-    date_today_background="#FFF8D9",
-    date_today_border="#E0A139",
+    date_today_background="#E6F6FA",
+    date_today_border="#008FC5",
     date_event_indicator="#20A5C0",
     date_weekend_text="#B15C68",
     date_selected_today="#FFC34D",
@@ -606,12 +613,47 @@ FRUTIGER = Theme(
 )
 
 
-THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER, FRUTIGER)}
+# Off-white surfaces keep just a hint of warmth under the slate ink.
+SLATE = replace(
+    MODERN, name="slate", display_name="Slate", style="flat", ddl_marker_style="dot",
+    soft_task_bars=True, quiet_button_edges=True,
+    window_background="#FAFAF8", panel_background="#FAFAF8", schedule_background="#FAFAF8",
+    calendar_background="#FCFCFA", header_background="#FCFCFA",
+    header_gradient_start="#FCFCFA", header_gradient_mid="#FCFCFA", header_gradient_end="#FCFCFA",
+    panel_secondary="#F5F5F3", workspace_sidebar="#F7F7F5", workspace_detail="#FCFCFA",
+    workspace_weekend_fill="#FBF4ED", workspace_adjacent_month_fill="#EDF0F3",
+    window_border_outer="#CBD5E1", divider="#E2E8F0", workspace_grid="#EDF1F5",
+    header_border="#E2E8F0", header_text="#0F172A", header_subtext="#475569",
+    text_primary="#0F172A", text_secondary="#475569", text_muted="#68798D",
+    text_disabled="#94A3B8", control_background="#F0F1EF", control_hover="#EEF2FF",
+    control_pressed="#E0E7FF", control_border="#E2E8F0", control_text="#475569",
+    weekday_text="#64748B", date_text="#0F172A",
+    date_other_month="#94A3B8", date_hover_background="#F8FAFC", date_hover_border="#E2E8F0",
+    date_selected_background="#F1F5F9", date_selected_border="#CBD5E1",
+    date_today_background="#EEF2FF", date_today_border="#4F46E5", date_selected_today="#4F46E5",
+    date_weekend_text="#C73758", weekend="#C73758", schedule_card_background="#FDFCF9",
+    schedule_card_hover="#F1F5F9", schedule_card_border="#E2E8F0", schedule_time_text="#475569",
+    input_background="#F1F2F0", input_border="#E2E8F0", input_hover_border="#CBD5E1",
+    input_focus="#4F46E5", accent="#4F46E5", accent_hover="#4338CA", accent_soft="#EEF2FF",
+    danger="#DC2626", danger_soft="#FEF2F2", ddl_indicator="#DC2626", ddl_indicator_highlight="#FECACA",
+    event_type_general="#64748B", event_type_urgent="#925409", event_type_ddl="#B91C1C",
+    event_type_urgent_background="#FEF3C7", event_type_urgent_border="#FDE68A",
+    event_type_ddl_background="#FEF2F2", event_type_ddl_border="#FECACA",
+    ddl_pinned_background="#FEF2F2", ddl_pinned_border="#FECACA", ddl_regular_background="#FAFAF8",
+    ddl_regular_border="#E2E8F0", ddl_overdue_background="#FEF2F2", ddl_due_background="#FFF7E8",
+    checkbox_border="#94A3B8", checkbox_checked="#4F46E5", quick_success="#047857",
+    todo_tag_background="#ECFDF5", todo_tag_text="#047857", card_done_background="#F1F5F9",
+    text_done="#64748B", event_done="#94A3B8", search_match_background="#E0E7FF",
+    search_match_text="#3730A3", metrics=replace(MODERN.metrics, corner_radius=10,
+        control_radius=6, date_radius=8, flow_card_radius=5),
+)
+
+THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER, FRUTIGER, SLATE)}
 VALID_THEME_NAMES = tuple(THEMES)
 DEFAULT_THEME_NAME = MODERN.name
 # v0.6 and earlier builds saved ``win7_aero``.  ``aero`` is the stable
 # public settings ID; accepting both values keeps every existing profile valid.
-LEGACY_THEME_ALIASES = {"win7_aero": WIN7_AERO.name}
+LEGACY_THEME_ALIASES = {"win7_aero": WIN7_AERO.name, "gemini_reviewing": SLATE.name}
 
 
 def normalize_theme_name(value: object) -> str:

@@ -4,8 +4,18 @@ from ui_theme import DEFAULT_THEME_NAME, FRUTIGER, PAPER, THEMES, WIN7_AERO, get
 
 
 class ThemeRegistryTests(unittest.TestCase):
-    def test_four_themes_are_registered_in_menu_order(self):
-        self.assertEqual(tuple(THEMES), ("modern", "aero", "paper", "frutiger"))
+    def test_only_modern_and_slate_use_rounded_widget_shells(self):
+        self.assertEqual({t.name for t in THEMES.values() if t.rounded_widget_shells}, {"modern", "slate"})
+
+    def test_only_slate_opts_out_of_the_deadline_ring(self):
+        self.assertEqual([t.name for t in THEMES.values() if t.ddl_marker_style == "dot"], ["slate"])
+        self.assertTrue(all(t.ddl_marker_style == "ring" for t in THEMES.values() if t.name != "slate"))
+
+    def test_slate_is_opt_in_and_appended_in_menu_order(self):
+        self.assertEqual(tuple(THEMES), ("modern", "aero", "paper", "frutiger", "slate"))
+        self.assertEqual(get_theme("slate").display_name, "Slate")
+        self.assertIs(get_theme("gemini_reviewing"), get_theme("slate"))
+        self.assertEqual(DEFAULT_THEME_NAME, "modern")
         self.assertEqual(WIN7_AERO.display_name, "Windows 7 Glass")
         self.assertEqual(PAPER.display_name, "Paper")
         self.assertEqual(PAPER.style, "paper")

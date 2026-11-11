@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from habit_schedule import SCHEDULE_FIELDS, schedule_label, validate_schedule_input
+from themed_controls import themed_check
 
 CHOICES = ("每天", "每隔 N 天", "每周", "每月", "每年", "自定义…")
 UNITS = {"天": "daily", "周": "weekly", "月": "monthly", "年": "yearly"}
@@ -111,7 +112,7 @@ class HabitScheduleForm(tk.Frame):
                         highlightcolor=self.theme.input_focus)
 
     def check(self, parent, text, variable, compact=False):
-        return tk.Checkbutton(parent, text=text, variable=variable, font=self.font,
+        return themed_check(parent, self.theme, self.dp, text=text, variable=variable, font=self.font,
                               bg=self.theme.control_background if compact else self.theme.panel_background,
                               fg=self.theme.text_primary, indicatoron=not compact,
                               activebackground=self.theme.control_hover,
