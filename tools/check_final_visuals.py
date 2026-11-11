@@ -177,6 +177,12 @@ def assert_flow_text(app):
     """Check rendered glyph extents, not estimates of font point sizes."""
     canvas = app.global_flow_canvas
     for week in app.calendar_flow_layout.weeks:
+        for day, count in zip(week.dates, week.hidden_counts):
+            if count:
+                ids = canvas.find_withtag(f"flow-more:{day.isoformat()}")
+                assert len(ids) == 1
+                expected = app.theme.ddl_indicator if day in week.folded_risk_dates else app.theme.accent
+                assert canvas.itemcget(ids[0], "fill") == expected
         for block in week.blocks:
             if not block.visible:
                 continue
@@ -192,9 +198,9 @@ def assert_flow_text(app):
                 x, y = canvas.coords(identifier)
                 if x1 <= x <= x2 and y1 <= y <= y2:
                     texts.append(canvas.bbox(identifier))
-            texts.sort(key=lambda box: box[1])
-            if len(texts) == 2:
-                assert texts[0][3] <= texts[1][1] + 1, (app.theme_name, app.dpi.dpi, texts)
+            assert texts, (app.theme_name, block.item.id)
+            # Continuation hints may accompany a title, but never a second line.
+            assert max(box[1] for box in texts) - min(box[1] for box in texts) <= app.dpi.px(3)
 
 
 def capture_drag_preview(app, target):

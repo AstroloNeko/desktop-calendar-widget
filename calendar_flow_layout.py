@@ -10,21 +10,16 @@ from timeline_model import TimelineItem, TimelineMonth
 
 GLOBAL_DISPLAY_MODES = ("flow", "timeline")
 DEFAULT_GLOBAL_DISPLAY_MODE = "timeline"
-FLOW_CARD_COMPACT_MAX_WIDTH = 116
-FLOW_CARD_MEDIUM_MAX_WIDTH = 228
+MONTH_BAR_HEIGHT = 25  # logical px; one title line irrespective of theme or span
 
 
 def normalize_global_display_mode(value: object) -> str:
     return value if isinstance(value, str) and value in GLOBAL_DISPLAY_MODES else DEFAULT_GLOBAL_DISPLAY_MODE
 
 
-def flow_card_detail_level(logical_width: int, *, span_columns: int = 1) -> str:
-    """Select text density without coupling the renderer to task semantics."""
-    if span_columns <= 1 or logical_width <= FLOW_CARD_COMPACT_MAX_WIDTH:
-        return "compact"
-    if logical_width <= FLOW_CARD_MEDIUM_MAX_WIDTH:
-        return "medium"
-    return "large"
+def highlight_range_day(day: date, bounds: tuple[date, date] | None) -> bool:
+    """A one-day selection uses the number badge, never a whole-cell overlay."""
+    return bool(bounds and bounds[0] < bounds[1] and bounds[0] <= day <= bounds[1])
 
 
 def normalize_flow_drag_range(first: date, last: date) -> tuple[date, date, int]:
@@ -55,6 +50,7 @@ class CalendarFlowWeek:
     dates: tuple[date, ...]
     blocks: tuple[CalendarFlowBlock, ...]
     hidden_counts: tuple[int, ...]
+    folded_risk_dates: frozenset[date] = frozenset()
 
     def hidden_on(self, column: int) -> int:
         return self.hidden_counts[column] if 0 <= column < len(self.hidden_counts) else 0
@@ -128,6 +124,7 @@ def build_calendar_flow_layout(model: TimelineMonth, *, max_visible_lanes: int =
         lane_ends: list[int] = []
         blocks: list[CalendarFlowBlock] = []
         hidden_counts = [0] * 7
+        folded_risk = set()
         # Interval packing must proceed from left to right.  Timeline items
         # remain stably ordered when they start on the same day, while cards
         # that do not overlap can reliably reuse a lane.
@@ -144,6 +141,9 @@ def build_calendar_flow_layout(model: TimelineMonth, *, max_visible_lanes: int =
             if not visible:
                 for column in range(candidate.start_column, candidate.end_column + 1):
                     hidden_counts[column] += 1
+                    day = week[column]
+                    if not candidate.item.completed and (candidate.item.is_urgent or candidate.item.ddl_date == day):
+                        folded_risk.add(day)
             ddl_date = (
                 candidate.item.ddl_date
                 if candidate.item.ddl_date and candidate.start_date <= candidate.item.ddl_date <= candidate.end_date
@@ -170,6 +170,7 @@ def build_calendar_flow_layout(model: TimelineMonth, *, max_visible_lanes: int =
                 dates=tuple(week),
                 blocks=tuple(blocks),
                 hidden_counts=tuple(hidden_counts),
+                folded_risk_dates=frozenset(folded_risk),
             )
         )
     return CalendarFlowLayout(model.year, model.month, tuple(flow_weeks), max_visible_lanes)

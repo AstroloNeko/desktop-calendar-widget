@@ -163,11 +163,18 @@ class StoreTests(unittest.TestCase):
 
     def test_theme_round_trips(self):
         store = Store(self.data_file)
-        for theme_name in ("modern", "aero", "paper", "frutiger", "gemini_reviewing"):
+        for theme_name in ("modern", "aero", "paper", "frutiger", "slate"):
             store.settings["theme"] = theme_name
             store.save()
             loaded = Store(self.data_file)
             self.assertEqual(loaded.settings["theme"], theme_name)
+
+    def test_preview_theme_restores_as_slate(self):
+        self.data_file.write_text(json.dumps({"settings": {"theme": "gemini_reviewing"}}), encoding="utf-8")
+        store = Store(self.data_file)
+        self.assertEqual(store.settings["theme"], "slate")
+        store.save()
+        self.assertEqual(Store(self.data_file).settings["theme"], "slate")
 
     def test_legacy_aero_theme_name_is_preserved(self):
         self.data_file.write_text(json.dumps({"settings": {"theme": "aero"}}), encoding="utf-8")

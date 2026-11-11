@@ -507,6 +507,18 @@ def _calendar_rounded_rectangle(
     return canvas.create_polygon(points, smooth=False, **kwargs)
 
 
+def draw_date_badge(canvas, *bounds, theme, today, selected, radius, tags="date_state"):
+    """Shared date hierarchy, with glass reflections and paper/flat finishes."""
+    glass = theme.style in ("aero", "frutiger")
+    base = theme.accent if today else theme.date_selected_background
+    border = theme.date_selected_border if selected else base
+    draw_calendar_date_state(canvas, *bounds, fill=base, border=border, radius=radius,
+        gradient_start=blend(base, theme.control_highlight, .12) if glass else None,
+        gradient_end=base if glass else None,
+        top_highlight=blend(base, theme.control_highlight, .36) if glass else None, tags=tags)
+    return readable_text(base, theme.text_primary, theme.text_on_accent) if today else theme.date_text
+
+
 def draw_calendar_date_state(
     canvas: tk.Canvas,
     x1: float,

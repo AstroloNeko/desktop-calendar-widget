@@ -13,6 +13,7 @@ from notification_backend import WindowsNotificationBackend
 from reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
 from update_dialog import dialog_geometry
 from ui_draw import blend
+from themed_controls import themed_check
 
 
 def reminder_button(parent, app, text, command, *, primary=False):
@@ -313,7 +314,7 @@ class ReminderSettingsDialog(tk.Toplevel):
             wrapped.append(widget)
             return widget
         def check(text, variable):
-            widget = tk.Checkbutton(body, text=text, variable=variable, bg=theme.workspace_detail,
+            widget = themed_check(body, theme, dp, text=text, variable=variable, bg=theme.workspace_detail,
                            fg=theme.text_primary, activebackground=theme.workspace_detail,
                            activeforeground=theme.accent, selectcolor=theme.input_background,
                            font=(font, 9), cursor="hand2", anchor="w", wraplength=width-dp(90))

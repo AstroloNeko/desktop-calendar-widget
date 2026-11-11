@@ -7,7 +7,8 @@ from calendar_core import Event, Store
 from calendar_flow_layout import (
     DEFAULT_GLOBAL_DISPLAY_MODE,
     build_calendar_flow_layout,
-    flow_card_detail_level,
+    MONTH_BAR_HEIGHT,
+    highlight_range_day,
     flow_day_at,
     flow_date_range_text,
     normalize_flow_drag_range,
@@ -129,13 +130,29 @@ class CalendarFlowLayoutTests(unittest.TestCase):
         )
         self.assertIsNone(flow_day_at(-1, 5, layout=layout, column_width=100, week_height=140))
 
-    def test_card_text_density_responds_to_available_width(self) -> None:
-        self.assertEqual(flow_card_detail_level(90), "compact")
-        self.assertEqual(flow_card_detail_level(160, span_columns=2), "medium")
-        self.assertEqual(flow_card_detail_level(280, span_columns=3), "large")
+    def test_shared_compact_height_keeps_three_lanes(self) -> None:
+        self.assertEqual(MONTH_BAR_HEIGHT, 25)
+        self.assertEqual(self._layout().max_visible_lanes, 3)
 
-    def test_single_day_card_keeps_only_title_even_when_column_is_wide(self) -> None:
-        self.assertEqual(flow_card_detail_level(320, span_columns=1), "compact")
+    def test_whole_cell_highlight_only_for_multiple_days(self) -> None:
+        a, b, c = (date(2026, 8, n) for n in (3, 4, 5))
+        self.assertFalse(highlight_range_day(a, (a, a)))
+        self.assertFalse(highlight_range_day(c, (a, b)))
+        self.assertTrue(all(highlight_range_day(day, (a, b)) for day in (a, b)))
+
+    def test_folded_risk_uses_hidden_unfinished_items_and_actual_deadline(self):
+        from dataclasses import replace
+        self.store.upsert(Event("base", "title", "2026-08-03T18:00", duration_days=3))
+        model = build_month_timeline(self.store, 2026, 8)
+        a, b, c = model.items[0].effective_dates
+        for ddl, urgent, done, expected in (
+            (c, False, False, {c}), (None, True, False, {a, b, c}),
+            (c, True, True, set()), (None, False, False, set()),
+        ):
+            hidden = replace(model.items[0], id="hidden", ddl_date=ddl, is_urgent=urgent, completed=done)
+            layout = build_calendar_flow_layout(replace(model, items=(*model.items, hidden)), max_visible_lanes=1)
+            week = next(w for w in layout.weeks if a in w.dates)
+            self.assertEqual(week.folded_risk_dates, expected)
 
     def test_drag_range_is_inclusive_and_direction_independent(self) -> None:
         self.assertEqual(
