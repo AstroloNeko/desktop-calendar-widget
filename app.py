@@ -57,6 +57,8 @@ from global_timeline_ui import (
     wheel_units,
 )
 from tray_icon import TrayIcon
+from global_hotkey import saved_shortcut
+from global_hotkey_ui import open_hotkey_settings
 from app_lifecycle import ApplicationLifecycleMixin
 from reminder_ui import NativeReminderMixin
 from win_integration import (
@@ -4948,7 +4950,14 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         day_header_height = dp(30)
         card_height = dp(MONTH_BAR_HEIGHT)
         lane_gap = dp(3)
-        week_height = day_header_height + layout.max_visible_lanes * (card_height + lane_gap) + dp(15)
+        more_font = (FONT, 7, "bold")
+        footer_height = dp(15)
+        if any(any(week.hidden_counts) for week in layout.weeks):
+            # Keep the last card, the entire text line, and the cell border separate.
+            more_line = int(canvas.tk.call("font", "metrics", more_font,
+                                           "-displayof", str(self.global_flow_canvas), "-linespace"))
+            footer_height = max(footer_height, dp(3) + more_line + dp(8))
+        week_height = day_header_height + layout.max_visible_lanes * (card_height + lane_gap) + footer_height
         content_height = max(canvas.winfo_height(), len(layout.weeks) * week_height)
         self._global_flow_column_width = column_width
         self._global_flow_week_height = week_height
@@ -5224,7 +5233,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                     row_y2 - dp(8),
                     text=f"+{hidden_count} 更多",
                     fill=theme.ddl_indicator if week.dates[column] in week.folded_risk_dates else theme.accent,
-                    font=(FONT, 7, "bold"),
+                    font=more_font,
                     anchor="sw",
                     tags=(more_tag,),
                 )
@@ -7195,6 +7204,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                          command=lambda: self._queue_context_menu_action(menu, self.open_release_history))
         menu.add_command(label="后台与提醒…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_settings))
+        menu.add_command(label="全局唤起快捷键…",
+                         command=lambda: self._queue_context_menu_action(menu, lambda: open_hotkey_settings(self)))
         menu.add_command(label="提醒计划…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_plans))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
@@ -7254,6 +7265,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             f"{APP_NAME} v{__version__}",
             resource_path("assets/calendar.ico"),
             self.tray_actions.put,
+            hotkey=saved_shortcut(self.store.settings),
         )
         if not self.tray_icon.start() and self.tray_icon.error:
             log_exception(
@@ -7261,6 +7273,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 RuntimeError(f"系统托盘初始化失败：{self.tray_icon.error}"),
                 None,
             )
+
+        if self.tray_icon.hotkey_error:
+            self._show_feedback("全局快捷键不可用，请在“更多 → 全局唤起快捷键”中更换组合。")
 
     def toggle_autostart(self, enabled: bool) -> None:
         try:
