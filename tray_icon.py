@@ -7,9 +7,11 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes as w
 import os
+import queue
 from pathlib import Path
 import threading
 import uuid
+from global_hotkey import HotkeyBinding
 
 IS_WINDOWS = os.name == "nt"
 WPARAM_T, LPARAM_T = ctypes.c_size_t, ctypes.c_ssize_t
@@ -72,12 +74,16 @@ class WindowsTrayAPI:
             (self.user, "EndMenu", [], w.BOOL),
             (self.user, "SetForegroundWindow", [w.HWND], w.BOOL),
             (self.user, "GetCursorPos", [ctypes.POINTER(w.POINT)], w.BOOL),
+            (self.user, "RegisterHotKey", [w.HWND, ctypes.c_int, w.UINT, w.UINT], w.BOOL),
+            (self.user, "UnregisterHotKey", [w.HWND, ctypes.c_int], w.BOOL),
         ):
             function = getattr(dll, name)
             function.argtypes, function.restype = args, result
 
 
 class TrayIcon:
+    WM_HOTKEY = 0x312
+    HOTKEY_CONFIG = 0x0400 + 28
     CALLBACK_MESSAGE = 0x0400 + 27
     WM_COMMAND, WM_DESTROY, WM_CLOSE, WM_NULL = 0x111, 2, 0x10, 0
     WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_CONTEXTMENU = 0x202, 0x203, 0x205, 0x7B
@@ -89,7 +95,7 @@ class TrayIcon:
             (1003, "隐藏到托盘", "hide"), (0, None, None), (1005, "退出桌面月历", "exit"))
     COMMANDS = {identifier: command for identifier, _label, command in MENU if command}
 
-    def __init__(self, tooltip, icon_path: Path, on_action, *, startup_message=None):
+    def __init__(self, tooltip, icon_path: Path, on_action, *, startup_message=None, hotkey=""):
         self.tooltip, self.icon_path, self.on_action = tooltip[:127], Path(icon_path), on_action
         # Compatibility only: Phase 1A does not introduce balloon notifications.
         self.startup_message = startup_message
@@ -98,6 +104,54 @@ class TrayIcon:
         self._class_name = f"DesktopCalendarTray_{os.getpid()}_{uuid.uuid4().hex}"
         self._taskbar_created = 0
         self.error = None
+        self.hotkey_error = None
+        self._hotkey_value, self._hotkey_binding = hotkey, None
+        self._hotkey_requests = queue.Queue()
+
+    def configure_hotkey(self, operation, value=None):
+        """Bounded cross-thread RPC; only the helper thread touches registration."""
+        if not self.is_available:
+            raise ValueError("快捷键服务暂不可用。")
+        request = dict(operation=operation, value=value, done=threading.Event(),
+                       lock=threading.Lock(), cancelled=False, error=None)
+        self._hotkey_requests.put(request)
+        if not self._api.user.PostMessageW(self._hwnd, self.HOTKEY_CONFIG, 0, 0):
+            with request['lock']:
+                request['cancelled'] = True
+            raise ValueError("无法向快捷键服务提交设置。")
+        request['done'].wait(2)
+        with request['lock']:
+            if not request['done'].is_set():
+                request['cancelled'] = True
+                raise ValueError("快捷键服务响应超时，未应用此请求。")
+            if request['error']:
+                raise ValueError(request['error'])
+
+    def _configure_hotkey_requests(self):
+        while True:
+            try:
+                request = self._hotkey_requests.get_nowait()
+            except queue.Empty:
+                return
+            with request['lock']:
+                if request['cancelled']:
+                    continue
+                try:
+                    if self._stopping.is_set() or self._hotkey_binding is None:
+                        raise ValueError("快捷键服务已停止。")
+                    operation = request['operation']
+                    if operation == 'prepare':
+                        self._hotkey_binding.prepare(request['value'])
+                    elif operation in ('commit', 'rollback'):
+                        getattr(self._hotkey_binding, operation)()
+                        if operation == 'commit':
+                            self.hotkey_error = None
+                    else:
+                        raise ValueError("未知快捷键操作。")
+                except (ValueError, OSError) as error:
+                    request['error'] = str(error)
+                finally:
+                    request['done'].set()
 
     @property
     def is_available(self):
@@ -176,6 +230,13 @@ class TrayIcon:
 
     def _handle_message(self, hwnd, message, wparam, lparam):
         user = self._api.user
+        if message == self.HOTKEY_CONFIG:
+            self._configure_hotkey_requests()
+            return 0
+        if message == self.WM_HOTKEY:
+            if self._hotkey_binding and self._hotkey_binding.matches(int(wparam), int(lparam)):
+                self._emit("global")
+            return 0
         if message == self._taskbar_created and self._taskbar_created:
             self._register_icon()
             return 0
@@ -245,6 +306,12 @@ class TrayIcon:
             self._nid.szTip = self.tooltip
             if not self._register_icon():
                 return
+            self._hotkey_binding = HotkeyBinding(user, self._hwnd)
+            try:
+                self._hotkey_binding.prepare(self._hotkey_value)
+                self._hotkey_binding.commit()
+            except (ValueError, OSError) as exc:
+                self.hotkey_error = str(exc)  # Do not take down a usable tray/window.
             self._ready.set()
             message = w.MSG()
             while not self._stopping.is_set():
@@ -259,6 +326,10 @@ class TrayIcon:
             self.error = f"系统托盘不可用：{exc}"
         finally:
             self._available.clear()
+            if self._hotkey_binding:
+                self._hotkey_binding.close()
+                self._hotkey_binding = None
+            self._configure_hotkey_requests()
             if self._api:
                 if self._nid is not None:
                     self._api.shell.Shell_NotifyIconW(self.NIM_DELETE, ctypes.byref(self._nid))

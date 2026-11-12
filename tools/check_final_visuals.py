@@ -183,6 +183,13 @@ def assert_flow_text(app):
                 assert len(ids) == 1
                 expected = app.theme.ddl_indicator if day in week.folded_risk_dates else app.theme.accent
                 assert canvas.itemcget(ids[0], "fill") == expected
+                _, top, _, bottom = canvas.bbox(ids[0])
+                column = week.dates.index(day)
+                for block in week.blocks:
+                    if block.visible and block.start_column <= column <= block.end_column:
+                        tag = f"flow-card-style:{block.item.id}:{week.index}:{block.start_column}:{block.lane}"
+                        assert canvas.bbox(tag)[3] + app.dpi.px(3) <= top, (day, tag, top)
+                assert bottom + app.dpi.px(4) <= (week.index + 1) * app._global_flow_week_height
         for block in week.blocks:
             if not block.visible:
                 continue
