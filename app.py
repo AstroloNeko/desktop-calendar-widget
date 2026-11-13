@@ -59,6 +59,7 @@ from global_timeline_ui import (
 from tray_icon import TrayIcon
 from global_hotkey import saved_shortcut
 from global_hotkey_ui import open_hotkey_settings
+from calendar_chat_ui import open_chat, start_chat_if_enabled
 from app_lifecycle import ApplicationLifecycleMixin
 from reminder_ui import NativeReminderMixin
 from win_integration import (
@@ -3214,6 +3215,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.after(220, self._start_tray_icon)
         self._tray_poll_job = self.after(250, self._poll_tray_actions)
         self._init_native_reminders(resource_path("."))
+        self.after(500, lambda: start_chat_if_enabled(self))
         self.after(1200, self.check_reminders)
 
     @staticmethod
@@ -7206,6 +7208,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_settings))
         menu.add_command(label="全局唤起快捷键…",
                          command=lambda: self._queue_context_menu_action(menu, lambda: open_hotkey_settings(self)))
+        menu.add_command(label="AI 私人助理…",
+                         command=lambda: self._queue_context_menu_action(menu, lambda: open_chat(self)))
         menu.add_command(label="提醒计划…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_plans))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)

@@ -270,6 +270,9 @@ class ApplicationLifecycleMixin:
             self.search_window.close(restore_focus=False)
         if self.search_service is not None:
             self.search_service.close()
+        chat_runtime = getattr(self, 'chat_runtime', None)
+        if chat_runtime is not None:
+            chat_runtime.stop()
         notification_stop = getattr(self, "stop_native_reminders", None)
         if notification_stop is not None:
             notification_stop()
