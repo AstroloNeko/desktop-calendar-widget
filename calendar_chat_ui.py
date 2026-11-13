@@ -173,7 +173,7 @@ class ChatDialog(tk.Toplevel):
         if self.busy:
             return
         self.busy = True
-        self.status.set('正在处理… 日历写入仍需单独确认。')
+        self.status.set('正在处理… 单事项按策略保存，删除需另行确认。')
         self.send_button.configure(state='disabled')
         self.confirm_button.configure(state='disabled')
         self.cancel_button.configure(state='disabled')
@@ -227,11 +227,12 @@ class ChatDialog(tk.Toplevel):
             self.render_operation(self.operation)
         if response.get('operation_result'):
             event = response['operation_result'].get('event')
-            self.append('系统：已实际保存“'+event['title']+'”，日期 '+event['date']+'。' if event else '系统：已核对已执行操作，不重复写入。')
+            self.append('系统：已删除事项。' if response['operation_result'].get('deleted') else
+                        '系统：已实际保存“'+event['title']+'”，日期 '+event['date']+'。' if event else '系统：已核对已执行操作，不重复写入。')
         self.input.focus_set()
 
     def render_operation(self, operation):
-        before, after = operation['preview']['before'] or {}, operation['preview']['after']
+        before, after = operation['preview']['before'] or {}, operation['preview']['after'] or {}
         fields = ('title', 'due', 'has_time', 'event_type', 'reminder', 'duration_days', 'skip_non_working_days', 'end_as_ddl', 'category_id', 'color', 'color_mode', 'notes', 'done')
         labels = dict(title='标题', due='开始日期 / 时间', has_time='有具体时间', event_type='事项性质', reminder='提前提醒（分钟）',
                       duration_days='持续天数', skip_non_working_days='跳过非工作日', end_as_ddl='最后一天作为DDL',

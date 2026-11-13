@@ -62,7 +62,7 @@ class ChatTests(unittest.TestCase):
         self.journal = ChatJournal(self.root/'chat.sqlite3', TestProtection())
         self.provider = ScriptedProvider([])
         self.clock = 1000000
-        self.service = CalendarChatService(self.gateway, self.journal, self.provider, clock=lambda: self.clock)
+        self.service = CalendarChatService(self.gateway, self.journal, self.provider, clock=lambda: self.clock, auto_execute=False)
         self.sid = self.service.new_session()['session_id']
 
     def send(self, replies, message='测试，明确设置：标题、时间、提醒、日期、DDL紧急性质、持续天数、跳过非工作日、末日DDL、分类、颜色、备注、完成状态', request_id=None):

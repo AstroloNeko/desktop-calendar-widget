@@ -25,6 +25,8 @@ FIELDS = {
     "category_id": {"type": ["string", "null"]},
     "color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"},
     "color_mode": {"type": "string", "enum": ["inherit", "override"]},
+    "end_date": text(10),
+    "category_basis": {"type": "string", "enum": ["explicit", "semantic_high"]},
     "reminder": {"type": ["integer", "null"], "minimum": 0, "maximum": 10080},
     "notes": text(2000), "duration_days": {"type": "integer", "minimum": 1, "maximum": 365},
     "skip_non_working_days": {"type": "boolean"}, "end_as_ddl": {"type": "boolean"},
@@ -44,6 +46,7 @@ SCHEMAS = {
     "preview_create": obj(FIELDS, ("title", "date")),
     "preview_update": obj({"event_id": text(100), "changes": obj(FIELDS)}, ("event_id", "changes")),
     "preview_complete": obj({"event_id": text(100), "done": {"type": "boolean"}}, ("event_id", "done")),
+    "preview_delete": obj({"event_id": text(100)}, ("event_id",)),
     "clarify": obj({"question": text(600)}, ("question",)),
 }
 DESCRIPTIONS = {
@@ -53,6 +56,7 @@ DESCRIPTIONS = {
     "preview_create": "仅预览一个新建事项，不执行。只提供用户明确给出的字段：默认只需title/date。不要补全持续天数、颜色、分类、提醒等默认值；无时间省略time，无分类省略category_id/color_mode。日期时间歧义先clarify。",
     "preview_update": "仅预览一个已明确定位事项的局部changes Patch；只传用户本次要求修改的字段！改名只传title，绝不重发完整Event或默认值。可合并同事项尚未确认变更；不执行。",
     "preview_complete": "仅预览完成或取消完成已明确定位的事项；不执行。",
+    "preview_delete": "仅准备删除一个已明确定位事项的确认预览，必须由用户另行确认，不得自动删除。",
     "clarify": "信息不明确时向用户澄清，尤其日期/时间或相对提醒；不能宣称写入成功。",
 }
 TOOLS = [{"type": "function", "function": {"name": name, "description": DESCRIPTIONS[name], "parameters": schema}}

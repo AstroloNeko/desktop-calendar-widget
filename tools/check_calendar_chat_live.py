@@ -13,7 +13,7 @@ import tempfile
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from calendar_core import Store, Event
+from calendar_core import Store, Event, EventCategory, COLORS
 from event_commands import EventCommandHistory
 from calendar_action_gateway import CalendarActionGateway
 from calendar_chat_sessions import ChatJournal
@@ -38,6 +38,7 @@ def main():
     parser.add_argument('--live', action='store_true', help='Explicitly permit <=14 model calls with synthetic data')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--followups', action='store_true', help='Create one synthetic event, then refine the same event across turns')
+    parser.add_argument('--attributes', action='store_true', help='Synthetic semantic classification and explicit palette combinations')
     args = parser.parse_args()
     if not args.live:
         parser.error('Real provider smoke requires explicit --live')
@@ -51,11 +52,15 @@ def main():
         root = Path(temporary)
         store = Store(root/'calendar.json')
         store.events = [Event('qa-cell-event', '细胞实验', '2026-11-22T15:00:37', duration_days=3, color='#123456', notes='仅为隔离测试')]
+        if args.attributes:
+            store.categories = [EventCategory('qa-lab', '实验', '#123456'), EventCategory('qa-meet', '开会')]
         store.save()
         history = EventCommandHistory(store)
         service = CalendarChatService(CalendarActionGateway(store, history),
-            ChatJournal(root/'chat.db', UserProtection()), provider)
+            ChatJournal(root/'chat.db', UserProtection()), provider, auto_execute=False)
         scenarios = [('A', '明天我要做个WB实验')] if args.followups else [('A', '明天我要做个WB实验'), ('B', '11.22开会'), ('C', '把细胞实验那个改成动物实验')]
+        if args.attributes:
+            scenarios = [('purple', '加个11.23做WB，紫色'), ('meeting', '明天下午三点组会，提前半小时提醒')]
         for label, text in scenarios:
             sid = service.new_session()['session_id']
             request = uuid.uuid4().hex
@@ -67,14 +72,18 @@ def main():
             op = response.get('pending_operation')
             if response['status'] == 'confirmation_required' and op:
                 after = op['preview']['after']
-                if label in ('A', 'B'):
+                if args.attributes:
+                    entry['attribute_match'] = (after['category_id'] == ('qa-lab' if label == 'purple' else 'qa-meet') and
+                        ((after['color'] == COLORS['鸢尾紫'] and after['color_mode'] == 'override' and not after['has_time'])
+                         if label == 'purple' else (after['has_time'] and 'T15:00' in after['due'] and after['reminder'] == 30 and after['color_mode'] == 'inherit')))
+                elif label in ('A', 'B'):
                     entry['minimal_defaults'] = (after['duration_days'] == 1 and after['category_id'] is None and
                         after['color_mode'] == 'override' and not after['has_time'] and after['reminder'] is None)
                 else:
                     entry['title_only'] = op['preview']['changed_fields'] == ['title'] and after['title'] == '动物实验'
                 confirmed = service.confirm_operation(sid, op['operation_id'], revision=op['revision'])
                 entry['confirmed_status'] = confirmed['status']
-            entry['passed'] = (entry['unconfirmed_bytes_unchanged'] and entry.get('minimal_defaults', entry.get('title_only', False))
+            entry['passed'] = (entry['unconfirmed_bytes_unchanged'] and entry.get('attribute_match', entry.get('minimal_defaults', entry.get('title_only', False)))
                                and entry.get('confirmed_status') == 'succeeded')
             results.append(entry)
             if provider.calls >= 14:
@@ -107,7 +116,7 @@ def main():
                 if not entry['passed']:
                     break
     report = dict(synthetic_only=True, provider_calls=provider.calls, cases=results,
-                  passed=len(results) == (5 if args.followups else 3) and all(item['passed'] for item in results))
+                  passed=len(results) == (2 if args.attributes else 5 if args.followups else 3) and all(item['passed'] for item in results))
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(report, ensure_ascii=False), flush=True)

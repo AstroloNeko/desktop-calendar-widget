@@ -1,5 +1,8 @@
 # Calendar Chat Service — Phase 1
 
+Latest property adaptation and host execution policy supersede the original
+confirmation-only baseline below: see [AI property adaptation](calendar-chat-attributes.md).
+
 ## Baseline and scope
 
 - Based on `cb0c62b` / v0.10.2, calendar Schema 8 and backup format unchanged.

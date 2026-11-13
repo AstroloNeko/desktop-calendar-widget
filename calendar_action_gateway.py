@@ -1,6 +1,6 @@
 """Sole AI calendar boundary. All Store access runs through the supplied dispatcher."""
 from dataclasses import asdict, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 import hashlib
 import json
 import re
@@ -25,8 +25,8 @@ class CalendarActionGateway:
         return self.dispatch(lambda: self._query(arguments))
 
     def categories(self):
-        return self.dispatch(lambda: {'categories': [{'id': category.id, 'name': category.name}
-                              for category in self.store.sorted_categories()[:100]]})
+        return self.dispatch(lambda: {'categories': [{'id': category.id, 'name': category.name, 'color': category.color}
+                              for category in self.store.sorted_categories()[:100]], 'palette': dict(COLORS)})
 
     def _query(self, args):
         today = date.today()
@@ -57,7 +57,9 @@ class CalendarActionGateway:
                     continue
             elif not global_keyword and not any(start <= day <= end for day in days):
                 continue
-            found.append(self._detail(event))
+            summary = self._detail(event)
+            summary.pop('notes', None)  # Fetch a target's notes only via get_event.
+            found.append(summary)
         found.sort(key=lambda item: (item['date'], item['id']))
         return {'events': found[:30], 'total': len(found), 'truncated': len(found) > 30}
 
@@ -70,7 +72,8 @@ class CalendarActionGateway:
                     category=category.name if category else None, done=event.done,
                     reminder=event.reminder, deadline=days[-1].isoformat() if self.store.event_has_deadline(event) else None,
                     duration_days=event.duration_days, skip_non_working_days=event.skip_non_working_days,
-                    end_as_ddl=event.end_as_ddl, color=self.store.effective_event_color(event))
+                    end_as_ddl=event.end_as_ddl, color=self.store.effective_event_color(event),
+                    color_mode=event.color_mode, color_override=event.color, notes=event.notes)
 
     def detail(self, identifier):
         def read():
@@ -99,6 +102,13 @@ class CalendarActionGateway:
             fail('事项或工作日日历已变化，请重新查询。', 'operation_conflict')
         if name != 'preview_create' and current is None and not (previous and previous['before'] is None):
             fail('事项已不存在。', 'event_not_found')
+        if name == 'preview_delete':
+            if previous:
+                fail('请先确认或取消当前操作，再删除。', 'confirmation_required')
+            return dict(event_id=identifier, before_hash=fingerprint(before), before=asdict(current), after=None,
+                        before_summary=self._detail(current), after_summary=None,
+                        dates=[d.isoformat() for d in self.store.event_dates(current)], deadline=None,
+                        requested_fields=[], changed_fields=['deleted'], description='删除事项')
         candidate = Event(**previous['after']) if previous else replace(current) if current else replace(
             self.store.make_quick_event(args['title'], iso_day(args['date'])), id=identifier)
         if name == 'preview_complete':
@@ -120,6 +130,8 @@ class CalendarActionGateway:
 
     def _patch(self, candidate, values, *, creating=False):
         values = dict(values)
+        values.pop('category_basis', None)
+        end = iso_day(values.pop('end_date')) if 'end_date' in values else None
         change_date = 'date' in values
         change_time = 'time' in values
         try:
@@ -143,7 +155,7 @@ class CalendarActionGateway:
         if values.get('category_id') is not None and self.store.category_by_id(values.get('category_id')) is None:
             fail('分类不存在。', field='category_id')
         if 'category_id' in values and 'color' not in values and 'color_mode' not in values:
-            values['color_mode'] = 'inherit' if values['category_id'] else 'override'
+            values['color_mode'] = ('inherit' if values['category_id'] else 'override') if creating or candidate.color_mode == 'inherit' else 'override'
         if 'color' in values:
             values.setdefault('color_mode', 'override')
         if values.get('color_mode') == 'inherit' and not values.get('category_id', candidate.category_id):
@@ -157,6 +169,16 @@ class CalendarActionGateway:
             fail('此事项没有具体时间，请先确认提醒时刻；不能擅自设置定时提醒。', 'clarification_required', 'reminder')
         for key, value in values.items():
             setattr(candidate, key, value)
+        if end is not None:
+            if end < day or (end-day).days > 1095:
+                fail('结束日期应在开始日期之后且范围合理。', field='end_date')
+            count = sum(not candidate.skip_non_working_days or self.store.is_workday(day+timedelta(days=i))
+                        for i in range((end-day).days+1))
+            if not 1 <= count <= 365:
+                fail('日期范围应包含1至365个有效日期。', field='end_date')
+            candidate.duration_days = count
+            if self.store.event_dates(candidate)[-1] != end:
+                fail('结束日期不是有效工作日，请明确最后执行日期。', 'clarification_required', 'end_date')
         if not candidate.title.strip():
             fail('事项标题不能为空。')
         if candidate.end_as_ddl and (candidate.duration_days == 1 or candidate.event_type == 'ddl'):
@@ -173,17 +195,20 @@ class CalendarActionGateway:
         preview = operation['preview']
         if fingerprint(self._state(preview['event_id'])) != preview['before_hash']:
             fail('事项已被修改，请重新查询和预览。', 'operation_conflict')
-        candidate = Event(**preview['after'])
-        command = self.commands.preview_upsert(candidate, label='AI确认事项操作')
-        if asdict(command.event()) != preview['after'] or [d.isoformat() for d in command.effective_dates] != preview['dates']:
-            fail('分类或工作日日历已变化，请重新预览。', 'operation_conflict')
+        deleting = preview['after'] is None
+        if not deleting:
+            candidate = Event(**preview['after'])
+            command = self.commands.preview_upsert(candidate, label='AI确认事项操作')
+            if asdict(command.event()) != preview['after'] or [d.isoformat() for d in command.effective_dates] != preview['dates']:
+                fail('分类或工作日日历已变化，请重新预览。', 'operation_conflict')
         operation['status'] = 'executing'
         journal.put('operation', operation['operation_id'], owner, operation)
         try:
-            change = self.commands.commit(command)
+            change = self.commands.delete(preview['event_id']) if deleting else self.commands.commit(command)
         except (OSError, ValueError) as error:
             raise ChatError('execution_failed', '日历保存未成功，未应用此修改。') from error
-        result = dict(event=self._detail(self.store.event_by_id(preview['event_id'])), changed=change is not None)
+        result = dict(event=None if deleting else self._detail(self.store.event_by_id(preview['event_id'])),
+                      deleted=deleting, event_id=preview['event_id'], changed=change is not None)
         operation.update(status='succeeded', operation_result=result)
         # If this write fails, durable 'executing' remains; recovery NEVER replays it.
         journal.put('operation', operation['operation_id'], owner, operation)
@@ -194,6 +219,8 @@ class CalendarActionGateway:
     def recover(self, operation):
         def check():
             event = self.store.event_by_id(operation['preview']['event_id'])
+            if operation['preview']['after'] is None:
+                return event is None
             return event is not None and asdict(event) == operation['preview']['after']
         return self.dispatch(check)
 

@@ -10,6 +10,7 @@ import re
 def requested_fields(message, creating=False):
     text = message.casefold()
     fields = {'title', 'date'} if creating else set()
+    generic_change = False
     rename = re.search(r'改名(?:为|叫|成)?|重命名(?:为|成)?|改叫|改成|改为|rename', text)
     if rename and not creating:
         tail = text[rename.end():].strip(' ：:为')
@@ -17,7 +18,8 @@ def requested_fields(message, creating=False):
         # Names can themselves contain “提醒/颜色/持续三天”. Do not treat those
         # words as extra instructions in a rename. Explicit time/type values
         # after generic 改为/改成 remain ordinary field changes.
-        generic_value = re.fullmatch(r'紧急|一般|普通|ddl|urgent|general|(?:上午|下午|晚上)?[\d一二三四五六七八九十两]+点(?:半)?|\d{1,2}:\d{2}|明天|后天|今天|\d{1,2}[./-]\d{1,2}|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}[日号]?', first.strip())
+        generic_value = re.fullmatch(r'[红黄绿蓝紫橙]色|跟随分类颜色|持续\d+天|紧急|一般|普通|ddl|urgent|general|(?:上午|下午|晚上)?[\d一二三四五六七八九十两]+点(?:半)?|\d{1,2}:\d{2}|明天|后天|今天|\d{1,2}[./-]\d{1,2}|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}[日号]?', first.strip())
+        generic_change = bool(generic_value)
         if rename.group() not in ('改成', '改为') or not generic_value:
             fields.add('title')
             text = rest[0] if rest else ''
@@ -29,15 +31,15 @@ def requested_fields(message, creating=False):
         'duration_days': r'持续|连续|为期|天数|(?:\d+|[一二三四五六七八九十]+)(?:个)?(?:工作日|天)|duration',
         'skip_non_working_days': r'跳过|避开|仅工作日|只.{0,3}工作日|不含周末|skip',
         'end_as_ddl': r'最后一天|末日|最后.{0,3}(?:截止|ddl)|end.as.ddl',
-        'category_id': r'分类|归类|归入|归到|category',
-        'color': r'颜色|色条|配色|#[0-9a-f]{6}|color',
-        'color_mode': r'跟随.{0,4}(?:分类|颜色)|继承.{0,4}颜色|独立颜色|单独颜色|颜色来源|color.mode',
+        'category_id': r'分类|不分类|类|归入|归到|category',
+        'color': r'颜色|色条|配色|[红黄绿蓝紫橙]色|#[0-9a-f]{6}|color',
+        'color_mode': r'跟随.{0,4}(?:分类|颜色)|颜色跟.{0,12}分类|继承.{0,4}颜色|独立颜色|单独颜色|颜色来源|color.mode',
         'notes': r'备注|补充说明|附注|notes?',
     }
     for key, pattern in signals.items():
         if re.search(pattern, text):
             fields.add(key)
-    if re.search(r'改名|重命名|改叫|标题|名称|rename|title|改[成为]', text):
+    if re.search(r'改名|重命名|改叫|标题|名称|rename|title', text) or (not generic_change and re.search(r'改[成为]', text)):
         fields.add('title')
     return fields
 
