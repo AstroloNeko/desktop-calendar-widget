@@ -197,7 +197,7 @@ class ChatDialog(tk.Toplevel):
             if self.session_id in self.session_ids:
                 self.sessions.current(self.session_ids.index(self.session_id))
         if response.get('error_message'):
-            self.status.set(response['error_message'])
+            self.status.set('本次请求未完成；详细提示见对话区。')
             self.append('系统：'+response['error_message'])
         else:
             self.status.set('状态：'+response.get('status', 'ok'))
@@ -249,6 +249,8 @@ class ChatDialog(tk.Toplevel):
                 return '是' if value else '否'
             return {'general': '一般', 'urgent': '紧急', 'ddl': 'DDL', 'inherit': '跟随分类', 'override': '单独颜色'}.get(str(value), str(value))
         for field in fields:
+            if not before and field not in {'title', 'due', 'has_time', 'event_type'} | set(operation['preview'].get('requested_fields', fields)):
+                continue
             if before.get(field) != after.get(field):
                 lines.append(f"{labels[field]}：{display_value(field, before.get(field), 'before')} → {display_value(field, after.get(field), 'after')}")
         self.append('\n'.join(lines))

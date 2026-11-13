@@ -65,7 +65,7 @@ class ChatTests(unittest.TestCase):
         self.service = CalendarChatService(self.gateway, self.journal, self.provider, clock=lambda: self.clock)
         self.sid = self.service.new_session()['session_id']
 
-    def send(self, replies, message='测试', request_id=None):
+    def send(self, replies, message='测试，明确设置：标题、时间、提醒、日期、DDL紧急性质、持续天数、跳过非工作日、末日DDL、分类、颜色、备注、完成状态', request_id=None):
         self.provider.replies = list(replies)
         return self.service.send_message(self.sid, message, request_id or ('request-'+str(len(self.provider.messages))+str(threading.get_ident())))
 
@@ -463,6 +463,22 @@ class HTTPTests(unittest.TestCase):
     def test_http_rate_limit_and_no_cors_grant(self):
         self.http.rate.extend([__import__('time').monotonic()]*120)
         self.assertEqual(self.request('/v1/health')[0], 429)
+
+    def test_http_multi_read_and_title_patch_share_service_and_confirmation(self):
+        from test_calendar_chat_orchestration import batch
+        self.provider.replies = [batch(tool('query_events', {'keyword': '实验室'}),
+                                      tool('get_event', {'event_id': 'event-one'}),
+                                      tool('preview_update', {'event_id': 'event-one', 'changes': {'title': '动物实验'}}))]
+        status, response = self.request('/v1/chat/messages', {'session_id': self.sid,
+            'message': '把实验室组会改成动物实验', 'request_id': 'http-multi-tool-request'})
+        self.assertEqual(status, 200)
+        self.assertEqual(response['status'], 'confirmation_required')
+        op = response['pending_operation']
+        self.assertEqual(op['preview']['changed_fields'], ['title'])
+        self.assertEqual(self.commands.undo_count, 0)
+        _, done = self.request('/v1/operations/'+op['operation_id']+'/confirm', {'session_id': self.sid, 'revision': op['revision']})
+        self.assertEqual(done['status'], 'succeeded')
+        self.assertEqual(self.commands.undo_count, 1)
 
 
 class DispatchTests(unittest.TestCase):

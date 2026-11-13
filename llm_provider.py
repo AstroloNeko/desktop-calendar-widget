@@ -96,6 +96,9 @@ class DeepSeekProvider:
         self.configuration = configuration
 
     def complete(self, messages, tools):
+        return self.complete_bounded(messages, tools, 90)
+
+    def complete_bounded(self, messages, tools, remaining):
         config = self.configuration.load()
         if not config.get('consent') or not config.get('api_key'):
             raise ChatError('model_unavailable', '请先配置自己的模型密钥，并确认远程数据传输说明。')
@@ -105,7 +108,7 @@ class DeepSeekProvider:
         request = urllib.request.Request(endpoint, data=body, headers={
             'Content-Type': 'application/json', 'Authorization': 'Bearer '+config['api_key']})
         try:
-            with urllib.request.build_opener(NoRedirect()).open(request, timeout=config['timeout']) as response:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=max(.1, min(config['timeout'], remaining))) as response:
                 raw = response.read(262145)
                 if len(raw) > 262144:
                     raise ValueError('large response')

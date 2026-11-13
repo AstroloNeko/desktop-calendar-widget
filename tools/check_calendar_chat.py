@@ -118,8 +118,15 @@ def check_product(executable):
 
 class MockProvider:
     def complete(self, messages, tools):
-        return {'tool_calls': [{'id': 'qa-tool', 'type': 'function', 'function': {'name': 'preview_create',
+        return {'tool_calls': [{'id': 'qa-read', 'type': 'function', 'function': {'name': 'list_categories', 'arguments': '{}'}},
+                              {'id': 'qa-tool', 'type': 'function', 'function': {'name': 'preview_create',
             'arguments': json.dumps({'title': '隔离AI测试事项', 'date': date.today().isoformat(), 'event_type': 'ddl'})}}]}
+
+
+class InvalidBatchProvider:
+    def complete(self, messages, tools):
+        return {'tool_calls': [{'id': 'invalid-'+str(index), 'type': 'function', 'function': {'name': 'preview_create',
+            'arguments': json.dumps({'title': '不应创建', 'date': date.today().isoformat()})}} for index in range(2)]}
 
 
 def wait(app, condition, message, timeout=12):
@@ -172,6 +179,16 @@ def main():
                         chat.send()
                         wait(app, lambda: not chat.busy, 'LLM preview')
                         assert len(store.events) == before and chat.operation['status'] == 'pending'
+                        original_operation = chat.operation
+                        runtime.service.provider = InvalidBatchProvider()
+                        chat.input.insert('1.0', '继续处理单事项')
+                        chat.send()
+                        wait(app, lambda: not chat.busy, 'safe invalid-batch feedback')
+                        assert chat.operation == original_operation
+                        assert chat.confirm_button.cget('state') == 'normal'
+                        assert '详细提示见对话区' in chat.status.get()
+                        assert '第一阶段' not in chat.status.get()
+                        runtime.service.provider = MockProvider()
                         chat.confirm()
                         wait(app, lambda: not chat.busy, 'confirmation')
                         assert len(store.events) == before+1

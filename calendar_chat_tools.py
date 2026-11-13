@@ -4,13 +4,14 @@ from datetime import date, datetime, timedelta
 
 
 class ChatError(ValueError):
-    def __init__(self, code, message):
+    def __init__(self, code, message, field=None):
         super().__init__(message)
         self.code = code
+        self.field = field
 
 
-def fail(message, code="invalid_arguments"):
-    raise ChatError(code, message)
+def fail(message, code="invalid_arguments", field=None):
+    raise ChatError(code, message, field)
 
 
 def text(limit):
@@ -49,8 +50,8 @@ DESCRIPTIONS = {
     "list_categories": "读取现有分类的稳定ID和名称，供筛选及创建事项使用；不修改分类。",
     "query_events": "查询真实事项；日期为含端点 YYYY-MM-DD，范围最多366天。无条件查询仅本月。多结果不可自行选择。",
     "get_event": "读取本会话查询过的稳定Event ID的详情；不允许猜ID。",
-    "preview_create": "仅预览新建，不执行；date必填。time=null为无时间；歧义先clarify。",
-    "preview_update": "仅预览修改已明确定位的事项，可合并本会话未确认变更；不执行。",
+    "preview_create": "仅预览一个新建事项，不执行。只提供用户明确给出的字段：默认只需title/date。不要补全持续天数、颜色、分类、提醒等默认值；无时间省略time，无分类省略category_id/color_mode。日期时间歧义先clarify。",
+    "preview_update": "仅预览一个已明确定位事项的局部changes Patch；只传用户本次要求修改的字段！改名只传title，绝不重发完整Event或默认值。可合并同事项尚未确认变更；不执行。",
     "preview_complete": "仅预览完成或取消完成已明确定位的事项；不执行。",
     "clarify": "信息不明确时向用户澄清，尤其日期/时间或相对提醒；不能宣称写入成功。",
 }
@@ -58,29 +59,29 @@ TOOLS = [{"type": "function", "function": {"name": name, "description": DESCRIPT
          for name, schema in SCHEMAS.items()]
 
 
-def validate(value, schema):
+def validate(value, schema, path='arguments'):
     types = schema.get("type", [])
     types = [types] if isinstance(types, str) else types
     valid = {"null": value is None, "string": isinstance(value, str), "integer": type(value) is int,
              "boolean": type(value) is bool, "object": type(value) is dict}
     if not any(valid.get(kind, False) for kind in types):
-        fail("工具参数类型不正确。")
+        fail("工具参数类型不正确。", field=path)
     if value is None:
         return
     if "enum" in schema and value not in schema['enum']:
-        fail("工具参数不在允许范围内。")
+        fail("工具参数不在允许范围内。", field=path)
     if isinstance(value, str):
         if not schema.get('minLength', 0) <= len(value) <= schema.get('maxLength', 2000):
-            fail("文本长度不正确。")
+            fail("文本长度不正确。", field=path)
         if 'pattern' in schema and not re.fullmatch(schema['pattern'], value):
-            fail("颜色格式不正确。")
+            fail("颜色格式不正确。", field=path)
     if type(value) is int and not schema.get('minimum', value) <= value <= schema.get('maximum', value):
-        fail("数值超出允许范围。")
+        fail("数值超出允许范围。", field=path)
     if type(value) is dict:
         if set(value) - set(schema['properties']) or set(schema['required']) - set(value):
-            fail("工具参数包含未知字段或缺少必需字段。")
+            fail("工具参数包含未知字段或缺少必需字段。", field=path)
         for key, item in value.items():
-            validate(item, schema['properties'][key])
+            validate(item, schema['properties'][key], path+'.'+key)
 
 
 def validate_call(name, arguments):
