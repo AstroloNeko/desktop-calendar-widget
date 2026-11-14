@@ -11,7 +11,8 @@ from typing import Any, Callable, Collection, Optional
 
 from holiday_data import is_workday as system_is_workday
 from ui_theme import DEFAULT_THEME_NAME, normalize_theme_name
-from habit_schedule import habit_scheduled_on, normalize_schedule
+from habit_schedule import habit_scheduled_on, normalize_schedule, rule_on, preserve_schedule_history
+from copy import deepcopy
 from data_compat import DATA_SCHEMA_VERSION, DataCompatibilityError, decode_calendar_data
 from version import __version__
 
@@ -293,6 +294,7 @@ class RoutineItem:
     # Direct/legacy constructors retain the historic workday-only behavior.
     # The new editor explicitly chooses False for a new everyday habit.
     workdays_only: bool = True
+    schedule_history: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.created_on:
@@ -324,6 +326,19 @@ class RoutineItem:
         if self.reminder_time is None:
             self.reminder_enabled = False
         normalize_schedule(self)
+        if not isinstance(self.schedule_history, list):
+            raise ValueError('invalid habit schedule history')
+        from habit_schedule import SCHEDULE_FIELDS, validate_schedule_input
+        boundaries = []
+        for entry in self.schedule_history:
+            boundary = date.fromisoformat(entry['until']).isoformat()
+            rule = validate_schedule_input(**entry['rule'])
+            if set(entry['rule']) != set(SCHEDULE_FIELDS):
+                raise ValueError('invalid historic rule')
+            entry['rule'] = rule
+            boundaries.append(boundary)
+        if boundaries != sorted(set(boundaries)):
+            raise ValueError('invalid historic rule boundaries')
 
     @property
     def created_date(self) -> date:
@@ -434,6 +449,8 @@ class Store:
                 try:
                     routines.append(RoutineItem.from_dict(item))
                 except (TypeError, ValueError, KeyError):
+                    if isinstance(item, dict) and 'schedule_history' in item:
+                        raise DataCompatibilityError('习惯历史规则无效，已拒绝加载和覆盖，请保留原文件。')
                     continue
             self.routines = routines
             date_states = raw.get("date_states", {})
@@ -718,6 +735,18 @@ class Store:
         )
 
     def upsert_routine(self, item: RoutineItem) -> None:
+        item = self.prepare_routine(item)
+        self.persist_routine(item)
+
+    def prepare_routine(self, item: RoutineItem) -> RoutineItem:
+        candidate = deepcopy(item)
+        previous = next((r for r in self.routines if r.id == item.id), None)
+        if previous:
+            preserve_schedule_history(previous, candidate)
+        return candidate
+
+    def persist_routine(self, item: RoutineItem) -> None:
+        before_items, before_notified = list(self.routines), set(self.notified)
         previous = next((existing for existing in self.routines if existing.id == item.id), None)
         if previous is None:
             self.routines.append(item)
@@ -731,7 +760,11 @@ class Store:
             or previous.created_on != item.created_on
         ):
             self.clear_routine_notifications(item.id)
-        self.save()
+        try:
+            self.save()
+        except BaseException:
+            self.routines, self.notified = before_items, before_notified
+            raise
 
     def delete_routine(self, item_id: str) -> None:
         self.routines = [item for item in self.routines if item.id != item_id]
@@ -756,8 +789,9 @@ class Store:
         if item.kind == "todo":
             return (day >= item.created_date and self.is_workday(day)
                     and (not item.completed_on or day <= date.fromisoformat(item.completed_on)))
-        return (habit_scheduled_on(item, day)
-                and (not item.workdays_only or self.is_workday(day)))
+        rule = rule_on(item, day)
+        return (habit_scheduled_on(rule, day)
+                and (not rule.workdays_only or self.is_workday(day)))
 
     def routine_progress(self, item: RoutineItem, start: date, end: date) -> tuple[int, int]:
         """(planned, completed) for an explicit period; non-plan days never count."""

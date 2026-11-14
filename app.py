@@ -1812,12 +1812,14 @@ class RoutineEditor(tk.Toplevel):
             created_on=self.item.created_on if self.item else date.today().isoformat(),
             completed_on=self.item.completed_on if self.item else None,
             habit_done=list(self.item.habit_done) if self.item else [],
+            schedule_history=list(self.item.schedule_history) if self.item else [],
             enabled=self.item.enabled if self.item else True,
             reminder_enabled=self.reminder_enabled_var.get(),
             reminder_time=reminder_time,
             **schedule,
         )
-        self.master_app.store.upsert_routine(item)
+        self.master_app.event_commands.upsert_routine(item)
+        self.master_app.invalidate_reminders()
         self.master_app.render()
         if self.master_app.routine_manager and self.master_app.routine_manager.winfo_exists():
             self.master_app.routine_manager.refresh()
@@ -6655,6 +6657,12 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         return True
 
     def _refresh_event_change(self, change: EventChange | BatchChange, *, focus_day: Optional[date] = None) -> None:
+        if getattr(change, 'routine_id', None):
+            self.invalidate_reminders()
+            self.render()
+            if self.routine_manager and self.routine_manager.winfo_exists():
+                self.routine_manager.refresh()
+            return
         if hasattr(self, "invalidate_reminders"):
             self.invalidate_reminders()
         if getattr(self, "search_service", None) is not None:

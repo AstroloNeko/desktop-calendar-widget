@@ -216,12 +216,15 @@ class ChatDialog(tk.Toplevel):
             self.transcript.configure(state='disabled')
             for item in response['messages']:
                 self.append(('你：' if item['role'] == 'user' else '助理：')+item['content'])
-        self.candidates = response.get('candidates', [])
-        self.candidate.configure(values=[f"{i+1}. {item['title']} · {item['date']} {item.get('time') or ''}" for i, item in enumerate(self.candidates)])
+        self.candidates = response.get('habit_candidates') or response.get('candidates', [])
+        self.candidate.configure(values=[f"{i+1}. {item['title']} · {item.get('schedule') or item.get('date', '')}" for i, item in enumerate(self.candidates)])
         self.candidate.set('')
         if self.candidates:
             types = {'general': '一般', 'urgent': '紧急', 'ddl': 'DDL'}
             for index, event in enumerate(self.candidates, 1):
+                if event.get('object_type') == 'habit':
+                    self.append(f"{index}. {event['title']} · {event['schedule']}")
+                    continue
                 status = '已完成' if event['done'] else '未完成'
                 reminder = '不提醒' if event['reminder'] is None else f"提前{event['reminder']}分钟"
                 self.append(f"{index}. {event['title']}\n{event['date']} 至 {event['end']} {event['time'] or '无具体时间'}\n"
@@ -235,7 +238,7 @@ class ChatDialog(tk.Toplevel):
         if response.get('operation_result'):
             habit = response['operation_result'].get('habit')
             event = response['operation_result'].get('event')
-            self.append('✓ 已创建习惯「'+habit['title']+'」· '+habit['schedule'] if habit else
+            self.append('✓ 已'+('更新' if response['operation_result'].get('action') == 'updated' else '创建')+'习惯「'+habit['title']+'」· '+habit['schedule'] if habit else
                         '系统：已删除事项。' if response['operation_result'].get('deleted') else
                         '系统：已实际保存“'+event['title']+'”，日期 '+event['date']+'。' if event else '系统：已核对已执行操作，不重复写入。')
         self.input.focus_set()

@@ -135,6 +135,14 @@ class HabitProvider:
             'name': 'preview_create_habit', 'arguments': json.dumps(dict(title='隔离组会习惯', frequency='weekly', weekdays=[0]))}}]}
 
 
+class HabitEditProvider:
+    def complete(self, messages, tools):
+        state = json.loads(messages[0]['content'].split('\n', 1)[1])
+        return {'tool_calls': [{'id': 'qa-habit-edit', 'type': 'function', 'function': {
+            'name': 'preview_update_habit', 'arguments': json.dumps(dict(habit_id=state['selected_object']['id'],
+                changes=dict(frequency='weekly', weekdays=[1, 3], color='#ffffff')))}}]}
+
+
 def wait(app, condition, message, timeout=12):
     end = time.monotonic()+timeout
     while time.monotonic() < end:
@@ -226,12 +234,24 @@ def main():
                         assert store.routines[-1].kind == 'habit' and store.routines[-1].weekdays == [0]
                         assert chat.operation['status'] == 'succeeded'
                         assert '已创建习惯' in chat.transcript.get('1.0', 'end')
+                        identifier = store.routines[-1].id
+                        runtime.service.provider = HabitEditProvider()
+                        chat.input.insert('1.0', '改成每周二四，颜色绿色')
+                        chat.send()
+                        wait(app, lambda: not chat.busy, 'habit edit persisted')
+                        assert store.routines[-1].id == identifier and store.routines[-1].weekdays == [1, 3]
+                        assert '已更新习惯' in chat.transcript.get('1.0', 'end')
                         chat.close()
                         pump(app, .08)
                         assert app.grab_current() is None
+                        app.undo_event()
+                        assert store.routines[-1].weekdays == [0]
+                        app.redo_event()
+                        assert store.routines[-1].weekdays == [1, 3]
                         cases.append((theme, view))
                 # HTTP worker requests same service; UI pumps the only Store dispatcher.
                 runtime.http = LocalChatHTTP(runtime.service, 'Q'*48, port=0)
+                runtime.service.provider = HabitProvider()
                 runtime.http.start()
                 results = []
                 import threading
@@ -245,6 +265,10 @@ def main():
                         sid = post('/v1/sessions', {})['session_id']
                         response = post('/v1/chat/messages', dict(session_id=sid, message='新增习惯，每周一开组会，紫色', request_id='frozen-http-qa-request'))
                         assert response['operation_result']['object_type'] == 'habit'
+                        runtime.service.provider = HabitEditProvider()
+                        changed = post('/v1/chat/messages', dict(session_id=sid, message='改成每周二四，颜色绿色', request_id='frozen-http-edit-request'))
+                        assert changed['operation_result']['action'] == 'updated'
+                        assert changed['operation_result']['habit_id'] == response['operation_result']['habit_id']
                         preview = response['pending_operation']
                         op = preview['operation_id']
                         confirmed = post('/v1/operations/'+op+'/confirm', {'session_id': sid, 'revision': preview['revision']})

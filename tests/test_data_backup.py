@@ -83,7 +83,8 @@ class DataBackupTests(unittest.TestCase):
         self.make()
         manifest, data = read_backup(self.backup)
         self.assertEqual(manifest["format_version"], 1)
-        self.assertEqual(manifest["schema_version"], 8)
+        from data_compat import DATA_SCHEMA_VERSION
+        self.assertEqual(manifest["schema_version"], DATA_SCHEMA_VERSION)
         self.assertEqual(manifest["files"]["calendar_data.json"]["sha256"], hashlib.sha256(data).hexdigest())
         with zipfile.ZipFile(self.backup) as p:
             self.assertEqual(set(p.namelist()), {"manifest.json", "calendar_data.json"})
@@ -116,7 +117,8 @@ class DataBackupTests(unittest.TestCase):
 
     def test_sha_mismatch(self):
         self.make()
-        self.rewrite(mutate_data=lambda d: d.replace(b'"version": 8', b'"version": 6'))
+        from data_compat import DATA_SCHEMA_VERSION
+        self.rewrite(mutate_data=lambda d: d.replace(f'"version": {DATA_SCHEMA_VERSION}'.encode(), b'"version": 6'))
         with self.assertRaises(BackupError):
             read_backup(self.backup)
 

@@ -153,9 +153,9 @@ class HabitChatTests(unittest.TestCase):
         session = self.service.get_session(self.sid)
         self.assertEqual(session['selected_kind'], 'habit')
         self.assertEqual(session['selected'], result['operation_result']['habit_id'])
-        result = self.send([], '改成每周一和周四')
-        self.assertEqual(result['status'], 'clarification_required')
-        self.assertIn('尚不支持', result['assistant_message'])
+        result = self.send([fixture.tool('preview_update_habit', {'habit_id': session['selected'], 'changes': {'frequency': 'weekly', 'weekdays': [0, 3]}})], '改成每周一和周四')
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(self.store.routines[0].weekdays, [0, 3])
 
     def test_failed_save_rolls_back_and_history_remains(self):
         old = RoutineItem('old', '旧习惯', habit_done=['2026-11-01'])

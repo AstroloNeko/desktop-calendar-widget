@@ -40,6 +40,7 @@ def main():
     parser.add_argument('--followups', action='store_true', help='Create one synthetic event, then refine the same event across turns')
     parser.add_argument('--attributes', action='store_true', help='Synthetic semantic classification and explicit palette combinations')
     parser.add_argument('--habits', action='store_true', help='Synthetic actual Habit 2.0 creation, two requests')
+    parser.add_argument('--habit-edits', action='store_true', help='Follow up synthetic habit with scoped changes')
     args = parser.parse_args()
     if not args.live:
         parser.error('Real provider smoke requires explicit --live')
@@ -61,14 +62,30 @@ def main():
             ChatJournal(root/'chat.db', UserProtection()), provider, auto_execute=False)
         if args.habits:
             service.auto_execute = True
+            created = []
             for text, frequency, interval in [('新增习惯，每周一开组会，紫色', 'weekly', 1), ('每隔3天做一次PCR', 'daily', 3)]:
                 sid = service.new_session()['session_id']
                 request = uuid.uuid4().hex
                 response = service.send_message(sid, text, request)
                 item = store.routines[-1] if response['status'] == 'succeeded' else None
+                created.append((sid, item.id if item else None))
                 results.append(dict(status=response['status'], diagnostic=service.get_diagnostics(request),
                     passed=item is not None and item.kind == 'habit' and item.frequency == frequency and item.interval == interval
                     and (frequency != 'weekly' or item.weekdays == [0] and item.color == COLORS['鸢尾紫'])))
+            if args.habit_edits:
+                sid, identifier = created[0]
+                for text, expected in [('改成每周一和周四', lambda r: r.frequency == 'weekly' and r.weekdays == [0, 3]),
+                                       ('颜色换成绿色', lambda r: r.color == COLORS['薄荷绿']),
+                                       ('以后只在工作日执行', lambda r: r.workdays_only),
+                                       ('把提醒改成早上九点', lambda r: r.reminder_enabled and r.reminder_time == '09:00'),
+                                       ('提醒关掉', lambda r: not r.reminder_enabled)]:
+                    request = uuid.uuid4().hex
+                    response = service.send_message(sid, text, request)
+                    current = next(r for r in store.routines if r.id == identifier)
+                    results.append(dict(status=response['status'], diagnostic=service.get_diagnostics(request),
+                        passed=response['status'] == 'succeeded' and response['operation_result']['habit_id'] == identifier and expected(current)))
+                    if not results[-1]['passed']:
+                        break
             report = dict(synthetic_only=True, provider_calls=provider.calls, cases=results,
                           passed=all(entry['passed'] for entry in results) and len(store.events) == 1)
             args.report.parent.mkdir(parents=True, exist_ok=True)

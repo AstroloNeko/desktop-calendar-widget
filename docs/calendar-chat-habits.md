@@ -2,9 +2,9 @@
 
 This is a scoped addition to Calendar Chat, not a second recurring Event system.
 The GUI constructs `RoutineItem(kind='habit')` using `validate_schedule_input`
-and persists through `Store.upsert_routine`. The new gateway uses the same strict
-validator, model and Store method. `habit_schedule.py`, Event models, calendar
-schema, existing completion history and reminder date rules are unchanged.
+and persists through Store. GUI and AI now share RoutineCommand on the existing
+EventCommandHistory stack and Store persistence. The matching recurrence algorithm
+and Event model remain unchanged; Schema 9 adds historical rule snapshots.
 
 ## Tool and mapping
 
@@ -44,17 +44,17 @@ Explicit no-reminder takes precedence over model defaults.
   Durable executing receipts reconcile by stable Habit ID/full state, never replay
   automatically after a crash. A successful save is not replayed if UI refresh fails.
 - Session identity records selected_kind and stable ID. Provider context contains
-  typed selected_object; the Event-ID context is empty for a Habit. Follow-up habit
-  edits/completion/deletion are explicitly unsupported, never passed to Event tools.
+  typed selected_object; the Event-ID context is empty for a Habit. Query/detail
+  tools establish real candidates, and edits require a selected Habit ID. Multiple
+  same-name candidates require UI/number selection, never the model's first guess.
 - Source UI and HTTP use the same service. UI result is a concise habit title and
   schedule, not the Event change table. Main-thread refresh invalidates reminders,
   redraws the current view and refreshes an open habit manager without restart.
 
 ## Limitations and checks
 
-The existing command history supports Events only. This phase does not fabricate a
-separate Habit Undo history; created habits can be edited/deleted in Habit Manager.
-AI Habit modification/deletion/check-in is out of scope. Next-occurrence display
+AI Habit deletion/check-in and conversion to one-shot todo remain out of scope.
+Next-occurrence display
 searches at most eight years and may be null for long intervals; this is only a
 display hint and never limits persistence or scheduler recurrence.
 
@@ -65,7 +65,47 @@ This is finite model evidence, not proof of all natural-language phrasings.
 QA EXEs are built only under ignored build/, not release/. The physical Windows
 display is 192 DPI (200%); no claim of five physical DPI environments.
 
-Verification total: 898 tests (878 baseline + 20 new habit-focused tests with
-parameterized cases). Source and frozen QA each pass eight theme/view cases,
-including real Habit persistence, concise UI result, modal cleanup and loopback
-HTTP. Event Undo smoke remains Event-only, not a claim of Habit Undo support.
+The initial creation baseline passed 898 tests. The editing extension additionally
+checks scoped patches, temporal stats, conflict/duplicate/concurrent requests,
+backup/restart, migration, unified Undo/Redo, four-theme GUI and authenticated HTTP.
+
+## Editing extension and compatibility
+
+- New tools: query_habits, get_habit, preview_update_habit(habit_id, changes).
+  Query results exclude raw check-in/history arrays. Detail reads expose editable
+  attributes, not private historical records. One user edit is one atomic command.
+- Only requested fields survive the patch scope. Editing color cannot reset title,
+  reminder or dates. Weekly changes cannot contaminate dormant month/year fields.
+  Reminder-off keeps the existing clock; explicit clock edits enable reminders.
+  Year-end/endless and next-month starts are mapped to the same model fields.
+- A rule change takes effect on the local calendar date of the change. Earlier
+  dates choose archived rules; matching is still habit_scheduled_on plus Store's
+  workday calendar. Multiple changes on the same date retain only the original
+  before-date snapshot. Existing habit_done and completed_on records are untouched.
+  This preserves past planned-date/statistics denominators, not just check-ins.
+  Rules before this feature existed cannot be reconstructed: migration treats the
+  previously persisted rule as historical truth. Changes to holiday/leave calendar
+  data itself still follow Store's live calendar; no holiday-version system added.
+- schedule_history is per Habit, not a second recurring task model. Schema 8 and
+  earlier load with empty history; existing migration checkpoints preserve original
+  bytes before the first Schema 9 save. Backup container version is unchanged.
+  Old Schema-8 programs safely refuse Schema 9 instead of silently dropping rule
+  archives. Invalid archives fail loading/saving closed. Test development versions
+  with isolated data; an old released EXE cannot read the new format.
+- RoutineCommand uses the existing session-local global undo/redo stack. Rule,
+  attributes and rule archives restore atomically; check-ins made after the command
+  survive undo/redo. A changed/deleted target conflicts rather than overwriting.
+  Undo of creation is blocked when check-in records already exist. GUI edits use
+  this same history, not a parallel AI stack; reminder/UI refresh works on undo.
+- Explicit edit requests that stop after a model read get at most the existing
+  bounded repair budget, never a fabricated write result. The first live run (6
+  calls) stopped after reading an already-green target; the second used the purple
+  target and passed creation plus weekday/color/workday/reminder-time/off followups
+  in 11 calls, all synthetic. These finite samples do not establish universal NL
+  accuracy; ordinary ambiguity still clarifies.
+
+Editing verification: 915 total automated tests (898 creation baseline + 17 new
+editing tests with subcases), Python compile and diff checks passed. Source and
+frozen QA each passed eight four-theme × Compact/Global cases at physical 192 DPI,
+including consecutive edits, same-stack Undo/Redo, reminder invalidation, modal
+cleanup and authenticated HTTP edits. No production profile or Release was used.

@@ -13,8 +13,8 @@ from calendar_chat_tools import ChatError, TOOLS, SCHEMAS, validate_call, reques
 from calendar_chat_attributes import adapt_attributes
 
 OWNER = 'local-owner'  # Derived from the adapter's authentication, never client sender_id.
-READ_TOOLS = {'list_categories', 'query_events', 'get_event'}
-PROPOSAL_TOOLS = {'preview_create', 'preview_update', 'preview_complete', 'preview_delete', 'preview_create_habit'}
+READ_TOOLS = {'list_categories', 'query_events', 'get_event', 'query_habits', 'get_habit'}
+PROPOSAL_TOOLS = {'preview_create', 'preview_update', 'preview_complete', 'preview_delete', 'preview_create_habit', 'preview_update_habit'}
 MAX_ROUNDS, MAX_CALLS, MAX_BATCH, MAX_REPAIRS = 6, 18, 8, 2
 PLANNING_SECONDS = 90
 
@@ -150,16 +150,42 @@ class CalendarChatService:
     def select_candidate(self, session_id, event_id, owner=OWNER):
         with self.lock:
             session = self.get_session(session_id, owner)
+            if event_id in [r['id'] for r in session.get('habit_candidates', [])]:
+                self.gateway.habit_detail(event_id)
+                session.update(selected=event_id, selected_kind='habit')
+                self.journal.put('session', session_id, owner, session)
+                return envelope(session_id, assistant_message='已选择该习惯，请继续描述修改。')
             if event_id not in [item['id'] for item in session['candidates']]:
                 fail('请选择本会话列出的事项。', 'invalid_arguments')
             self.gateway.detail(event_id)  # Recheck existence, not a guessed title match.
             session['selected'], session['clarification'] = event_id, None
+            session['selected_kind'] = 'event'
             self.journal.put('session', session_id, owner, session)
             return envelope(session_id, assistant_message='已选择该事项，请继续描述修改内容。')
 
     def _tool(self, name, args, session, owner, request_id, source, message='', diagnostic=None, continuation=(), target_lock=None):
         validate_call(name, args)
         args = deepcopy(args)
+        if name == 'query_habits':
+            result = self.gateway.query_habits(args)
+            locked = session['selected'] if session.get('selected_kind') == 'habit' and re.search(r'刚才|这个习惯|它', message) else None
+            session['habit_candidates'] = result['habits']
+            session['candidates'] = []
+            session['selected_kind'] = 'habit'
+            session['selected'] = locked or (result['habits'][0]['id'] if result['total'] == 1 else None)
+            return result
+        if name == 'get_habit':
+            known = {r['id'] for r in session.get('habit_candidates', [])}
+            if session.get('selected_kind') == 'habit':
+                known.add(session['selected'])
+            if args['habit_id'] not in known:
+                fail('请先查询真实习惯，不得猜测ID。', 'clarification_required')
+            return self.gateway.habit_detail(args['habit_id'])
+        if name == 'preview_update_habit' and (session.get('selected_kind') != 'habit' or session['selected'] != args['habit_id']):
+            session['awaiting_habit_patch'] = args['changes']
+            session['habit_intent'] = message
+            return envelope(session['session_id'], request_id, status='clarification_required',
+                habit_candidates=session.get('habit_candidates', []), assistant_message='请明确选择要修改的习惯。')
         from calendar_habit_gateway import habit_intent
         ordinary = bool(re.search(r'普通(?:事项|日程)|一次性|不.*习惯', message))
         if session.get('selected_kind') == 'habit' and name in ('get_event', 'preview_update', 'preview_complete', 'preview_delete') and args.get('event_id') == session['selected']:
@@ -192,7 +218,7 @@ class CalendarChatService:
             return self.gateway.categories()
         if name == 'clarify':
             session['clarification'] = args['question']
-            return envelope(sid, request_id, status='clarification_required', assistant_message=args['question'])
+            return envelope(sid, request_id, status='clarification_required', assistant_message=args['question'], habit_candidates=session.get('habit_candidates', []))
         if name == 'query_events':
             result = self.gateway.query(args)
             session['clarified_query'] = args
@@ -214,7 +240,9 @@ class CalendarChatService:
                 previous = op
                 if op['preview']['after'] is None:
                     fail('请先确认或取消待删除事项，再准备其他操作。', 'confirmation_required')
-        if name not in ('preview_create', 'preview_create_habit'):
+        if name == 'preview_update_habit':
+            identifier = args['habit_id']
+        elif name not in ('preview_create', 'preview_create_habit'):
             if session['selected'] != args['event_id']:
                 session['awaiting_fields'] = ['done'] if name == 'preview_complete' else ['deleted'] if name == 'preview_delete' else sorted(args['changes'])
                 return envelope(sid, request_id, status='clarification_required', candidates=session['candidates'],
@@ -235,8 +263,8 @@ class CalendarChatService:
         self.journal.put('operation', op['operation_id'], owner, op)
         session['pending'] = op['operation_id']
         session['selected'] = identifier
-        session['selected_kind'] = 'habit' if name == 'preview_create_habit' else 'event'
-        if name == 'preview_create_habit':
+        session['selected_kind'] = 'habit' if name in ('preview_create_habit', 'preview_update_habit') else 'event'
+        if name in ('preview_create_habit', 'preview_update_habit'):
             session['candidates'] = []
         self._audit(op, owner, source)
         return envelope(sid, request_id, status='confirmation_required', pending_operation=op,
@@ -310,9 +338,18 @@ class CalendarChatService:
             return self.journal.get('diagnostic', fingerprint([owner, request_id]), owner)
 
     def _conversation(self, session, message, request_id, owner, source, diagnostic):
-        if session.get('selected_kind') == 'habit' and re.search(r'改成|改为|改名|刚才|这个|那个|删除|完成', message) and not re.search(r'新建|新增|创建|查询|查找', message):
+        if session.get('selected_kind') == 'habit' and re.search(r'删除|打卡|标记完成', message) and not re.search(r'新建|新增|创建|查询|查找', message):
             return envelope(session['session_id'], request_id, status='clarification_required',
-                            assistant_message='刚才创建的是习惯；本阶段尚不支持AI修改、完成或删除习惯，请在习惯清单中操作。')
+                            assistant_message='本阶段不支持AI删除或打卡习惯，请在习惯清单中操作。')
+        choices = session.get('habit_candidates', [])
+        if session.get('selected_kind') == 'habit' and session['selected'] is None and message.strip().isdigit():
+            index = int(message.strip())-1
+            if 0 <= index < len(choices):
+                session['selected'] = choices[index]['id']
+        if session.get('awaiting_habit_patch') and session.get('selected_kind') == 'habit' and session['selected'] and re.fullmatch(r'\d+|继续|就这个', message.strip()):
+            changes = session.pop('awaiting_habit_patch')
+            return self._tool('preview_update_habit', {'habit_id': session['selected'], 'changes': changes}, session, owner, request_id, source,
+                              message=session.pop('habit_intent', message), diagnostic={})
         if re.search(r'以后|今后|以后都|总是', message) and re.search(r'自动.*分类|都.*分类', message):
             return envelope(session['session_id'], request_id, status='clarification_required',
                             assistant_message='目前不能修改全局分类规则；新建具体事项时会根据现有分类做语义匹配，不会保存隐藏规则。')
@@ -349,6 +386,7 @@ class CalendarChatService:
             pending_context = {'event_id': preview['event_id'], 'after': {
                 key: value for key, value in preview['after'].items() if key not in ('notes', 'created_at', 'snooze_until')}}
         state = dict(context=context, selected_event_id=session['selected'] if session.get('selected_kind', 'event') == 'event' else None, candidates=session['candidates'],
+                     habit_candidates=session.get('habit_candidates', []),
                      selected_object={'type': session.get('selected_kind', 'event'), 'id': session['selected']},
                      selected_object_type=session.get('selected_kind', 'event'),
                      category_catalog=self.gateway.categories(),
@@ -374,7 +412,8 @@ class CalendarChatService:
                    '未指定start_on默认本地今天；每隔N周以起始周一所在周为锚点。每周一三五的weekdays=[0,2,4]。'
                    '每隔N个月/年没有指定月日时沿用起始月日；不存在月日跳过、不漂移。每月最后一天和次数结束尚不支持，须澄清。'
                    '习惯颜色默认薄荷绿，未指定不要补全。仅明确提醒才启用且必须有HH:MM时间。习惯没有分类和DDL。'
-                   '当前只支持新建习惯，不可用Event修改工具操作Habit ID；明确普通日程优先尊重。')
+                   '习惯修改用query_habits查找/get_habit读取/preview_update_habit局部changes；不得用Event工具操作Habit ID。'
+                   '已有明确习惯上下文可直接局部修改；明确另一名称应重新查询，多个同名必须澄清。不得修改打卡历史，不能删除或打卡习惯。')
         messages = [{'role': 'system', 'content': system+'\n'+json.dumps(state, ensure_ascii=False)}]
         messages += [{'role': item['role'], 'content': item['content']} for item in session['messages'][-12:]]
         last_query, last_error = None, None
@@ -398,7 +437,16 @@ class CalendarChatService:
             if not calls:
                 if last_error:
                     raise last_error
+                if last_query is not None and 'habits' in last_query and session.get('selected_kind') == 'habit' and session['selected'] and re.search(r'改|换|调整|设置|关掉|只在工作日', message) and not re.search(r'查询|查看|查找', message) and repairs < MAX_REPAIRS:
+                    repairs += 1
+                    diagnostic['read_only_edit_replans'] = repairs
+                    messages.append({'role': 'assistant', 'content': result.get('content') or '已读取习惯详情。'})
+                    messages.append({'role': 'system', 'content': '刚才仅查询，没有修改或保存。本次用户明确要求调整习惯，请用preview_update_habit提交仅对应字段的Patch；已是该值也可提交无变化提案。若有歧义请clarify。'})
+                    continue
                 if last_query is not None:
+                    if 'habits' in last_query:
+                        return envelope(session['session_id'], request_id, habit_candidates=last_query['habits'],
+                                        assistant_message=f"查询到{last_query['total']}个习惯，请选择后描述修改。")
                     return envelope(session['session_id'], request_id, assistant_message=f"查询到{last_query['total']}项（最多展示30项）。请选择目标后再修改。",
                                     candidates=last_query['events'])
                 return envelope(session['session_id'], request_id, status='clarification_required',
@@ -468,6 +516,8 @@ class CalendarChatService:
                             last_query = reply
                         elif name == 'get_event':
                             last_query = {'total': 1, 'events': [reply]}
+                        elif name in ('query_habits', 'get_habit'):
+                            last_query = {'total': reply.get('total', 1), 'habits': reply.get('habits', [reply])}
                     except ChatError as caught:
                         error = caught
                         entry.update(error_code=caught.code, error_field=caught.field)

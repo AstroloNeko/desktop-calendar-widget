@@ -29,6 +29,26 @@ class CalendarActionGateway:
         return self.dispatch(lambda: {'categories': [{'id': category.id, 'name': category.name, 'color': category.color}
                               for category in self.store.sorted_categories()[:100]], 'palette': dict(COLORS)})
 
+    def query_habits(self, args):
+        validate_call('query_habits', args)
+        def read():
+            items = [r for r in self.store.routines if r.kind == 'habit' and args.get('keyword', '').casefold() in r.title.casefold()]
+            return dict(habits=[self._habit_detail(r) for r in items[:30]], total=len(items))
+        return self.dispatch(read)
+
+    def _habit_detail(self, item):
+        from habit_schedule import schedule_label
+        return dict(id=item.id, object_type='habit', schedule=schedule_label(item),
+                    **{k: v for k, v in asdict(item).items() if k not in ('id', 'habit_done', 'schedule_history', 'completed_on')})
+
+    def habit_detail(self, identifier):
+        def read():
+            item = next((r for r in self.store.routines if r.id == identifier and r.kind == 'habit'), None)
+            if item is None:
+                fail('习惯不存在或已删除。', 'habit_not_found')
+            return self._habit_detail(item)
+        return self.dispatch(read)
+
     def _query(self, args):
         today = date.today()
         start = iso_day(args.get('start', today.replace(day=1).isoformat()))
@@ -97,11 +117,15 @@ class CalendarActionGateway:
         return self.dispatch(lambda: self._preview(name, arguments, event_id, previous, message))
 
     def _preview(self, name, args, identifier, previous, message=''):
-        if name == 'preview_create_habit':
+        if name in ('preview_create_habit', 'preview_update_habit'):
             from calendar_habit_gateway import prepare_habit
-            if previous or any(item.id == identifier for item in self.store.routines):
+            current = next((r for r in self.store.routines if r.id == identifier and r.kind == 'habit'), None)
+            if name == 'preview_update_habit' and current is None:
+                fail('习惯不存在或已删除。', 'habit_not_found')
+            if previous or name == 'preview_create_habit' and current:
                 fail('请先处理当前操作；习惯ID已存在。', 'operation_conflict')
-            return prepare_habit(self.store, args, identifier, message)
+            return prepare_habit(self.store, args if name == 'preview_create_habit' else args['changes'], identifier, message,
+                                 current if name == 'preview_update_habit' else None)
         current = self.store.event_by_id(identifier)
         before = self._state(identifier)
         if previous and previous['before_hash'] != fingerprint(before):
@@ -201,19 +225,20 @@ class CalendarActionGateway:
         preview = operation['preview']
         if preview.get('object_type') == 'habit':
             from calendar_core import RoutineItem
-            if any(item.id == preview['habit_id'] for item in self.store.routines):
-                fail('习惯ID已存在，请核对执行结果。', 'operation_conflict')
+            current = next((r for r in self.store.routines if r.id == preview['habit_id']), None)
+            if fingerprint(asdict(current) if current else None) != preview['before_hash']:
+                fail('习惯已变化，请重新查询。', 'operation_conflict')
             item = RoutineItem(**preview['after'])
             operation['status'] = 'executing'
             journal.put('operation', operation['operation_id'], owner, operation)
             before = list(self.store.routines)
             try:
-                self.store.upsert_routine(item)
+                change = self.commands.upsert_routine(item)
             except (OSError, ValueError):
                 self.store.routines = before
                 fail('习惯保存未成功，未应用此操作。', 'execution_failed')
-            result = dict(object_type='habit', habit_id=item.id, habit=dict(id=item.id, title=item.title,
-                color=item.color, schedule=preview['schedule'], next_on=preview['next_on']), changed=True)
+            result = dict(object_type='habit', habit_id=item.id, action='updated' if current else 'created', habit=dict(id=item.id, title=item.title,
+                color=item.color, schedule=preview['schedule'], next_on=preview['next_on']), changed=change is not None)
             operation.update(status='succeeded', operation_result=result)
             journal.put('operation', operation['operation_id'], owner, operation)
             self.habit_refresh()

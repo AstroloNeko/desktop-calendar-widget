@@ -54,6 +54,9 @@ HABIT_FIELDS = {
 
 SCHEMAS = {
     'preview_create_habit': obj(HABIT_FIELDS, ('title', 'frequency')),
+    'query_habits': obj({'keyword': text(100)}),
+    'get_habit': obj({'habit_id': text(100)}, ('habit_id',)),
+    'preview_update_habit': obj({'habit_id': text(100), 'changes': obj(HABIT_FIELDS)}, ('habit_id', 'changes')),
     "list_categories": obj({}),
     "query_events": obj({"start": text(10), "end": text(10), "keyword": text(100),
                          "category_id": {"type": ["string", "null"]}, "done": {"type": "boolean"},
@@ -66,6 +69,9 @@ SCHEMAS = {
     "clarify": obj({"question": text(600)}, ("question",)),
 }
 DESCRIPTIONS = {
+    'query_habits': '读取周期习惯候选ID/名称/周期。多个同名必须澄清，不得自动选第一条。',
+    'get_habit': '读取本会话查得或创建的稳定Habit ID详情，与Event ID完全分离。',
+    'preview_update_habit': '准备一个习惯的局部changes Patch，仅用户要求的字段；周期和属性修改保留历史打卡。宿主单对象安全保存。不得重新提交完整Habit。',
     'preview_create_habit': '创建一个真正周期习惯的提案，由宿主安全保存；不是Event或一次性待办。周期daily/weekly/monthly/yearly，interval为1–999；周一=0至周日=6，多选weekdays。起始默认本地今天，工作日默认false；月末不存在的日跳过。只填明确属性，未指定颜色/提醒/起止不要补全。',
     "list_categories": "读取现有分类的稳定ID和名称，供筛选及创建事项使用；不修改分类。",
     "query_events": "查询真实事项；日期为含端点 YYYY-MM-DD，范围最多366天。无条件查询仅本月。多结果不可自行选择。",

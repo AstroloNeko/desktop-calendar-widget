@@ -152,7 +152,7 @@ class HabitScheduleTests(unittest.TestCase):
         self.store.upsert_routine(edited)
         self.assertEqual(edited.habit_done, item.habit_done)
         self.assertTrue(edited.is_done_on(date(2026, 8, 4)))
-        self.assertEqual(self.store.agenda_items_on(date(2026, 8, 4)), [])
+        self.assertEqual([r.id for r in self.store.agenda_items_on(date(2026, 8, 4))], ['habit'])
         self.assertEqual(self.store.routine_progress(edited, date(2026, 8, 3), date(2026, 8, 9)), (1, 0))
 
     def test_completion_still_sinks_and_cancel_restores(self):
