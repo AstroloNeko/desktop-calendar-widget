@@ -364,11 +364,8 @@ def resource_path(relative: str) -> Path:
 
 
 def parse_event_due(date_text: str, time_text: str) -> tuple[datetime, bool]:
-    selected_date = datetime.strptime(date_text.strip(), "%Y-%m-%d").date()
-    cleaned_time = time_text.strip()
-    if cleaned_time:
-        return datetime.strptime(f"{selected_date.isoformat()} {cleaned_time}", "%Y-%m-%d %H:%M"), True
-    return datetime.combine(selected_date, datetime.min.time()).replace(hour=23, minute=59), False
+    from event_input import parse_event_due as parse
+    return parse(date_text, time_text)
 
 
 def log_exception(exc_type, exc_value, exc_traceback) -> None:
@@ -1519,11 +1516,10 @@ class EventEditor(tk.Toplevel):
         except ValueError:
             owned_messagebox(self, messagebox.showinfo, APP_NAME, "持续天数请输入 1～365 之间的整数。")
             return
-        item = Event(
-            id=self.event.id if self.event else str(uuid.uuid4()),
+        values = dict(
             title=title,
-            due=due.isoformat(timespec="minutes"),
-            has_time=has_time,
+            date=due.date().isoformat(),
+            time=due.strftime('%H:%M') if has_time else None,
             duration_days=duration_days,
             skip_non_working_days=self.skip_non_working_var.get(),
             end_as_ddl=self.end_as_ddl_var.get(),
@@ -1534,9 +1530,14 @@ class EventEditor(tk.Toplevel):
             reminder=REMINDERS[self.reminder_var.get()] if has_time else None,
             notes=self.notes.get("1.0", "end").strip(),
             done=self.event.done if self.event else False,
-            created_at=self.event.created_at if self.event else "",
-            snooze_until=self.event.snooze_until if self.event else None,
         )
+        from event_input import build_event_candidate, EventInputError
+        try:
+            item = build_event_candidate(values, current=self.event,
+                identifier=self.event.id if self.event else str(uuid.uuid4()), context=self.master_app.store)
+        except EventInputError as exc:
+            owned_messagebox(self, messagebox.showinfo, APP_NAME, str(exc))
+            return
         if self.master_app.upsert_event(item):
             self.close()
 

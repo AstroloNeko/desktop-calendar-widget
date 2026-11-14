@@ -1,12 +1,12 @@
 """Sole AI calendar boundary. All Store access runs through the supplied dispatcher."""
 from dataclasses import asdict, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime
 import hashlib
 import json
-import re
 import threading
 
 from calendar_core import Event, COLORS
+from event_input import build_event_candidate, EventInputError
 from event_commands import CommandConflictError
 from event_search import EventSearchIndex, capture_search_store
 from calendar_chat_tools import ChatError, iso_day, fail, validate_call
@@ -161,59 +161,15 @@ class CalendarActionGateway:
     def _patch(self, candidate, values, *, creating=False):
         values = dict(values)
         values.pop('category_basis', None)
-        end = iso_day(values.pop('end_date')) if 'end_date' in values else None
-        change_date = 'date' in values
-        change_time = 'time' in values
+        # Keep the existing AI-specific tolerance for an invented create default.
+        # The shared validator itself never accepts category-less inheritance.
+        if creating and values.get('color_mode') == 'inherit' and not values.get('category_id', candidate.category_id):
+            values.pop('color_mode')
         try:
-            day = iso_day(values.pop('date')) if 'date' in values else candidate.due_date
-        except ChatError as error:
-            error.field = 'date'
-            raise
-        if 'time' in values:
-            clock = values.pop('time')
-            if clock is not None and (not isinstance(clock, str) or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', clock)):
-                fail('时间必须是 HH:MM，或明确选择无具体时间。', field='time')
-            candidate.has_time = clock is not None
-            hour, minute = map(int, clock.split(':')) if clock else (23, 59)
-        else:
-            hour, minute = candidate.due_at.hour, candidate.due_at.minute
-        if change_time:
-            candidate.due = datetime.combine(day, time(hour, minute)).isoformat(timespec='minutes')
-        elif change_date:
-            # Date-only changes preserve the exact old time precision/offset.
-            candidate.due = day.isoformat() + candidate.due[10:]
-        if values.get('category_id') is not None and self.store.category_by_id(values.get('category_id')) is None:
-            fail('分类不存在。', field='category_id')
-        if 'category_id' in values and 'color' not in values and 'color_mode' not in values:
-            values['color_mode'] = ('inherit' if values['category_id'] else 'override') if creating or candidate.color_mode == 'inherit' else 'override'
-        if 'color' in values:
-            values.setdefault('color_mode', 'override')
-        if values.get('color_mode') == 'inherit' and not values.get('category_id', candidate.category_id):
-            if creating:
-                # A model's default 'inherit' with no category means no override,
-                # not a request to invent a category or change Store constraints.
-                values.pop('color_mode')
-            else:
-                fail('此事项没有分类，请先选择分类，或保留当前颜色。', 'clarification_required', 'changes.color_mode')
-        if 'reminder' in values and values['reminder'] is not None and not candidate.has_time:
-            fail('此事项没有具体时间，请先确认提醒时刻；不能擅自设置定时提醒。', 'clarification_required', 'reminder')
-        for key, value in values.items():
-            setattr(candidate, key, value)
-        if end is not None:
-            if end < day or (end-day).days > 1095:
-                fail('结束日期应在开始日期之后且范围合理。', field='end_date')
-            count = sum(not candidate.skip_non_working_days or self.store.is_workday(day+timedelta(days=i))
-                        for i in range((end-day).days+1))
-            if not 1 <= count <= 365:
-                fail('日期范围应包含1至365个有效日期。', field='end_date')
-            candidate.duration_days = count
-            if self.store.event_dates(candidate)[-1] != end:
-                fail('结束日期不是有效工作日，请明确最后执行日期。', 'clarification_required', 'end_date')
-        if not candidate.title.strip():
-            fail('事项标题不能为空。')
-        if candidate.end_as_ddl and (candidate.duration_days == 1 or candidate.event_type == 'ddl'):
-            fail('末日DDL仅用于多日一般/紧急事项。')
-        return candidate
+            return build_event_candidate(values, current=candidate, context=self.store, creating=creating)
+        except EventInputError as error:
+            field = 'changes.color_mode' if error.field == 'color_mode' and error.clarification else error.field
+            fail(str(error), 'clarification_required' if error.clarification else 'invalid_arguments', field)
 
     def execute(self, operation, journal, owner):
         """Only called after explicit confirmation. Journal intent precedes one command."""

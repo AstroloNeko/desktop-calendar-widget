@@ -723,16 +723,9 @@ class Store:
         title: str, day: date, *, color: Optional[str] = None, event_type: str = "general"
     ) -> Event:
         """Shared quick-add defaults, independent from saving and command history."""
-        due = datetime.combine(day, datetime.min.time()).replace(hour=23, minute=59)
-        return Event(
-            id=str(uuid.uuid4()),
-            title=title.strip(),
-            due=due.isoformat(timespec="minutes"),
-            has_time=False,
-            color=color or COLORS["海盐蓝"],
-            event_type=event_type,
-            reminder=None,
-        )
+        from event_input import build_event_candidate
+        return build_event_candidate(dict(title=title.strip(), date=day.isoformat(),
+            color=color or COLORS["海盐蓝"], event_type=event_type), identifier=str(uuid.uuid4()))
 
     def upsert_routine(self, item: RoutineItem) -> None:
         item = self.prepare_routine(item)
