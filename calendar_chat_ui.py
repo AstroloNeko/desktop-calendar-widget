@@ -24,7 +24,7 @@ class ChatRuntime:
         self.journal = ChatJournal(self.folder / 'sessions.sqlite3', self.configuration.protector)
         self.gateway = CalendarActionGateway(app.store, app.event_commands, TkDispatcher(app), app._refresh_event_change,
             lambda: not app.lifecycle.exiting and not app.update_busy and not app._lifecycle_operation_depth
-            and (app._active_modal_window() is None or app._active_modal_window() is self.window))
+            and (app._active_modal_window() is None or app._active_modal_window() is self.window), self.refresh_habits)
         self.service = CalendarChatService(self.gateway, self.journal, DeepSeekProvider(self.configuration))
         self.jobs = threading.BoundedSemaphore(4)
         self.error = None
@@ -32,6 +32,13 @@ class ChatRuntime:
             self.apply_http()
         except ChatError as error:
             self.error = str(error)
+
+    def refresh_habits(self):
+        self.app.invalidate_reminders()
+        self.app.render()
+        manager = self.app.routine_manager
+        if manager and manager.winfo_exists():
+            manager.refresh()
 
     def apply_http(self):
         config = self.configuration.load()
@@ -226,12 +233,18 @@ class ChatDialog(tk.Toplevel):
         if self.operation:
             self.render_operation(self.operation)
         if response.get('operation_result'):
+            habit = response['operation_result'].get('habit')
             event = response['operation_result'].get('event')
-            self.append('系统：已删除事项。' if response['operation_result'].get('deleted') else
+            self.append('✓ 已创建习惯「'+habit['title']+'」· '+habit['schedule'] if habit else
+                        '系统：已删除事项。' if response['operation_result'].get('deleted') else
                         '系统：已实际保存“'+event['title']+'”，日期 '+event['date']+'。' if event else '系统：已核对已执行操作，不重复写入。')
         self.input.focus_set()
 
     def render_operation(self, operation):
+        if operation['preview'].get('object_type') == 'habit':
+            if operation['status'] == 'pending':
+                self.append('习惯创建预览：'+operation['preview']['after']['title']+' · '+operation['preview']['schedule'])
+            return
         before, after = operation['preview']['before'] or {}, operation['preview']['after'] or {}
         fields = ('title', 'due', 'has_time', 'event_type', 'reminder', 'duration_days', 'skip_non_working_days', 'end_as_ddl', 'category_id', 'color', 'color_mode', 'notes', 'done')
         labels = dict(title='标题', due='开始日期 / 时间', has_time='有具体时间', event_type='事项性质', reminder='提前提醒（分钟）',

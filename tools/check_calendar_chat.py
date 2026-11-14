@@ -129,6 +129,12 @@ class InvalidBatchProvider:
             'arguments': json.dumps({'title': '不应创建', 'date': date.today().isoformat()})}} for index in range(2)]}
 
 
+class HabitProvider:
+    def complete(self, messages, tools):
+        return {'tool_calls': [{'id': 'qa-habit', 'type': 'function', 'function': {
+            'name': 'preview_create_habit', 'arguments': json.dumps(dict(title='隔离组会习惯', frequency='weekly', weekdays=[0]))}}]}
+
+
 def wait(app, condition, message, timeout=12):
     end = time.monotonic()+timeout
     while time.monotonic() < end:
@@ -208,6 +214,21 @@ def main():
                         pump(app, .1)
                         app.undo_event()
                         assert len(store.events) == before
+                        runtime.service.provider = HabitProvider()
+                        open_chat(app)
+                        chat = runtime.window
+                        wait(app, lambda: not chat.busy and chat.session_id is not None, 'habit session ready')
+                        habit_count = len(store.routines)
+                        chat.input.insert('1.0', '新增习惯，每周一开组会，紫色')
+                        chat.send()
+                        wait(app, lambda: not chat.busy, 'habit automatic save')
+                        assert len(store.routines) == habit_count+1 and len(store.events) == before
+                        assert store.routines[-1].kind == 'habit' and store.routines[-1].weekdays == [0]
+                        assert chat.operation['status'] == 'succeeded'
+                        assert '已创建习惯' in chat.transcript.get('1.0', 'end')
+                        chat.close()
+                        pump(app, .08)
+                        assert app.grab_current() is None
                         cases.append((theme, view))
                 # HTTP worker requests same service; UI pumps the only Store dispatcher.
                 runtime.http = LocalChatHTTP(runtime.service, 'Q'*48, port=0)
@@ -222,7 +243,9 @@ def main():
                             return json.loads(response.read())
                     try:
                         sid = post('/v1/sessions', {})['session_id']
-                        preview = post('/v1/chat/messages', dict(session_id=sid, message='QA', request_id='frozen-http-qa-request'))['pending_operation']
+                        response = post('/v1/chat/messages', dict(session_id=sid, message='新增习惯，每周一开组会，紫色', request_id='frozen-http-qa-request'))
+                        assert response['operation_result']['object_type'] == 'habit'
+                        preview = response['pending_operation']
                         op = preview['operation_id']
                         confirmed = post('/v1/operations/'+op+'/confirm', {'session_id': sid, 'revision': preview['revision']})
                         assert confirmed['status'] == 'succeeded'

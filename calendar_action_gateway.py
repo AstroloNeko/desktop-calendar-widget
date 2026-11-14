@@ -17,8 +17,9 @@ def fingerprint(value):
 
 
 class CalendarActionGateway:
-    def __init__(self, store, commands, dispatch=lambda fn: fn(), refresh=lambda change: None, writable=lambda: True):
+    def __init__(self, store, commands, dispatch=lambda fn: fn(), refresh=lambda change: None, writable=lambda: True, habit_refresh=lambda: None):
         self.store, self.commands, self.dispatch, self.refresh, self.writable = store, commands, dispatch, refresh, writable
+        self.habit_refresh = habit_refresh
 
     def query(self, arguments):
         validate_call('query_events', arguments)
@@ -91,11 +92,16 @@ class CalendarActionGateway:
                 'category': asdict(self.store.category_by_id(event.category_id)) if event.category_id else None,
                 'notifications': sorted(key for key in self.store.notified if key.startswith(identifier+':'))}
 
-    def preview(self, name, arguments, event_id, previous=None):
+    def preview(self, name, arguments, event_id, previous=None, *, message=''):
         validate_call(name, arguments)
-        return self.dispatch(lambda: self._preview(name, arguments, event_id, previous))
+        return self.dispatch(lambda: self._preview(name, arguments, event_id, previous, message))
 
-    def _preview(self, name, args, identifier, previous):
+    def _preview(self, name, args, identifier, previous, message=''):
+        if name == 'preview_create_habit':
+            from calendar_habit_gateway import prepare_habit
+            if previous or any(item.id == identifier for item in self.store.routines):
+                fail('请先处理当前操作；习惯ID已存在。', 'operation_conflict')
+            return prepare_habit(self.store, args, identifier, message)
         current = self.store.event_by_id(identifier)
         before = self._state(identifier)
         if previous and previous['before_hash'] != fingerprint(before):
@@ -193,6 +199,25 @@ class CalendarActionGateway:
         if not self.writable():
             fail('请先关闭当前编辑器或等待数据操作结束，再确认。', 'execution_failed')
         preview = operation['preview']
+        if preview.get('object_type') == 'habit':
+            from calendar_core import RoutineItem
+            if any(item.id == preview['habit_id'] for item in self.store.routines):
+                fail('习惯ID已存在，请核对执行结果。', 'operation_conflict')
+            item = RoutineItem(**preview['after'])
+            operation['status'] = 'executing'
+            journal.put('operation', operation['operation_id'], owner, operation)
+            before = list(self.store.routines)
+            try:
+                self.store.upsert_routine(item)
+            except (OSError, ValueError):
+                self.store.routines = before
+                fail('习惯保存未成功，未应用此操作。', 'execution_failed')
+            result = dict(object_type='habit', habit_id=item.id, habit=dict(id=item.id, title=item.title,
+                color=item.color, schedule=preview['schedule'], next_on=preview['next_on']), changed=True)
+            operation.update(status='succeeded', operation_result=result)
+            journal.put('operation', operation['operation_id'], owner, operation)
+            self.habit_refresh()
+            return result
         if fingerprint(self._state(preview['event_id'])) != preview['before_hash']:
             fail('事项已被修改，请重新查询和预览。', 'operation_conflict')
         deleting = preview['after'] is None
@@ -218,6 +243,9 @@ class CalendarActionGateway:
 
     def recover(self, operation):
         def check():
+            if operation['preview'].get('object_type') == 'habit':
+                item = next((r for r in self.store.routines if r.id == operation['preview']['habit_id']), None)
+                return item is not None and asdict(item) == operation['preview']['after']
             event = self.store.event_by_id(operation['preview']['event_id'])
             if operation['preview']['after'] is None:
                 return event is None

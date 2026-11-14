@@ -37,7 +37,23 @@ def obj(properties, required=()):
     return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
 
 
+HABIT_FIELDS = {
+    'title': {**text(300), 'minLength': 1},
+    'frequency': {'type': 'string', 'enum': ['daily', 'weekly', 'monthly', 'yearly']},
+    'interval': {'type': 'integer', 'minimum': 1, 'maximum': 999},
+    'weekdays': {'type': 'array', 'minItems': 1, 'maxItems': 7,
+                 'items': {'type': 'integer', 'minimum': 0, 'maximum': 6}},
+    'month_day': {'type': 'integer', 'minimum': 1, 'maximum': 31},
+    'year_month': {'type': 'integer', 'minimum': 1, 'maximum': 12},
+    'start_on': text(10), 'end_on': {'type': ['string', 'null'], 'maxLength': 10},
+    'workdays_only': {'type': 'boolean'},
+    'color': FIELDS['color'], 'reminder_enabled': {'type': 'boolean'},
+    'reminder_time': {'type': ['string', 'null'], 'maxLength': 5},
+}
+
+
 SCHEMAS = {
+    'preview_create_habit': obj(HABIT_FIELDS, ('title', 'frequency')),
     "list_categories": obj({}),
     "query_events": obj({"start": text(10), "end": text(10), "keyword": text(100),
                          "category_id": {"type": ["string", "null"]}, "done": {"type": "boolean"},
@@ -50,6 +66,7 @@ SCHEMAS = {
     "clarify": obj({"question": text(600)}, ("question",)),
 }
 DESCRIPTIONS = {
+    'preview_create_habit': '创建一个真正周期习惯的提案，由宿主安全保存；不是Event或一次性待办。周期daily/weekly/monthly/yearly，interval为1–999；周一=0至周日=6，多选weekdays。起始默认本地今天，工作日默认false；月末不存在的日跳过。只填明确属性，未指定颜色/提醒/起止不要补全。',
     "list_categories": "读取现有分类的稳定ID和名称，供筛选及创建事项使用；不修改分类。",
     "query_events": "查询真实事项；日期为含端点 YYYY-MM-DD，范围最多366天。无条件查询仅本月。多结果不可自行选择。",
     "get_event": "读取本会话查询过的稳定Event ID的详情；不允许猜ID。",
@@ -67,7 +84,7 @@ def validate(value, schema, path='arguments'):
     types = schema.get("type", [])
     types = [types] if isinstance(types, str) else types
     valid = {"null": value is None, "string": isinstance(value, str), "integer": type(value) is int,
-             "boolean": type(value) is bool, "object": type(value) is dict}
+             "boolean": type(value) is bool, "object": type(value) is dict, 'array': type(value) is list}
     if not any(valid.get(kind, False) for kind in types):
         fail("工具参数类型不正确。", field=path)
     if value is None:
@@ -86,6 +103,11 @@ def validate(value, schema, path='arguments'):
             fail("工具参数包含未知字段或缺少必需字段。", field=path)
         for key, item in value.items():
             validate(item, schema['properties'][key], path+'.'+key)
+    if type(value) is list:
+        if not schema.get('minItems', 0) <= len(value) <= schema.get('maxItems', 7):
+            fail('数组长度不正确。', field=path)
+        for item in value:
+            validate(item, schema['items'], path+'[]')
 
 
 def validate_call(name, arguments):

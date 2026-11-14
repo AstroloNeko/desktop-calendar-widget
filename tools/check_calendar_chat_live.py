@@ -39,6 +39,7 @@ def main():
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--followups', action='store_true', help='Create one synthetic event, then refine the same event across turns')
     parser.add_argument('--attributes', action='store_true', help='Synthetic semantic classification and explicit palette combinations')
+    parser.add_argument('--habits', action='store_true', help='Synthetic actual Habit 2.0 creation, two requests')
     args = parser.parse_args()
     if not args.live:
         parser.error('Real provider smoke requires explicit --live')
@@ -58,6 +59,22 @@ def main():
         history = EventCommandHistory(store)
         service = CalendarChatService(CalendarActionGateway(store, history),
             ChatJournal(root/'chat.db', UserProtection()), provider, auto_execute=False)
+        if args.habits:
+            service.auto_execute = True
+            for text, frequency, interval in [('新增习惯，每周一开组会，紫色', 'weekly', 1), ('每隔3天做一次PCR', 'daily', 3)]:
+                sid = service.new_session()['session_id']
+                request = uuid.uuid4().hex
+                response = service.send_message(sid, text, request)
+                item = store.routines[-1] if response['status'] == 'succeeded' else None
+                results.append(dict(status=response['status'], diagnostic=service.get_diagnostics(request),
+                    passed=item is not None and item.kind == 'habit' and item.frequency == frequency and item.interval == interval
+                    and (frequency != 'weekly' or item.weekdays == [0] and item.color == COLORS['鸢尾紫'])))
+            report = dict(synthetic_only=True, provider_calls=provider.calls, cases=results,
+                          passed=all(entry['passed'] for entry in results) and len(store.events) == 1)
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+            print(json.dumps(report, ensure_ascii=False), flush=True)
+            return 0 if report['passed'] else 1
         scenarios = [('A', '明天我要做个WB实验')] if args.followups else [('A', '明天我要做个WB实验'), ('B', '11.22开会'), ('C', '把细胞实验那个改成动物实验')]
         if args.attributes:
             scenarios = [('purple', '加个11.23做WB，紫色'), ('meeting', '明天下午三点组会，提前半小时提醒')]
