@@ -233,9 +233,11 @@ class ChatDialog(tk.Toplevel):
         pending = self.operation and self.operation['status'] == 'pending'
         self.confirm_button.configure(state='normal' if pending else 'disabled')
         self.cancel_button.configure(state='normal' if pending else 'disabled')
-        if self.operation:
+        if self.operation and self.operation['status'] == 'pending':
             self.render_operation(self.operation)
         if response.get('operation_result'):
+            for item in response['operation_result'].get('events',[]):
+                self.append(item['date']+' · '+item['title']+' · '+item['color']+(' · 已完成' if item['done'] else ''))
             habit = response['operation_result'].get('habit')
             event = response['operation_result'].get('event')
             self.append('✓ 已'+('更新' if response['operation_result'].get('action') == 'updated' else '创建')+'习惯「'+habit['title']+'」· '+habit['schedule'] if habit else

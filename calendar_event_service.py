@@ -95,6 +95,14 @@ class CalendarEventService:
     def preview_bulk(self, ids, operation, **options):
         return self._call(lambda: self.history.preview_bulk(ids, operation, **options))
 
+    def preview_create_many(self, events):
+        events = tuple(events)
+        if not 1 <= len(events) <= 10 or len({e.id for e in events}) != len(events):
+            raise EventOperationError('validation_failed', '每批需要1至10个独立事项。')
+        if any(self.history.store.event_by_id(e.id) is not None for e in events):
+            raise EventOperationError('operation_conflict', '新建事项ID已存在。')
+        return BatchPreview(tuple(self.preview_upsert(e) for e in events), '批量新建事项')
+
     def commit(self, preview):
         if not isinstance(preview, (EventPreview, BatchPreview)):
             raise EventOperationError('invalid_preview', '事项预览无效。')
