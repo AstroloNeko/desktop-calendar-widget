@@ -1,7 +1,8 @@
 """Storage contract: detached reads and one prepared business change set.
 
-Record values retain the existing model types. A token is session-local, not a
-persisted object revision or a multi-process concurrency guarantee.
+Record values retain the existing model types. JSON tokens are session-local;
+SQLite tokens carry a persistent calendar ID/revision. Neither is an object-level
+revision. Backend guarantees must not be inferred from the shared token shape.
 """
 from dataclasses import dataclass
 from typing import Protocol, Mapping, Any
@@ -21,6 +22,8 @@ class SnapshotToken:
 class RepositoryCommit:
     changed: bool
     revision: SnapshotToken
+    operation_id: str | None = None
+    replayed: bool = False
 
 
 class CalendarRepository(Protocol):
@@ -40,3 +43,4 @@ class CalendarRepository(Protocol):
     # Transitional Store integration. Backend owns I/O; Store owns normalization.
     def read_document(self): ...
     def write_current(self): ...
+    def close(self): ...

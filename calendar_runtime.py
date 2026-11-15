@@ -102,6 +102,7 @@ class HeadlessRuntime:
         self._stop_lock = threading.Lock()
         self.executor = SerialExecutor(timeout)
         self._core = None
+        self._repository_closed = False
         try:
             def compose():
                 self._store = Store(Path(data_file), repository_factory=repository_factory)
@@ -122,6 +123,8 @@ class HeadlessRuntime:
             self.state = 'running'
         except BaseException:
             self.state = 'failed'
+            if hasattr(self, '_store'):
+                self.executor(self._close_repository)
             self.executor.stop()
             raise
 
@@ -185,8 +188,16 @@ class HeadlessRuntime:
             try:
                 self._core.stop(wait=True, timeout=timeout)
             finally:
-                self.executor.stop(timeout)
+                try:
+                    if not self._repository_closed:
+                        self.executor(self._close_repository)
+                finally:
+                    self.executor.stop(timeout)
             self.state = 'stopped'
+
+    def _close_repository(self):
+        self._store.repository.close()
+        self._repository_closed = True
 
     def __enter__(self):
         return self

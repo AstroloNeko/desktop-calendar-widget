@@ -80,12 +80,38 @@ class JsonCalendarRepository:
             return None
 
     def apply_changes(self, changes, *, expected_revision=None):
-        from calendar_core import Event, RoutineItem, EventCategory, MutationUncertainError
+        from calendar_core import MutationUncertainError
         store = self.legacy_store
         if store.load_error:
             raise DataCompatibilityError(store.load_error)
         if expected_revision is not None and expected_revision != self.revision():
             raise RepositoryConflictError('快照已变化，请重新读取后提交。')
+        candidates = self._prepare_changes(changes)
+        if all(getattr(store,key) == value for key,value in candidates.items()):
+            return RepositoryCommit(False,self.revision())
+        original_digest = self._disk_digest()
+        before = {key:getattr(store,key) for key in candidates}
+        before.setdefault('notified',store.notified)
+        for key,value in candidates.items(): setattr(store,key,value)
+        try:
+            store.save()  # Legacy hook; delegates back to write_current exactly once.
+        except BaseException as exc:
+            try: unchanged = self._disk_digest() == original_digest
+            except OSError: unchanged = False
+            if not unchanged:
+                store.load_error = '保存结果待核查，已停止继续写入；请重新加载并核对数据，不要重复操作。'
+                raise MutationUncertainError(store.load_error) from exc
+            for key,value in before.items(): setattr(store,key,value)
+            raise
+        return RepositoryCommit(True,self.revision())
+
+    def close(self):
+        """JSON owns no persistent connection."""
+
+    def _prepare_changes(self, changes):
+        """Shared structural validation; domain candidates still come from A1/A3."""
+        from calendar_core import Event, RoutineItem, EventCategory
+        store = self.legacy_store
         if not isinstance(changes, Mapping) or set(changes) - {'events','routines','categories','date_states','notified'}:
             raise ValueError('Unsupported prepared change set')
         candidates = {}
@@ -113,20 +139,4 @@ class JsonCalendarRepository:
                 if not isinstance(value,(set,frozenset)) or any(not isinstance(item,str) for item in value):
                     raise ValueError('Invalid notification state')
                 candidates[key] = set(value)
-        if all(getattr(store,key) == value for key,value in candidates.items()):
-            return RepositoryCommit(False,self.revision())
-        original_digest = self._disk_digest()
-        before = {key:getattr(store,key) for key in candidates}
-        before.setdefault('notified',store.notified)
-        for key,value in candidates.items(): setattr(store,key,value)
-        try:
-            store.save()  # Legacy bridge/hook; delegates back to write_current exactly once.
-        except BaseException as exc:
-            try: unchanged = self._disk_digest() == original_digest
-            except OSError: unchanged = False
-            if not unchanged:
-                store.load_error = '保存结果待核查，已停止继续写入；请重新加载并核对数据，不要重复操作。'
-                raise MutationUncertainError(store.load_error) from exc
-            for key,value in before.items(): setattr(store,key,value)
-            raise
-        return RepositoryCommit(True,self.revision())
+        return candidates

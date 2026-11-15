@@ -14,6 +14,14 @@ from event_commands import EventCommandHistory
 
 
 class RepositoryContractTests(TestCase):
+    persistent_revision = False
+
+    def persist_hook(self):
+        return patch.object(self.store, 'save', wraps=self.store.save)
+
+    def fail_persist_hook(self):
+        return patch.object(self.store, 'save', side_effect=OSError('disk'))
+
     def create_store(self, path):
         return Store(path)
 
@@ -66,7 +74,7 @@ class RepositoryContractTests(TestCase):
     def test_conflict_no_write(self):
         token=self.repo.revision()
         self.seed()
-        with patch.object(self.store,'save') as save:
+        with self.persist_hook() as save:
             with self.assertRaises(RepositoryConflictError):
                 self.repo.apply_changes({'events':[]},expected_revision=token)
             save.assert_not_called()
@@ -75,7 +83,7 @@ class RepositoryContractTests(TestCase):
     def test_noop_zero_save(self):
         self.seed()
         token=self.repo.revision()
-        with patch.object(self.store,'save') as save:
+        with self.persist_hook() as save:
             result=self.repo.apply_changes({'events':self.repo.list_events()},expected_revision=token)
             save.assert_not_called()
         self.assertFalse(result.changed)
@@ -83,7 +91,7 @@ class RepositoryContractTests(TestCase):
 
     def test_multi_object_once_and_order(self):
         events=[Event(str(i),str(i),'2026-11-20T23:59',has_time=False) for i in range(5)]
-        with patch.object(self.store,'save',wraps=self.store.save) as save:
+        with self.persist_hook() as save:
             self.repo.apply_changes({'events':events,'date_states':{'2026-11-20':'leave'}})
             self.assertEqual(save.call_count,1)
         self.assertEqual([e.id for e in self.repo.list_events()],list(map(str,range(5))))
@@ -129,7 +137,7 @@ class RepositoryContractTests(TestCase):
     def test_save_failure_all_fields_rollback(self):
         self.seed()
         before=self.repo.read_calendar_snapshot()
-        with patch.object(self.store,'save',side_effect=OSError('disk')):
+        with self.fail_persist_hook():
             with self.assertRaises(OSError):
                 self.repo.apply_changes({'events':[],'date_states':{'2026-12-01':'holiday'}})
         self.assertEqual(self.repo.read_calendar_snapshot(),before)
@@ -137,7 +145,7 @@ class RepositoryContractTests(TestCase):
     def test_invalid_set_zero_write(self):
         for changes in ({'unknown':[]},{'events':[Event('x','x','2026-11-20'),Event('x','y','2026-11-21')]},
                         {'date_states':{'bad':'leave'}},{'date_states':{'2026-12-01':'normal'}}):
-            with self.subTest(changes=changes), patch.object(self.store,'save') as save:
+            with self.subTest(changes=changes), self.persist_hook() as save:
                 with self.assertRaises(ValueError): self.repo.apply_changes(changes)
                 save.assert_not_called()
 
@@ -152,7 +160,10 @@ class RepositoryContractTests(TestCase):
         self.seed()
         reopened=self.create_store(self.path).repository
         self.assertEqual(reopened.list_events(),self.repo.list_events())
-        self.assertNotEqual(reopened.revision(),self.repo.revision())
+        if self.persistent_revision:
+            self.assertEqual(reopened.revision(),self.repo.revision())
+        else:
+            self.assertNotEqual(reopened.revision(),self.repo.revision())
 
     def test_rule_change_invalidates_preview(self):
         self.events.upsert(Event('e','e','2026-11-16T23:59',duration_days=2,skip_non_working_days=True))

@@ -168,6 +168,8 @@ def restore_store(store, backup: Path, *, apply=None) -> Path:
     ``apply`` refreshes the owning UI before success is reported. Any failure
     restores the old bytes and old in-memory state; the checkpoint stays usable.
     """
+    if not getattr(store.repository, 'supports_json_backup', True):
+        raise BackupError('当前备份恢复入口仅支持 JSON；SQLite 正式恢复需等待迁移适配。')
     _manifest, data = read_backup(backup)
     if store.load_error:
         raise BackupError("当前数据读取失败；请先单独保留原文件，未覆盖现有数据。")
