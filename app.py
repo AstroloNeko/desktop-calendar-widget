@@ -82,6 +82,7 @@ from win_integration import (
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
 from event_commands import BatchChange, EventChange, EventCommandHistory, EventPreview
+from calendar_event_service import event_service, EventOperationResult
 from event_selection import EventSelection
 from bulk_ui import BulkActionsMixin
 from schedule_drag import ScheduleHit
@@ -6646,6 +6647,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def _run_event_command(self, action: Callable[[], Optional[EventChange | BatchChange]], *, focus_result: bool = False) -> bool:
         try:
             change = action()
+            if isinstance(change, EventOperationResult):
+                change = change.change
         except (OSError, ValueError, OverflowError) as exc:
             owner = self._active_modal_window() or self
             owned_messagebox(owner, messagebox.showerror, APP_NAME, f"事项操作未完成，数据已保留。\n\n{exc}")
@@ -6703,20 +6706,20 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.ddl_list_window.refresh()
 
     def upsert_event(self, event: Event) -> bool:
-        return self._run_event_command(lambda: self.event_commands.upsert(event), focus_result=True)
+        return self._run_event_command(lambda: event_service(self.event_commands).upsert(event), focus_result=True)
 
     def commit_event_preview(self, preview: EventPreview, *, focus_result: bool = False) -> bool:
         """Shared mouse-release endpoint for future Flow and Timeline dragging."""
-        return self._run_event_command(lambda: self.event_commands.commit(preview), focus_result=focus_result)
+        return self._run_event_command(lambda: event_service(self.event_commands).commit(preview), focus_result=focus_result)
 
     def delete_event(self, event_id: str) -> bool:
-        return self._run_event_command(lambda: self.event_commands.delete(event_id))
+        return self._run_event_command(lambda: event_service(self.event_commands).delete(event_id))
 
     def toggle_done(self, event: Event) -> bool:
         current = self.store.event_by_id(event.id)
         if current is None:
             return False
-        return self._run_event_command(lambda: self.event_commands.update(
+        return self._run_event_command(lambda: event_service(self.event_commands).update(
             current.id, label="取消完成" if current.done else "完成事项", done=not current.done, snooze_until=None,
         ))
 
@@ -6756,7 +6759,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         title = self.quick_var.get().strip()
         if not title or self.quick_placeholder_active:
             return "break"
-        if not self._run_event_command(lambda: self.event_commands.create_quick(
+        if not self._run_event_command(lambda: event_service(self.event_commands).create_quick(
             title,
             self.selected,
             color=self.quick_color,
@@ -7138,7 +7141,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def defer_to_tomorrow(self, event: Event) -> None:
         current = self.store.event_by_id(event.id)
         if current is not None:
-            self._run_event_command(lambda: self.event_commands.commit(self.event_commands.preview_schedule(
+            self._run_event_command(lambda: event_service(self.event_commands).commit(event_service(self.event_commands).preview_schedule(
                 current.id, start_date=current.due_date + timedelta(days=1),
             )), focus_result=True)
 
@@ -7542,13 +7545,13 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.notification_windows.remove(popup)
 
     def snooze_event(self, event: Event, popup: tk.Toplevel) -> None:
-        if self._run_event_command(lambda: self.event_commands.update(
+        if self._run_event_command(lambda: event_service(self.event_commands).update(
             event.id, label="稍后提醒", snooze_until=(datetime.now() + timedelta(minutes=10)).isoformat(timespec="minutes"),
         )):
             popup.destroy()
 
     def complete_from_notification(self, event: Event, popup: tk.Toplevel) -> None:
-        if self._run_event_command(lambda: self.event_commands.update(
+        if self._run_event_command(lambda: event_service(self.event_commands).update(
             event.id, label="完成事项", done=True, snooze_until=None,
         )):
             popup.destroy()

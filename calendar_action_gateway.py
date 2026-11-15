@@ -7,6 +7,7 @@ import threading
 
 from calendar_core import Event, COLORS
 from event_input import build_event_candidate, EventInputError
+from calendar_event_service import CalendarEventService, OperationContext
 from event_commands import CommandConflictError
 from event_search import EventSearchIndex, capture_search_store
 from calendar_chat_tools import ChatError, iso_day, fail, validate_call
@@ -20,6 +21,7 @@ class CalendarActionGateway:
     def __init__(self, store, commands, dispatch=lambda fn: fn(), refresh=lambda change: None, writable=lambda: True, habit_refresh=lambda: None):
         self.store, self.commands, self.dispatch, self.refresh, self.writable = store, commands, dispatch, refresh, writable
         self.habit_refresh = habit_refresh
+        self.events = CalendarEventService(commands, OperationContext(source='calendar-chat'))
 
     def query(self, arguments):
         validate_call('query_events', arguments)
@@ -146,7 +148,7 @@ class CalendarActionGateway:
         else:
             patch = args if name == 'preview_create' else args['changes']
             candidate = self._patch(candidate, patch, creating=current is None)
-        preview = self.commands.preview_upsert(candidate, label='AI新建事项' if current is None else 'AI修改事项')
+        preview = self.events.preview_upsert(candidate, label='AI新建事项' if current is None else 'AI修改事项')
         return dict(event_id=identifier, before_hash=fingerprint(before),
                     before=asdict(current) if current else None, after=asdict(preview.event()),
                     before_summary=self._detail(current) if current else None, after_summary=self._detail(preview.event()),
@@ -204,13 +206,14 @@ class CalendarActionGateway:
         deleting = preview['after'] is None
         if not deleting:
             candidate = Event(**preview['after'])
-            command = self.commands.preview_upsert(candidate, label='AI确认事项操作')
+            command = self.events.preview_upsert(candidate, label='AI确认事项操作')
             if asdict(command.event()) != preview['after'] or [d.isoformat() for d in command.effective_dates] != preview['dates']:
                 fail('分类或工作日日历已变化，请重新预览。', 'operation_conflict')
         operation['status'] = 'executing'
         journal.put('operation', operation['operation_id'], owner, operation)
         try:
-            change = self.commands.delete(preview['event_id']) if deleting else self.commands.commit(command)
+            outcome = self.events.delete(preview['event_id']) if deleting else self.events.commit(command)
+            change = outcome.change
         except (OSError, ValueError) as error:
             raise ChatError('execution_failed', '日历保存未成功，未应用此修改。') from error
         result = dict(event=None if deleting else self._detail(self.store.event_by_id(preview['event_id'])),

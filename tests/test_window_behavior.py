@@ -1519,7 +1519,8 @@ class WindowBehaviorTests(unittest.TestCase):
                 "render": lambda self: captured.update(rendered=True),
             },
         )()
-        self.assertEqual(CalendarApp.quick_add(fake), "break")
+        with patch('app.event_service', return_value=fake.event_commands):
+            self.assertEqual(CalendarApp.quick_add(fake), "break")
         self.assertEqual(captured["event_type"], "ddl")
         self.assertEqual(captured["color"], "#E65D67")
         self.assertTrue(captured["rendered"])

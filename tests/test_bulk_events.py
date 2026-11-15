@@ -488,7 +488,8 @@ class BulkUiTests(unittest.TestCase):
         app.event_commands = Mock()
         app.clear_bulk_selection = Mock()
         app._run_event_command = lambda callback: bool(callback())
-        self.assertTrue(BulkActionsMixin._execute_bulk(app, "complete", done=True))
+        with patch('bulk_ui.event_service', return_value=app.event_commands):
+            self.assertTrue(BulkActionsMixin._execute_bulk(app, "complete", done=True))
         app.event_commands.bulk.assert_called_once_with(("a", "b"), "complete", done=True)
         app.clear_bulk_selection.assert_called_once()
 
