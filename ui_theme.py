@@ -649,18 +649,9 @@ SLATE = replace(
 )
 
 THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER, FRUTIGER, SLATE)}
-VALID_THEME_NAMES = tuple(THEMES)
-DEFAULT_THEME_NAME = MODERN.name
-# v0.6 and earlier builds saved ``win7_aero``.  ``aero`` is the stable
-# public settings ID; accepting both values keeps every existing profile valid.
-LEGACY_THEME_ALIASES = {"win7_aero": WIN7_AERO.name, "gemini_reviewing": SLATE.name}
-
-
-def normalize_theme_name(value: object) -> str:
-    if not isinstance(value, str):
-        return DEFAULT_THEME_NAME
-    normalized = LEGACY_THEME_ALIASES.get(value, value)
-    return normalized if normalized in THEMES else DEFAULT_THEME_NAME
+from desktop_preferences import (
+    VALID_THEME_NAMES, DEFAULT_THEME_NAME, LEGACY_THEME_ALIASES, normalize_theme_name,
+)
 
 
 def get_theme(value: object) -> Theme:

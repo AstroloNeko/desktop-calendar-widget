@@ -5,15 +5,14 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
-from calendar_action_gateway import CalendarActionGateway, TkDispatcher
-from calendar_chat_http import LocalChatHTTP
-from calendar_chat_service import CalendarChatService, envelope
-from calendar_chat_sessions import ChatJournal
+from tk_dispatcher import TkDispatcher
+from calendar_chat_service import envelope
 from calendar_chat_tools import ChatError
-from llm_provider import AIConfiguration, DeepSeekProvider
+from llm_provider import AIConfiguration
 from reminder_ui import reminder_button
 from themed_controls import themed_check
 from update_dialog import dialog_geometry
+from calendar_runtime import CalendarRuntime
 
 
 class ChatRuntime:
@@ -21,11 +20,12 @@ class ChatRuntime:
         self.app, self.window, self.http = app, None, None
         self.folder = app.store.data_file.parent / 'ai-assistant'
         self.configuration = AIConfiguration(self.folder)
-        self.journal = ChatJournal(self.folder / 'sessions.sqlite3', self.configuration.protector)
-        self.gateway = CalendarActionGateway(app.store, app.event_commands, TkDispatcher(app), app._refresh_event_change,
-            lambda: not app.lifecycle.exiting and not app.update_busy and not app._lifecycle_operation_depth
-            and (app._active_modal_window() is None or app._active_modal_window() is self.window), self.refresh_habits)
-        self.service = CalendarChatService(self.gateway, self.journal, DeepSeekProvider(self.configuration))
+        self.core = CalendarRuntime(app.store, app.event_commands, TkDispatcher(app),
+            configuration=self.configuration, refresh=app._refresh_event_change,
+            writable=lambda: not app.lifecycle.exiting and not app.update_busy and not app._lifecycle_operation_depth
+            and (app._active_modal_window() is None or app._active_modal_window() is self.window),
+            habit_refresh=self.refresh_habits)
+        self.journal, self.gateway, self.service = self.core.journal, self.core.gateway, self.core.service
         self.jobs = threading.BoundedSemaphore(4)
         self.error = None
         try:
@@ -41,19 +41,14 @@ class ChatRuntime:
             manager.refresh()
 
     def apply_http(self):
-        config = self.configuration.load()
-        if self.http:
-            self.http.stop()
-            self.http = None
-        if config.get('http_enabled'):
-            server = LocalChatHTTP(self.service, config['token'], config['port'])
-            try:
-                server.start()
-            except OSError:
-                raise ChatError('service_unavailable', '本机API端口不可用；请更换端口或关闭API。桌面聊天仍可使用。') from None
-            self.http = server
+        try:
+            self.core.apply_http()
+        finally:
+            self.http = self.core.http
 
     def submit(self, function, callback):
+        if self.service.stopped:
+            return
         if not self.jobs.acquire(blocking=False):
             callback(envelope(status='failed', error_code='service_busy', error_message='AI请求较多，请稍后重试。'))
             return
@@ -67,14 +62,13 @@ class ChatRuntime:
                 result = envelope(status='failed', error_code='execution_failed', error_message='AI操作未完成，请查看操作状态或重新查询。')
             finally:
                 self.jobs.release()
-            self.app._call_main(lambda: callback(result))
+            if not self.service.stopped:
+                self.app._call_main(lambda: callback(result) if not self.service.stopped else None)
         threading.Thread(target=run, daemon=True, name='calendar-chat-job').start()
 
     def stop(self):
-        self.service.stopped = True
-        if self.http:
-            self.http.stop()
-            self.http = None
+        self.core.stop()
+        self.http = None
 
 
 def open_chat(app):

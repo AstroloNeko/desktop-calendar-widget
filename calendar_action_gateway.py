@@ -3,7 +3,7 @@ from dataclasses import asdict, replace
 from datetime import date, datetime
 import hashlib
 import json
-import threading
+from tk_dispatcher import TkDispatcher  # Compatibility export; implementation is desktop-only.
 
 from calendar_core import Event, COLORS
 from event_input import build_event_candidate, EventInputError
@@ -254,30 +254,3 @@ class CalendarActionGateway:
                 return event is None
             return event is not None and asdict(event) == operation['preview']['after']
         return self.dispatch(check)
-
-
-class TkDispatcher:
-    def __init__(self, app):
-        self.app, self.owner = app, threading.get_ident()
-
-    def __call__(self, function):
-        from concurrent.futures import Future, TimeoutError
-        if threading.get_ident() == self.owner:
-            return function()
-        future = Future()
-        def run():
-            if self.app.lifecycle.exiting or self.app.lifecycle.stopped:
-                future.cancel()
-            elif future.set_running_or_notify_cancel():
-                try:
-                    future.set_result(function())
-                except Exception as error:
-                    future.set_exception(error)
-        if self.app.lifecycle.exiting or self.app.lifecycle.stopped:
-            fail('月历正在退出。', 'service_stopped')
-        self.app._call_main(run)
-        try:
-            return future.result(timeout=10)
-        except TimeoutError:
-            future.cancel()  # Prevent a timed-out queued callback from later mutating data.
-            fail('主窗口暂不可用，请稍后查询操作结果。', 'service_unavailable')

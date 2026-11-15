@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Optional
 
 from holiday_data import is_workday as system_is_workday
-from ui_theme import DEFAULT_THEME_NAME, normalize_theme_name
+from desktop_preferences import DEFAULT_THEME_NAME, normalize_theme_name
 from habit_schedule import habit_scheduled_on, normalize_schedule, rule_on, preserve_schedule_history
 from copy import deepcopy
 from data_compat import DATA_SCHEMA_VERSION, DataCompatibilityError, decode_calendar_data

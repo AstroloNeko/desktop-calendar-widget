@@ -19,6 +19,8 @@ class LocalChatHTTP:
         self.service, self.token = service, token
         self.port, self.server, self.thread = port, None, None
         self.rate, self.rate_lock = deque(), threading.Lock()
+        self.requests = threading.Condition()
+        self.active_requests = 0
 
     def start(self):
         if self.server:
@@ -35,8 +37,13 @@ class LocalChatHTTP:
                     request.close()
                     return
                 try:
+                    with adapter.requests:
+                        adapter.active_requests += 1
                     super().process_request(request, address)
                 except Exception:
+                    with adapter.requests:
+                        adapter.active_requests -= 1
+                        adapter.requests.notify_all()
                     self.permits.release()
                     raise
 
@@ -45,6 +52,9 @@ class LocalChatHTTP:
                     super().process_request_thread(request, address)
                 finally:
                     self.permits.release()
+                    with adapter.requests:
+                        adapter.active_requests -= 1
+                        adapter.requests.notify_all()
 
             def handle_error(self, request, client_address):
                 pass  # Never dump request data, tokens or service traceback to stderr/logs.
@@ -162,9 +172,13 @@ class LocalChatHTTP:
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .25}, daemon=True, name='calendar-chat-http')
         self.thread.start()
 
-    def stop(self):
+    def stop(self, *, wait_requests=False, timeout=10):
         if self.server:
             self.server.shutdown()
             self.server.server_close()
             self.thread.join(timeout=2)
             self.server = None
+        if wait_requests:
+            with self.requests:
+                if not self.requests.wait_for(lambda: self.active_requests == 0, timeout):
+                    raise ChatError('service_unavailable', 'HTTP请求尚未结束，关闭未完成。')
