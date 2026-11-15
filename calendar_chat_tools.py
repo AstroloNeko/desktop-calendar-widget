@@ -69,6 +69,7 @@ SCHEMAS = {
     "clarify": obj({"question": text(600)}, ("question",)),
 }
 SCHEMAS.update({
+    'delete_events_batch': obj({'event_ids':{'type':'array','minItems':1,'maxItems':10,'items':text(100)}},('event_ids',)),
     'batch_create_events': obj({'items': {'type':'array', 'minItems':1, 'maxItems':10,
         'items':obj(FIELDS, ('title','date'))}, 'distinct_colors':{'type':'boolean'}}, ('items',)),
     'batch_update_events': obj({'items': {'type':'array', 'minItems':1, 'maxItems':10,
@@ -78,6 +79,7 @@ SCHEMAS.update({
         'items':text(100)}, 'done':{'type':'boolean'}}, ('event_ids','done')),
 })
 DESCRIPTIONS = {
+    'delete_events_batch':'只准备当前完整删除候选集合的两级确认清单，不执行删除。需明确批量删除意图及真实稳定ID，不可单选代替全部。超过10条或截断须缩小范围。',
     'batch_create_events':'一次任务创建1至10个独立Event。items每项title/date与明确字段；随机不同颜色传distinct_colors=true，由本地固定选择。不是一个持续多日事项。',
     'batch_update_events':'一次原子修改1至10个已查得或recent_task中的Event ID，仅局部changes。不同颜色用distinct_colors=true；不得批量删除或修改Habit。',
     'batch_set_completion':'将已查得或recent_task中的1至10个Event设置done，整个任务一次提交，不是toggle。',

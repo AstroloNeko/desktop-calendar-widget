@@ -17,6 +17,7 @@ OWNER = 'local-owner'  # Derived from the adapter's authentication, never client
 READ_TOOLS = {'list_categories', 'query_events', 'get_event', 'query_habits', 'get_habit'}
 PROPOSAL_TOOLS = {'preview_create', 'preview_update', 'preview_complete', 'preview_delete', 'preview_create_habit', 'preview_update_habit'}
 PROPOSAL_TOOLS |= TASK_TOOLS
+PROPOSAL_TOOLS.add('delete_events_batch')
 MAX_ROUNDS, MAX_CALLS, MAX_BATCH, MAX_REPAIRS = 6, 18, 8, 2
 PLANNING_SECONDS = 90
 
@@ -73,14 +74,20 @@ class CalendarChatService:
             operation['status'] = 'expired'
             operation['error_code'] = 'operation_expired'
             operation['error_message'] = '操作已过期，请重新预览。'
+            if operation['preview'].get('object_type')=='batch_delete':
+                operation['stage']='expired'
             self.journal.put('operation', operation_id, owner, operation)
         if operation['status'] in ('executing', 'confirmed'):
             # Restart/crash recovery is observation-only, NEVER re-execution.
-            matched = self.gateway.recover(operation)
+            matched = self.gateway.dispatch(lambda: all(self.gateway.store.event_by_id(i) is None for i in operation['preview']['event_ids'])) if operation['preview'].get('object_type')=='batch_delete' else self.gateway.recover(operation)
             operation.update(status='succeeded' if matched else 'failed',
                              error_code=None if matched else 'execution_uncertain',
                              error_message=None if matched else '无法确认上次操作是否完成；已禁止自动重试，请核对日历后继续。',
                              operation_result={'recovered': True, 'event_id': operation['preview']['event_id']} if matched else None)
+            if operation['preview'].get('object_type')=='batch_delete':
+                operation['stage']='completed' if matched else 'uncertain'
+                if matched:
+                    operation['operation_result']=dict(recovered=True,deleted=True,event_ids=operation['preview']['event_ids'],count=len(operation['preview']['event_ids']))
             self.journal.put('operation', operation_id, owner, operation)
         return operation
 
@@ -104,6 +111,8 @@ class CalendarChatService:
                      confirmation_status='confirmed' if op.get('confirmed_at') is not None else 'not_confirmed',
                      authorization=op.get('authorization', 'explicit_confirmation' if op.get('confirmed_at') is not None else 'pending'),
                      status=op['status'], error_code=op.get('error_code'))
+        if op['preview'].get('object_type')=='batch_delete':
+            audit.update(event_ids=op['preview']['event_ids'],stage=op.get('stage'))
         self.journal.put('audit', op['operation_id'], owner, audit)
 
     def _pending_status(self, session, owner):
@@ -116,6 +125,9 @@ class CalendarChatService:
             op = self._operation(session_id, operation_id, owner)
             if op['status'] != 'pending':
                 return self.get_operation_result(session_id, operation_id, owner)
+            if op['preview'].get('object_type')=='batch_delete':
+                from calendar_batch_delete import confirm
+                return confirm(self,op,owner,revision,automatic)
             if revision is not None and revision != op['revision']:
                 fail('预览已经更新，请查看最新卡片后再确认。', 'operation_conflict')
             op['status'] = 'confirmed'
@@ -145,6 +157,12 @@ class CalendarChatService:
             op = self._operation(session_id, operation_id, owner)
             if op['status'] == 'pending':
                 op['status'] = 'cancelled'
+                if op['preview'].get('object_type')=='batch_delete':
+                    op['stage']='cancelled'
+                    session=self.get_session(session_id,owner)
+                    for key in ('batch_delete_intent','delete_title','delete_range','delete_scope','delete_intent'):
+                        session.pop(key,None)
+                    self.journal.put('session',session_id,owner,session)
                 self.journal.put('operation', operation_id, owner, op)
                 self._audit(op, owner, source)
             return self.get_operation_result(session_id, operation_id, owner)
@@ -168,6 +186,14 @@ class CalendarChatService:
     def _tool(self, name, args, session, owner, request_id, source, message='', diagnostic=None, continuation=(), target_lock=None):
         validate_call(name, args)
         args = deepcopy(args)
+        if name=='delete_events_batch':
+            from calendar_batch_delete import prepare
+            if not session.get('delete_intent'):
+                fail('请先明确批量删除范围。','clarification_required')
+            return prepare(self,session,args['event_ids'],owner,request_id)
+        if name=='preview_delete' and session.get('batch_delete_intent') and session.get('delete_scope'):
+            from calendar_batch_delete import prepare
+            return prepare(self,session,session['delete_scope']['ids'],owner,request_id)
         if name in TASK_TOOLS:
             task = run_task(self,name,args,session,owner,request_id,source,message)
             return envelope(session['session_id'],request_id,status='succeeded',
@@ -227,7 +253,28 @@ class CalendarChatService:
             session['clarification'] = args['question']
             return envelope(sid, request_id, status='clarification_required', assistant_message=args['question'], habit_candidates=session.get('habit_candidates', []))
         if name == 'query_events':
-            result = self.gateway.query(args)
+            if session.get('batch_delete_intent'):
+                keyword=args.get('keyword','').strip(' \t\r\n\"\'“”‘’「」')
+                if not keyword or keyword in ('全部','所有'):
+                    fail('请明确要删除的事项标题，不能搜索“全部”。','clarification_required')
+                args['keyword']=keyword
+                scope_range=session.get('delete_range') or session.get('clarified_query') or {}
+                if 'start' not in args or 'end' not in args:
+                    if not all(k in scope_range for k in ('start','end')):
+                        fail('请明确“这几天”的开始和结束日期。','clarification_required')
+                    args.update(start=scope_range['start'],end=scope_range['end'])
+            result = self.gateway.query_delete_targets(args) if session.get('batch_delete_intent') else self.gateway.query(args)
+            if diagnostic is not None:
+                diagnostic.update(query_mode='exact_title' if session.get('batch_delete_intent') else 'search',
+                    keyword_ref=fingerprint(args.get('keyword',''))[:16],date_range=[args.get('start'),args.get('end')],total=result['total'])
+            if session.get('delete_intent') and not session.get('batch_delete_intent'):
+                self._bind_delete_scope(session,result,args)
+            if session.get('batch_delete_intent'):
+                # Destructive selection is exact-title, not the generic fuzzy search.
+                result['events']=[r for r in result['events'] if r['title'].strip()==args['keyword']]
+                if not result.get('truncated'):
+                    result['total']=len(result['events'])
+                self._bind_delete_scope(session,result,args)
             session['clarified_query'] = args
             session['candidates'] = result['events']
             session['selected_kind'] = 'event'
@@ -351,7 +398,11 @@ class CalendarChatService:
                               pending_status_after=pending_status,
                               status=response['status'])
             if (response.get('operation_result') or {}).get('deleted'):
-                session.pop('delete_intent',None)
+                for field in ('delete_intent','batch_delete_intent','delete_scope','delete_range','delete_title'):
+                    session.pop(field,None)
+            if response['status']=='cancelled' and (response.get('pending_operation') or {}).get('preview',{}).get('object_type')=='batch_delete':
+                for field in ('delete_intent','batch_delete_intent','delete_scope','delete_range','delete_title'):
+                    session.pop(field,None)
             self.journal.put('diagnostic', key, owner, diagnostic)
             response.update(request_id=request_id, session_id=session_id)
             session['messages'].append({'message_id': secrets.token_urlsafe(12), 'request_id': request_id,
@@ -374,7 +425,49 @@ class CalendarChatService:
                 fail('任务不属于当前会话。','authentication_failed')
             return recover_task(self,task,owner)
 
+    def _bind_delete_scope(self,session,result,args):
+        rows=result['events']
+        hashes=self.gateway.dispatch(lambda: {r['id']:fingerprint(self.gateway._state(r['id'])) for r in rows})
+        session['delete_scope']=dict(clarification_id=secrets.token_urlsafe(24),intent='batch_delete',
+            ids=[r['id'] for r in rows],total=result['total'],truncated=result.get('truncated',False),
+            hashes=hashes,filters=args,expires=self.clock()+900)
+
     def _conversation(self, session, message, request_id, owner, source, diagnostic):
+        if re.search(r'查询|查找|有什么|有哪些|查一下',message) and not re.search(r'删|移除',message):
+            for key in ('batch_delete_intent','delete_intent','delete_title','delete_range','delete_scope'):
+                session.pop(key,None)
+        if re.search(r'删|删除|移除',message) and re.search(r'全部|全删|所有|这几天.*全',message):
+            session.update(batch_delete_intent=True,delete_intent=True)
+            title=re.sub(r'^(?:请|帮我|把|这几天|这些天|所有的|所有|全部|的|\s)+','',message.strip())
+            title=re.sub(r'(?:全部|全)?(?:删除了|删除|删了|删掉|移除)[。！!\s]*$','',title)
+            title=title.strip(' \t\r\n\"\'“”‘’「」')
+            if title and len(title)<=100 and title!=message.strip():
+                session['delete_title']=title
+        if message.strip() in ('全部','全选','所有','全部删除','全删') and session.get('delete_intent'):
+            session['batch_delete_intent']=True
+        if session.get('batch_delete_intent') and message.strip() in ('全部','全选','所有','全部删除','全删'):
+            scope=session.get('delete_scope')
+            if not scope:
+                return envelope(session['session_id'],request_id,status='clarification_required',assistant_message='没有有效删除清单，请指定标题和起止日期；不会选择整个日历。')
+            from calendar_batch_delete import prepare
+            return prepare(self,session,scope['ids'],owner,request_id)
+        if session.get('batch_delete_intent') and session.get('delete_title') and (re.search(r'删|移除',message) or len(re.findall(r'\d{4}-\d{2}-\d{2}',message))==2):
+            dates=re.findall(r'\d{4}-\d{2}-\d{2}',message)
+            bounds=session.get('delete_range') or session.get('clarified_query') or {}
+            if len(dates)==2:
+                bounds=dict(start=dates[0],end=dates[1])
+            elif not all(k in bounds for k in ('start','end')) and session.get('recent_task'):
+                days=[e['date'] for e in session['recent_task']['events']]
+                bounds=dict(start=min(days),end=max(days))
+            if not all(k in bounds for k in ('start','end')):
+                return envelope(session['session_id'],request_id,status='clarification_required',assistant_message='请明确“这几天”的开始和结束日期，例如 2026-11-15 至 2026-11-17。')
+            session['delete_range']=dict(start=bounds['start'],end=bounds['end'])
+            result=self._tool('query_events',dict(keyword=session['delete_title'],**session['delete_range']),
+                session,owner,request_id,source,message=message,diagnostic=diagnostic)
+            if not result['total']:
+                return envelope(session['session_id'],request_id,status='ok',assistant_message='该日期范围内没有精确匹配标题的事项，未删除任何内容。')
+            from calendar_batch_delete import prepare
+            return prepare(self,session,session['delete_scope']['ids'],owner,request_id)
         recent = session.get('recent_task')
         if recent and (not session.get('active_task') or self.journal.get('task',session['active_task'],owner)['status']=='completed') and message.strip() in ('继续','继续添加'):
             return envelope(session['session_id'],request_id,status='ok',assistant_message='上一批事项已完成，没有重复添加。请说明新的安排。')
@@ -462,6 +555,7 @@ class CalendarChatService:
                   '修改时changes必须是本次用户要求的局部Patch，改名仅传title，不要重发其他Event字段或默认值。'
                   '多候选只能请用户点击候选项或回复序号，不可替用户选择。未确认的修改使用相同event_id合并。')
         system += ('明确多个独立Event使用一个batch_create_events/batch_update_events/batch_set_completion工具，最多10项，宿主原子保存；不可分成多个单事项提案。'
+                   '批量删除使用delete_events_batch，先按精确标题与明确起止日期查询完整目标集合；用户全部表示当前完整集合，不是单选；必须两级本地确认，不能自动删除。'
                    '往后/未来三天各一个表示从明天起三天，连续三天一个任务不是三个独立Event。随机不同颜色传distinct_colors=true，本地固定抽取。'
                    '第二天/第二个/最后一个和前面那批优先用recent_task日期顺序和稳定ID，不重新模糊搜索。'
                    '明确删除或可信状态delete_intent=true时只定位并preview_delete，不询问删除还是未完成；删除仍需一次确认。')
