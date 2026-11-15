@@ -178,7 +178,10 @@ class EventCommandHistory:
                 self.store.persist_routine(item)
             else:
                 self.store.delete_routine(command.routine_id)
-        except BaseException:
+        except BaseException as exc:
+            from calendar_core import MutationUncertainError
+            if isinstance(exc, MutationUncertainError):
+                raise
             self.store.routines, self.store.notified = before_items, before_keys
             raise
         return RoutineChange(command.routine_id, command.label)

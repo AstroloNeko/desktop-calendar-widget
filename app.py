@@ -83,6 +83,7 @@ from win_integration import (
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
 from event_commands import BatchChange, EventChange, EventCommandHistory, EventPreview
 from calendar_event_service import event_service, EventOperationResult
+from calendar_mutation_service import mutation_service
 from event_selection import EventSelection
 from bulk_ui import BulkActionsMixin
 from schedule_drag import ScheduleHit
@@ -1820,20 +1821,17 @@ class RoutineEditor(tk.Toplevel):
             reminder_time=reminder_time,
             **schedule,
         )
-        self.master_app.event_commands.upsert_routine(item)
-        self.master_app.invalidate_reminders()
-        self.master_app.render()
-        if self.master_app.routine_manager and self.master_app.routine_manager.winfo_exists():
-            self.master_app.routine_manager.refresh()
-        self.close()
+        if self.master_app._run_aux_mutation(
+            lambda: mutation_service(self.master_app.event_commands).upsert_routine(item),
+            self.master_app._refresh_routine_mutation, owner=self):
+            self.close()
 
     def delete(self) -> None:
         if self.item and owned_messagebox(self, messagebox.askyesno, APP_NAME, f"确定删除“{self.item.title}”？"):
-            self.master_app.store.delete_routine(self.item.id)
-            self.master_app.render()
-            if self.master_app.routine_manager and self.master_app.routine_manager.winfo_exists():
-                self.master_app.routine_manager.refresh()
-            self.close()
+            if self.master_app._run_aux_mutation(
+                lambda: mutation_service(self.master_app.event_commands).delete_routine(self.item.id),
+                self.master_app._refresh_routine_mutation, owner=self):
+                self.close()
 
     def close(self) -> None:
         if getattr(self, "_closing", False):
@@ -2094,9 +2092,10 @@ class CategoryEditor(tk.Toplevel):
             sort_order=self.category.sort_order if self.category else len(self.master_app.store.categories),
             created_at=self.category.created_at if self.category else "",
         )
-        self.master_app.store.upsert_category(category)
-        self.master_app.category_data_changed()
-        self.close()
+        if self.master_app._run_aux_mutation(
+            lambda: mutation_service(self.master_app.event_commands).upsert_category(category),
+            self.master_app.category_data_changed, owner=self):
+            self.close()
 
     def close(self) -> None:
         if self._closing:
@@ -2211,9 +2210,9 @@ class CategoryManager(tk.Toplevel):
             f"确定删除分类“{category.name}”？\n\n所属事项会保留并转为无分类，当前显示颜色也会保留。",
         ):
             return
-        self.master_app.store.delete_category(category.id)
-        self.master_app.category_data_changed()
-        self.refresh()
+        self.master_app._run_aux_mutation(
+            lambda: mutation_service(self.master_app.event_commands).delete_category(category.id),
+            self.master_app.category_data_changed, owner=self)
 
     def close(self) -> None:
         if self._closing:
@@ -2523,10 +2522,10 @@ class DayDetailDialog(tk.Toplevel):
             widget.bind("<Button-1>", lambda _event: self._open_routine_editor(item))
 
     def _save_status(self) -> None:
-        self.master_app.store.set_date_status(self.day, self.status_var.get())
-        if getattr(self.master_app, "search_service", None) is not None:
-            self.master_app._invalidate_search()
-        self.master_app.render()
+        if not self.master_app._run_aux_mutation(
+            lambda: mutation_service(self.master_app.event_commands).set_date_status(self.day, self.status_var.get()),
+            self.master_app._refresh_date_mutation, owner=self):
+            self.status_var.set(self.master_app.store.date_status(self.day))
 
     def _update_scrollbar(self) -> None:
         self.list_inner.update_idletasks()
@@ -5548,12 +5547,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         menu.tk_popup(x, y)
 
     def _set_flow_range_status(self, start_date: date, end_date: date, status: str) -> None:
-        current = start_date
-        while current <= end_date:
-            self.store.set_date_status(current, status)
-            current += timedelta(days=1)
-        self._invalidate_search()
-        self.render()
+        self._run_aux_mutation(
+            lambda: mutation_service(self.event_commands).set_date_status(start_date, status, end_date),
+            self._refresh_date_mutation)
 
     def _sync_global_xscroll(self, first: str, last: str) -> None:
         self.global_hscroll.set(first, last)
@@ -6748,12 +6744,39 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.undo_event()
         return "break"
 
-    def toggle_routine(self, item: RoutineItem, day: Optional[date] = None) -> None:
-        target_day = day or self.selected
-        self.store.toggle_routine(item, target_day)
+    def _run_aux_mutation(self, operation, refresh, *, owner=None) -> bool:
+        """Never replay a successful business commit when a view refresh fails."""
+        owner = owner or self._active_modal_window() or self
+        try:
+            result = operation()
+        except (ValueError, OSError) as exc:
+            owned_messagebox(owner, messagebox.showerror, APP_NAME, str(exc))
+            return False
+        if result.changed:
+            try:
+                refresh()
+            except Exception:
+                owned_messagebox(owner, messagebox.showwarning, APP_NAME,
+                                 "数据已保存，但界面刷新未完成。请重新打开视图，不要重复提交。")
+        return True
+
+    def _refresh_date_mutation(self) -> None:
+        if getattr(self, "search_service", None) is not None:
+            self._invalidate_search()
+        self._refresh_routine_mutation()
+
+    def _refresh_routine_mutation(self) -> None:
+        self.invalidate_reminders()
         self.render()
         if self.routine_manager and self.routine_manager.winfo_exists():
             self.routine_manager.refresh()
+
+    def toggle_routine(self, item: RoutineItem, day: Optional[date] = None) -> None:
+        target_day = day or self.selected
+        current = next((r for r in self.store.routines if r.id == item.id), item)
+        self._run_aux_mutation(
+            lambda: mutation_service(self.event_commands).set_routine_completed(item.id, target_day, not current.is_done_on(target_day)),
+            self._refresh_routine_mutation)
 
     def quick_add(self, _event=None) -> str:
         title = self.quick_var.get().strip()

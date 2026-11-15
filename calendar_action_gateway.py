@@ -207,11 +207,12 @@ class CalendarActionGateway:
             item = RoutineItem(**preview['after'])
             operation['status'] = 'executing'
             journal.put('operation', operation['operation_id'], owner, operation)
-            before = list(self.store.routines)
             try:
-                change = self.commands.upsert_routine(item)
-            except (OSError, ValueError):
-                self.store.routines = before
+                from calendar_mutation_service import mutation_service
+                change = mutation_service(self.commands).upsert_routine(item).change
+            except (OSError, ValueError) as exc:
+                if getattr(exc, 'code', None) == 'execution_uncertain':
+                    fail('习惯保存结果待核查，请勿重复操作。', 'execution_uncertain')
                 fail('习惯保存未成功，未应用此操作。', 'execution_failed')
             result = dict(object_type='habit', habit_id=item.id, action='updated' if current else 'created', habit=dict(id=item.id, title=item.title,
                 color=item.color, schedule=preview['schedule'], next_on=preview['next_on']), changed=change is not None)
