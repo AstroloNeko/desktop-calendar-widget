@@ -13,7 +13,7 @@ from holiday_data import is_workday as system_is_workday
 from desktop_preferences import DEFAULT_THEME_NAME, normalize_theme_name
 from habit_schedule import habit_scheduled_on, normalize_schedule, rule_on, preserve_schedule_history
 from copy import deepcopy
-from data_compat import DATA_SCHEMA_VERSION, DataCompatibilityError, decode_calendar_data
+from data_compat import DATA_SCHEMA_VERSION, DataCompatibilityError
 from version import __version__
 
 
@@ -398,7 +398,15 @@ DEFAULT_SETTINGS = {
 
 
 class Store:
-    def __init__(self, data_file: Optional[Path] = None) -> None:
+    @property
+    def supported_schema(self):
+        return DATA_SCHEMA_VERSION
+
+    @property
+    def application_version(self):
+        return __version__
+
+    def __init__(self, data_file: Optional[Path] = None, *, repository_factory=None) -> None:
         self.data_file = data_file or DATA_FILE
         self.events: list[Event] = []
         self.categories: list[EventCategory] = []
@@ -408,13 +416,17 @@ class Store:
         self.notified: set[str] = set()
         self.load_error: Optional[str] = None
         self._migration_backup_pending = False
+        if repository_factory is None:
+            from json_calendar_repository import JsonCalendarRepository
+            repository_factory = JsonCalendarRepository
+        self.repository = repository_factory(self)
         self.load()
 
     def load(self) -> None:
         self.load_error = None
         self._migration_backup_pending = False
         try:
-            raw = decode_calendar_data(self.data_file.read_bytes(), supported=DATA_SCHEMA_VERSION, app_version=__version__)
+            raw = self.repository.read_document()
             self._migration_backup_pending = raw.get("version", 1) < DATA_SCHEMA_VERSION
             categories: list[EventCategory] = []
             seen_category_ids: set[str] = set()
@@ -489,38 +501,8 @@ class Store:
             self.load_error = str(exc)
 
     def save(self) -> None:
-        # Refuse before creating a checkpoint, directory or temporary file.
-        # In particular a still-open older app must never downgrade data that
-        # another compatible process has subsequently migrated.
-        if self.load_error:
-            raise DataCompatibilityError(f"当前数据未能安全加载，已拒绝保存：{self.load_error}")
-        try:
-            disk = self.data_file.read_bytes()
-        except FileNotFoundError:
-            pass
-        else:
-            decode_calendar_data(disk, supported=DATA_SCHEMA_VERSION, app_version=__version__)
-        if self._migration_backup_pending and self.data_file.exists():
-            from data_backup import automatic_backup
-            # Do not persist a schema migration unless its original data has
-            # first been protected. Failed checkpoints leave the old file intact.
-            automatic_backup(self.data_file, reason="before-migration", force=True)
-            self._migration_backup_pending = False
-        self.data_file.parent.mkdir(parents=True, exist_ok=True)
-        notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
-        payload = {
-            "version": DATA_SCHEMA_VERSION,
-            "events": [asdict(event) for event in self.events],
-            "categories": [asdict(category) for category in self.sorted_categories()],
-            "routines": [asdict(item) for item in self.routines],
-            "date_states": self.date_states,
-            "settings": self.settings,
-            "notified": notification_history,
-        }
-        temporary = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.data_file)
-        self.notified = set(notification_history)
+        """Legacy preferences/reminder/backup bridge; business commits use apply_changes."""
+        self.repository.write_current()
 
     def prepare_event(self, event: Event) -> Event:
         """Validate a detached candidate without changing canonical tasks or writing data."""
@@ -556,7 +538,6 @@ class Store:
         for identifier, event, _index, _keys in states:
             if event is not None and event.id != identifier:
                 raise ValueError("event id cannot change")
-        previous_events, previous_notified = self.events, self.notified
         affected = set(ids)
         replacement = [item for item in self.events if item.id not in affected]
         insertions = [(index if index is not None else len(self.events), event)
@@ -566,12 +547,7 @@ class Store:
         prefixes = tuple(identifier + ":" for identifier in ids)
         notifications = {key for key in self.notified if not key.startswith(prefixes)}
         notifications.update(key for _id, _event, _index, keys in states for key in keys)
-        self.events, self.notified = replacement, notifications
-        try:
-            self.save()
-        except Exception:
-            self.events, self.notified = previous_events, previous_notified
-            raise
+        self._commit_fields(events=replacement, notified=notifications)
 
     def duration_for_range(self, start: date, end: date, *, skip_non_working_days: bool = False) -> int:
         """Convert a resize endpoint into the same effective-day count used by Event."""
@@ -680,39 +656,8 @@ class Store:
         self.events = originals
 
     def _commit_fields(self, **candidates) -> bool:
-        """Publish detached affected fields once, restoring original references on failure.
-
-        This is a single-process JSON boundary, not a database/multi-process transaction.
-        Callers must never mutate canonical objects while preparing candidates.
-        """
-        if all(getattr(self, key) == value for key, value in candidates.items()):
-            return False
-        def disk_digest():
-            import hashlib
-            try:
-                with self.data_file.open('rb') as stream:
-                    return hashlib.file_digest(stream, 'sha256').digest()
-            except FileNotFoundError:
-                return None
-        original_digest = disk_digest()
-        before = {key: getattr(self, key) for key in candidates}
-        before.setdefault('notified', self.notified)
-        for key, value in candidates.items():
-            setattr(self, key, value)
-        try:
-            self.save()
-        except BaseException as exc:
-            try:
-                unchanged = disk_digest() == original_digest
-            except OSError:
-                unchanged = False
-            if not unchanged:
-                self.load_error = "保存结果待核查，已停止继续写入；请重新加载并核对数据，不要重复操作。"
-                raise MutationUncertainError(self.load_error) from exc
-            for key, value in before.items():
-                setattr(self, key, value)
-            raise
-        return True
+        """Legacy algorithm bridge to the single repository transaction boundary."""
+        return self.repository.apply_changes(candidates).changed
 
     def effective_event_color(self, event: Event) -> str:
         if event.color_mode == "inherit":

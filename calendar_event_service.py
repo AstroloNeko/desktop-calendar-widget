@@ -5,6 +5,8 @@ from typing import Optional
 from data_compat import DataCompatibilityError
 from event_commands import EventPreview, BatchPreview, EventChange, BatchChange, CommandConflictError
 from event_input import build_event_candidate
+from calendar_repository import RepositoryConflictError
+from calendar_core import MutationUncertainError
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class EventOperationResult:
 class CalendarEventService:
     def __init__(self, history, context=None):
         self.history = history
+        self.repository = history.store.repository
         self.context = context or OperationContext()
 
     def _call(self, function):
@@ -62,9 +65,11 @@ class CalendarEventService:
             return function()
         except EventOperationError:
             raise
+        except MutationUncertainError as exc:
+            raise EventOperationError('execution_uncertain', str(exc)) from exc
         except DataCompatibilityError as exc:
             raise EventOperationError('incompatible_data', str(exc)) from exc
-        except CommandConflictError as exc:
+        except (CommandConflictError, RepositoryConflictError) as exc:
             raise EventOperationError('operation_conflict', str(exc)) from exc
         except OSError as exc:
             raise EventOperationError('storage_unavailable', '日历保存未成功，请检查存储是否可用。') from exc
@@ -83,7 +88,7 @@ class CalendarEventService:
         return self._call(lambda: self.history.preview_update(identifier, **options))
 
     def preview_patch(self, identifier, changes):
-        current = self.history.store.event_by_id(identifier)
+        current = self._call(lambda: self.repository.get_event(identifier))
         if current is None:
             raise EventOperationError('event_not_found', '事项已不存在。')
         return self._call(lambda: self.history.preview_upsert(build_event_candidate(

@@ -76,6 +76,7 @@ def capture_search_store(store: Store) -> Store:
     calendar rules. Mutable event/category objects are cloned before dispatch.
     """
     snapshot = copy(store)
+    snapshot.repository = None  # Read-only Legacy Bridge; never retain a live storage capability.
     snapshot.events = [replace(event) for event in store.events]
     snapshot.categories = [replace(category) for category in store.categories]
     snapshot.date_states = dict(store.date_states)

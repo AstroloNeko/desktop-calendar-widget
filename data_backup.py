@@ -191,6 +191,9 @@ def restore_store(store, backup: Path, *, apply=None) -> Path:
         replaced = True
         candidate.data_file = store.data_file
         store.__dict__.update(candidate.__dict__)
+        # Keep the active adapter bound to the actual Store, not the staging Store.
+        store.repository = old_state['repository']
+        store.repository.invalidate_snapshots()
         if apply is not None:
             apply()
         return protection

@@ -62,7 +62,7 @@ class CalendarMutationService(CalendarEventService):
                               affected_dates=frozenset((day,)), reminders_changed=changed, context=self.context)
 
     def upsert_category(self, category):
-        before = self.store.category_by_id(category.id)
+        before = self.repository.get_category(category.id)
         changed = before != category
         ids = tuple(e.id for e in self.store.events if e.category_id == category.id)
         self._call(lambda: self.store.upsert_category(category))

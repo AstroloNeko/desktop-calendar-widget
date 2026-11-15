@@ -25,10 +25,13 @@ class CalendarRuntime:
     """Caller supplies ownership, refresh ports and existing desktop history."""
     def __init__(self, store, history, dispatch, *, configuration=None, journal=None,
                  provider=None, clock=time.time, refresh=lambda change: None,
-                 habit_refresh=lambda: None, writable=lambda: True):
+                 habit_refresh=lambda: None, writable=lambda: True, repository=None):
         self.state = 'starting'
         self.http = None
         self.dispatch = dispatch
+        if repository is not None and repository is not store.repository:
+            raise ValueError('Repository must be the Store-owned adapter; inject its factory when creating Store.')
+        self.repository = store.repository
         self.configuration = configuration or AIConfiguration(store.data_file.parent / 'ai-assistant')
         self.journal = journal or ChatJournal(self.configuration.folder / 'sessions.sqlite3', self.configuration.protector)
         self.gateway = CalendarActionGateway(store, history, dispatch, refresh,
@@ -94,14 +97,14 @@ class HeadlessRuntime:
     executor. Use events/mutations/query/snapshot/undo/redo instead of raw Store.
     """
     def __init__(self, data_file, *, provider=None, protector=None, configuration=None,
-                 journal=None, clock=time.time, notification_backend=None, timeout=10):
+                 journal=None, clock=time.time, notification_backend=None, timeout=10, repository_factory=None):
         self.state = 'starting'
         self._stop_lock = threading.Lock()
         self.executor = SerialExecutor(timeout)
         self._core = None
         try:
             def compose():
-                self._store = Store(Path(data_file))
+                self._store = Store(Path(data_file), repository_factory=repository_factory)
                 self._history = EventCommandHistory(self._store)
                 self._reminders = None
                 config = configuration or AIConfiguration(self._store.data_file.parent / 'ai-assistant', protector)
@@ -139,9 +142,12 @@ class HeadlessRuntime:
 
     def snapshot(self):
         from dataclasses import asdict
-        return self._call(lambda: dict(events=[asdict(e) for e in self._store.events],
-            routines=[asdict(r) for r in self._store.routines],
-            categories=[asdict(c) for c in self._store.categories], date_states=self._store.date_states))
+        def read():
+            snapshot = self._core.repository.read_calendar_snapshot()
+            return dict(events=[asdict(e) for e in snapshot['events']],
+                routines=[asdict(r) for r in snapshot['routines']],
+                categories=[asdict(c) for c in snapshot['categories']], date_states=snapshot['date_states'])
+        return self._call(read)
 
     def undo(self):
         return self._call(lambda: self._history_change(self._history.undo))

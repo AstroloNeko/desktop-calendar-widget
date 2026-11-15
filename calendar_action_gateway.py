@@ -21,6 +21,7 @@ class CalendarActionGateway:
     def __init__(self, store, commands, dispatch=lambda fn: fn(), refresh=lambda change: None, writable=lambda: True, habit_refresh=lambda: None):
         self.store, self.commands, self.dispatch, self.refresh, self.writable = store, commands, dispatch, refresh, writable
         self.habit_refresh = habit_refresh
+        self.repository = store.repository
         self.events = CalendarEventService(commands, OperationContext(source='calendar-chat'))
 
     def query(self, arguments):
@@ -29,7 +30,7 @@ class CalendarActionGateway:
 
     def categories(self):
         return self.dispatch(lambda: {'categories': [{'id': category.id, 'name': category.name, 'color': category.color}
-                              for category in self.store.sorted_categories()[:100]], 'palette': dict(COLORS)})
+                              for category in self.repository.list_categories()[:100]], 'palette': dict(COLORS)})
 
     def query_delete_targets(self,args):
         """Exact title + explicit date interval, never a fuzzy search for deletion."""
@@ -41,7 +42,7 @@ class CalendarActionGateway:
         if end<start or (end-start).days>366:
             fail('删除查询范围应为0至366天。','clarification_required')
         def read():
-            found=[self._detail(e) for e in self.store.events if e.title.strip()==title
+            found=[self._detail(e) for e in self.repository.list_events() if e.title.strip()==title
                 and ('done' not in args or e.done==args['done'])
                 and ('category_id' not in args or e.category_id==args['category_id'])
                 and any(start<=d<=end for d in self.store.event_dates(e))]
@@ -52,7 +53,7 @@ class CalendarActionGateway:
     def query_habits(self, args):
         validate_call('query_habits', args)
         def read():
-            items = [r for r in self.store.routines if r.kind == 'habit' and args.get('keyword', '').casefold() in r.title.casefold()]
+            items = [r for r in self.repository.list_routines() if r.kind == 'habit' and args.get('keyword', '').casefold() in r.title.casefold()]
             return dict(habits=[self._habit_detail(r) for r in items[:30]], total=len(items))
         return self.dispatch(read)
 
@@ -85,7 +86,7 @@ class CalendarActionGateway:
             index = EventSearchIndex.from_store(capture_search_store(store))
             matches = {result.key for result in index.query(args['keyword'], limit=len(store.events)) if result.kind == 'event'}
         found = []
-        for event in store.events:
+        for event in self.repository.list_events():
             if matches is not None and event.id not in matches:
                 continue
             if 'done' in args and event.done != args['done']:
