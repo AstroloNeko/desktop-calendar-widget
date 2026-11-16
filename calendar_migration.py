@@ -157,6 +157,10 @@ def dry_run_migration(source, staging_directory, *, clock=datetime(2026,1,15,12)
     report=dict(status='rejected',candidate_ready=False,switch_allowed=False,
         validation=validation.report(),issues=[],timings_ms={'validation':validation.elapsed_ms},
         candidate_path=None,source_unchanged=None,clock=clock.isoformat() if isinstance(clock,datetime) else None,comparison=None)
+    report.update(validation.compatibility)
+    report.update(source_schema_version=validation.source.get('json_schema'),
+                  source_sha256=validation.source.get('sha256'),original_counts=validation.counts,
+                  target_sqlite_schema_version=SCHEMA_VERSION)
     target=stage/'calendar.candidate.sqlite3'
     owned=False; reserved=[]; store=None; phase='path_validation'
     def issue(code,message,path='$'):
@@ -207,6 +211,7 @@ def dry_run_migration(source, staging_directory, *, clock=datetime(2026,1,15,12)
         phase='inconsistent_snapshot';started=time.perf_counter()
         comparison=_compare_candidate(document,store,source,clock)
         report['comparison']=comparison
+        report['semantic_comparison']=comparison
         report['imported_counts']=dict(events=len(store.events),routines=len(store.routines),
             categories=len(store.categories),date_states=len(store.date_states),
             habit_completions=sum(len(r.habit_done) for r in store.routines),

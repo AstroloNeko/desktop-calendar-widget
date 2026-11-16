@@ -134,7 +134,7 @@ class MigrationTests(unittest.TestCase):
         self.assertIn('duplicate_json_key',{i.code for i in validate_source(self.source).issues})
 
     def test_old_schema_explicitly_not_imported(self):
-        for schema in range(1,9):
+        for schema in range(1,8):
             self.data['version']=schema
             self.assertIn('unsupported_schema',self.codes())
 

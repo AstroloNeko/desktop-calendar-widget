@@ -45,6 +45,7 @@ class ValidationResult:
     normalizations: list = field(default_factory=list)
     preference_scopes: dict = field(default_factory=dict)
     elapsed_ms: float = 0
+    compatibility: dict = field(default_factory=dict)
     _document: dict | None = field(default=None, repr=False)
 
     @property
@@ -54,7 +55,7 @@ class ValidationResult:
     def report(self):
         return dict(source=self.source,counts=self.counts,valid=self.valid,
             issues=[asdict(i) for i in self.issues],normalizations=self.normalizations,
-            preference_scopes=self.preference_scopes,elapsed_ms=self.elapsed_ms)
+            preference_scopes=self.preference_scopes,elapsed_ms=self.elapsed_ms,compatibility=self.compatibility)
 
     def issue(self,code,path,message,kind='document',identifier=None):
         self.issues.append(MigrationIssue(code,path,message,kind,identifier))
@@ -257,7 +258,14 @@ def validate_source(source):
             result.issue('source_too_large','$','源文件超过严格预演的32MiB上限；未解析。')
         else:
             raw=_decode(data,result)
+            source_schema=raw.get('version') if isinstance(raw,dict) else None
+            if type(source_schema) is int and source_schema==8:
+                from calendar_legacy_migration import convert_schema8
+                raw=convert_schema8(raw,result)
             _validate_document(raw,result)
+            result.source['json_schema']=source_schema if type(source_schema) is int else None
+            if result.compatibility:
+                result.compatibility['field_mapping_verified']=result.valid
     except OSError:
         result.issue('source_unreadable','$','无法只读访问指定源文件。')
     except (UnicodeError,ValueError,RecursionError,TypeError,OverflowError):
