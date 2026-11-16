@@ -284,7 +284,7 @@ class ApplicationLifecycleMixin:
         state.stopped = True
         while not self._ui_actions.empty():
             self._ui_actions.get_nowait()
-        if self.instance_guard and not getattr(self, '_pending_storage_restore', None):
+        if self.instance_guard and not (getattr(self, '_pending_storage_restore', None) or getattr(self, '_pending_storage_upgrade', False)):
             self.instance_guard.close()
         from desktop_storage_startup import stop_desktop_storage
         stop_desktop_storage(self)

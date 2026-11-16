@@ -9,6 +9,40 @@ from view_mode import WindowGeometry
 
 
 class BackupActionsMixin:
+    def storage_banner_visible(self):
+        return bool(getattr(self, 'store', None)) and not getattr(self, '_storage_prompt_dismissed', False)
+
+    def build_storage_banner(self):
+        if not self.storage_banner_visible():
+            return
+        import tkinter as tk
+        from reminder_ui import reminder_button
+        frame = tk.Frame(self.shell, bg=self.theme.panel_background)
+        frame.pack(fill='x')
+        self.storage_banner = frame
+        if self._sqlite_backup_boundary():
+            tk.Label(frame, text='SQLite 已启用', bg=self.theme.panel_background,
+                fg=self.theme.text_secondary).pack(side='left', padx=self.dpi.px(10))
+        else:
+            self.storage_upgrade_button = reminder_button(frame, self, '升级到 SQLite', self.request_storage_upgrade, primary=True)
+            self.storage_upgrade_button.pack(side='left', padx=self.dpi.px(8))
+            def dismiss():
+                self._storage_prompt_dismissed = True
+                frame.destroy()
+                self.render()
+            self.storage_dismiss_button = reminder_button(frame, self, '本次不再提示', dismiss)
+            self.storage_dismiss_button.pack(side='right')
+
+    def request_storage_upgrade(self):
+        if self._sqlite_backup_boundary() or self.update_busy or self._active_modal_window() is not None:
+            return
+        if getattr(self, 'storage_session', None) is None:
+            self._data_message(messagebox.showinfo, '请通过正式启动入口打开月历后升级存储。')
+            return
+        self._pending_storage_upgrade = True
+        if not self.on_close():
+            self._pending_storage_upgrade = False
+
     def _sqlite_backup_boundary(self):
         from desktop_backup import sqlite_store
         return sqlite_store(self.store)

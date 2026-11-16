@@ -3340,6 +3340,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         )
         self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
 
+        self.build_storage_banner()
         self.header = LogicalCanvas(
             self.shell,
             dpi=self.dpi,
@@ -3483,6 +3484,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.shell = tk.Frame(self.inner_frame, bg=theme.panel_background)
         self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
 
+        self.build_storage_banner()
         self.global_header = GlobalHeader(
             self.shell, self, button_factory=ThemeButton, tooltip_factory=Tooltip, font_family=FONT
         )
@@ -4254,6 +4256,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
     def _desired_window_height(self, pinned_ddl_count: int, regular_ddl_count: int) -> int:
         base_height = OPEN_HEIGHT if self.agenda_open else CLOSED_HEIGHT
+        if self.storage_banner_visible():
+            base_height += 36
         base_height += self._ddl_region_height(pinned_ddl_count)
         if self.agenda_open:
             base_height += self._ddl_region_height(regular_ddl_count)
@@ -7256,6 +7260,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_plans))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
         data_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        data_menu.add_command(label='当前存储：SQLite 已启用' if self._sqlite_backup_boundary() else '当前存储：JSON', state='disabled')
+        data_menu.add_command(label='SQLite 已启用' if self._sqlite_backup_boundary() else '升级到 SQLite…',
+            state='disabled' if self._sqlite_backup_boundary() else 'normal',
+            command=lambda: self._queue_context_menu_action(menu, self.request_storage_upgrade))
         data_menu.add_command(label="备份数据…", command=self.export_backup)
         data_menu.add_command(label="恢复数据…", command=self.restore_data_backup)
         if self.backup_warning:
@@ -7636,7 +7644,7 @@ def main(arguments=None) -> None:
             if options.offer_migration or options.upgrade_storage:
                 with StartupDialogs() as dialogs:
                     app = create_desktop_app(options, CalendarApp, instance=instance,
-                        confirm=dialogs.confirm, notify=dialogs.notify)
+                        confirm=dialogs.confirm, notify=dialogs.notify, startup_complete=dialogs.close)
             else:
                 app = create_desktop_app(options, CalendarApp, instance=instance)
             try:
@@ -7644,6 +7652,10 @@ def main(arguments=None) -> None:
             finally:
                 stop_desktop_storage(app)
             request = getattr(app, '_pending_storage_restore', None)
+            if getattr(app, '_pending_storage_upgrade', False):
+                from dataclasses import replace
+                options = replace(options, upgrade_storage=True)
+                continue
             if not request:
                 break
             # Old Tk owner, Store, history and HTTP admission are stopped before

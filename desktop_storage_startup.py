@@ -137,8 +137,13 @@ def stop_desktop_storage(app):
         raise
 
 
-def create_desktop_app(options, app_class, *, instance=None, **callbacks):
+def create_desktop_app(options, app_class, *, instance=None, startup_complete=lambda: None, **callbacks):
     session = open_desktop_storage(options, **callbacks)
+    try:
+        startup_complete()
+    except BaseException:
+        session.close()
+        raise
     app = app_class.__new__(app_class)
     app.tk = None  # Tk.__getattr__ must be safe even if Tcl initialization fails.
     app.storage_session = session

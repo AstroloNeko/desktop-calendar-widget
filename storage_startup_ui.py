@@ -26,7 +26,12 @@ class StartupDialogs:
                 '迁移与完整性验证完成，原 JSON 和保护副本已保留。\n即将使用 SQLite 打开日历。', parent=self.root)
 
     def __exit__(self, *args):
-        self.root.destroy()
+        self.close()
+
+    def close(self):
+        if self.root is not None:
+            self.root.destroy()
+            self.root = None
 
 
 def offline_recovery(options):
