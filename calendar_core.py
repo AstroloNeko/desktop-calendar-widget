@@ -10,10 +10,15 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Optional
 
 from holiday_data import is_workday as system_is_workday
-from ui_theme import DEFAULT_THEME_NAME, normalize_theme_name
-from habit_schedule import habit_scheduled_on, normalize_schedule
-from data_compat import DATA_SCHEMA_VERSION, DataCompatibilityError, decode_calendar_data
+from desktop_preferences import DEFAULT_THEME_NAME, normalize_theme_name
+from habit_schedule import habit_scheduled_on, normalize_schedule, rule_on, preserve_schedule_history
+from copy import deepcopy
+from data_compat import DATA_SCHEMA_VERSION, DataCompatibilityError
 from version import __version__
+
+
+class MutationUncertainError(OSError):
+    """A failed save may have replaced the file; further writes must be blocked."""
 
 
 APP_NAME = "桌面月历"
@@ -293,6 +298,7 @@ class RoutineItem:
     # Direct/legacy constructors retain the historic workday-only behavior.
     # The new editor explicitly chooses False for a new everyday habit.
     workdays_only: bool = True
+    schedule_history: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.created_on:
@@ -324,6 +330,19 @@ class RoutineItem:
         if self.reminder_time is None:
             self.reminder_enabled = False
         normalize_schedule(self)
+        if not isinstance(self.schedule_history, list):
+            raise ValueError('invalid habit schedule history')
+        from habit_schedule import SCHEDULE_FIELDS, validate_schedule_input
+        boundaries = []
+        for entry in self.schedule_history:
+            boundary = date.fromisoformat(entry['until']).isoformat()
+            rule = validate_schedule_input(**entry['rule'])
+            if set(entry['rule']) != set(SCHEDULE_FIELDS):
+                raise ValueError('invalid historic rule')
+            entry['rule'] = rule
+            boundaries.append(boundary)
+        if boundaries != sorted(set(boundaries)):
+            raise ValueError('invalid historic rule boundaries')
 
     @property
     def created_date(self) -> date:
@@ -379,7 +398,15 @@ DEFAULT_SETTINGS = {
 
 
 class Store:
-    def __init__(self, data_file: Optional[Path] = None) -> None:
+    @property
+    def supported_schema(self):
+        return DATA_SCHEMA_VERSION
+
+    @property
+    def application_version(self):
+        return __version__
+
+    def __init__(self, data_file: Optional[Path] = None, *, repository_factory=None) -> None:
         self.data_file = data_file or DATA_FILE
         self.events: list[Event] = []
         self.categories: list[EventCategory] = []
@@ -389,13 +416,17 @@ class Store:
         self.notified: set[str] = set()
         self.load_error: Optional[str] = None
         self._migration_backup_pending = False
+        if repository_factory is None:
+            from json_calendar_repository import JsonCalendarRepository
+            repository_factory = JsonCalendarRepository
+        self.repository = repository_factory(self)
         self.load()
 
     def load(self) -> None:
         self.load_error = None
         self._migration_backup_pending = False
         try:
-            raw = decode_calendar_data(self.data_file.read_bytes(), supported=DATA_SCHEMA_VERSION, app_version=__version__)
+            raw = self.repository.read_document()
             self._migration_backup_pending = raw.get("version", 1) < DATA_SCHEMA_VERSION
             categories: list[EventCategory] = []
             seen_category_ids: set[str] = set()
@@ -434,6 +465,8 @@ class Store:
                 try:
                     routines.append(RoutineItem.from_dict(item))
                 except (TypeError, ValueError, KeyError):
+                    if isinstance(item, dict) and 'schedule_history' in item:
+                        raise DataCompatibilityError('习惯历史规则无效，已拒绝加载和覆盖，请保留原文件。')
                     continue
             self.routines = routines
             date_states = raw.get("date_states", {})
@@ -468,38 +501,8 @@ class Store:
             self.load_error = str(exc)
 
     def save(self) -> None:
-        # Refuse before creating a checkpoint, directory or temporary file.
-        # In particular a still-open older app must never downgrade data that
-        # another compatible process has subsequently migrated.
-        if self.load_error:
-            raise DataCompatibilityError(f"当前数据未能安全加载，已拒绝保存：{self.load_error}")
-        try:
-            disk = self.data_file.read_bytes()
-        except FileNotFoundError:
-            pass
-        else:
-            decode_calendar_data(disk, supported=DATA_SCHEMA_VERSION, app_version=__version__)
-        if self._migration_backup_pending and self.data_file.exists():
-            from data_backup import automatic_backup
-            # Do not persist a schema migration unless its original data has
-            # first been protected. Failed checkpoints leave the old file intact.
-            automatic_backup(self.data_file, reason="before-migration", force=True)
-            self._migration_backup_pending = False
-        self.data_file.parent.mkdir(parents=True, exist_ok=True)
-        notification_history = sorted(self.notified, key=lambda item: item[-16:])[-600:]
-        payload = {
-            "version": DATA_SCHEMA_VERSION,
-            "events": [asdict(event) for event in self.events],
-            "categories": [asdict(category) for category in self.sorted_categories()],
-            "routines": [asdict(item) for item in self.routines],
-            "date_states": self.date_states,
-            "settings": self.settings,
-            "notified": notification_history,
-        }
-        temporary = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.data_file)
-        self.notified = set(notification_history)
+        """Legacy preferences/reminder/backup bridge; business commits use apply_changes."""
+        self.repository.write_current()
 
     def prepare_event(self, event: Event) -> Event:
         """Validate a detached candidate without changing canonical tasks or writing data."""
@@ -535,7 +538,6 @@ class Store:
         for identifier, event, _index, _keys in states:
             if event is not None and event.id != identifier:
                 raise ValueError("event id cannot change")
-        previous_events, previous_notified = self.events, self.notified
         affected = set(ids)
         replacement = [item for item in self.events if item.id not in affected]
         insertions = [(index if index is not None else len(self.events), event)
@@ -545,12 +547,7 @@ class Store:
         prefixes = tuple(identifier + ":" for identifier in ids)
         notifications = {key for key in self.notified if not key.startswith(prefixes)}
         notifications.update(key for _id, _event, _index, keys in states for key in keys)
-        self.events, self.notified = replacement, notifications
-        try:
-            self.save()
-        except Exception:
-            self.events, self.notified = previous_events, previous_notified
-            raise
+        self._commit_fields(events=replacement, notified=notifications)
 
     def duration_for_range(self, start: date, end: date, *, skip_non_working_days: bool = False) -> int:
         """Convert a resize endpoint into the same effective-day count used by Event."""
@@ -614,33 +611,53 @@ class Store:
             color=color,
             sort_order=sort_order,
         )
-        self.categories.append(category)
-        self.save()
+        self.upsert_category(category)
         return category
 
     def upsert_category(self, category: EventCategory) -> None:
-        previous = self.category_by_id(category.id)
-        if previous is None:
-            self.categories.append(category)
-        else:
-            self.categories[self.categories.index(previous)] = category
-        for event in self.events:
+        category = deepcopy(category)
+        if not category.name.strip():
+            raise ValueError("category name is required")
+        if any(c.id != category.id and c.name.casefold() == category.name.casefold() for c in self.categories):
+            raise ValueError("已经存在同名分类。")
+        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", category.color):
+            raise ValueError("分类颜色无效。")
+        categories = [category if c.id == category.id else c for c in self.categories]
+        if self.category_by_id(category.id) is None:
+            categories.append(category)
+        events = [deepcopy(e) if e.category_id == category.id else e for e in self.events]
+        for event in events:
             if event.category_id == category.id and event.color_mode == "inherit":
                 event.color = category.color
-        self.save()
+        originals = self.events
+        self._commit_fields(categories=categories, events=events)
+        self._publish_event_references(originals)
 
     def delete_category(self, category_id: str) -> None:
         category = self.category_by_id(category_id)
         if category is None:
             return
-        for event in self.events:
+        events = [deepcopy(e) if e.category_id == category_id else e for e in self.events]
+        for event in events:
             if event.category_id != category_id:
                 continue
             event.color = self.effective_event_color(event)
             event.category_id = None
             event.color_mode = "override"
-        self.categories = [item for item in self.categories if item.id != category_id]
-        self.save()
+        originals = self.events
+        self._commit_fields(categories=[item for item in self.categories if item.id != category_id], events=events)
+        self._publish_event_references(originals)
+
+    def _publish_event_references(self, originals) -> None:
+        # Legacy GUI rows may retain Event references. Publish only AFTER save.
+        for old, candidate in zip(originals, self.events):
+            if old is not candidate:
+                old.__dict__.update(candidate.__dict__)
+        self.events = originals
+
+    def _commit_fields(self, **candidates) -> bool:
+        """Legacy algorithm bridge to the single repository transaction boundary."""
+        return self.repository.apply_changes(candidates).changed
 
     def effective_event_color(self, event: Event) -> str:
         if event.color_mode == "inherit":
@@ -706,23 +723,29 @@ class Store:
         title: str, day: date, *, color: Optional[str] = None, event_type: str = "general"
     ) -> Event:
         """Shared quick-add defaults, independent from saving and command history."""
-        due = datetime.combine(day, datetime.min.time()).replace(hour=23, minute=59)
-        return Event(
-            id=str(uuid.uuid4()),
-            title=title.strip(),
-            due=due.isoformat(timespec="minutes"),
-            has_time=False,
-            color=color or COLORS["海盐蓝"],
-            event_type=event_type,
-            reminder=None,
-        )
+        from event_input import build_event_candidate
+        return build_event_candidate(dict(title=title.strip(), date=day.isoformat(),
+            color=color or COLORS["海盐蓝"], event_type=event_type), identifier=str(uuid.uuid4()))
 
     def upsert_routine(self, item: RoutineItem) -> None:
+        item = self.prepare_routine(item)
+        self.persist_routine(item)
+
+    def prepare_routine(self, item: RoutineItem) -> RoutineItem:
+        candidate = deepcopy(item)
+        previous = next((r for r in self.routines if r.id == item.id), None)
+        if previous:
+            preserve_schedule_history(previous, candidate)
+        return candidate
+
+    def persist_routine(self, item: RoutineItem) -> None:
+        item = deepcopy(item)
+        routines, notified = list(self.routines), set(self.notified)
         previous = next((existing for existing in self.routines if existing.id == item.id), None)
         if previous is None:
-            self.routines.append(item)
+            routines.append(item)
         else:
-            self.routines[self.routines.index(previous)] = item
+            routines[routines.index(previous)] = item
         if previous is not None and (
             previous.reminder_enabled != item.reminder_enabled
             or previous.reminder_time != item.reminder_time
@@ -730,13 +753,14 @@ class Store:
             or previous.kind != item.kind
             or previous.created_on != item.created_on
         ):
-            self.clear_routine_notifications(item.id)
-        self.save()
+            notified = {key for key in notified if not key.startswith(f"routine:{item.id}:")}
+        self._commit_fields(routines=routines, notified=notified)
 
     def delete_routine(self, item_id: str) -> None:
-        self.routines = [item for item in self.routines if item.id != item_id]
-        self.clear_routine_notifications(item_id)
-        self.save()
+        if not any(item.id == item_id for item in self.routines):
+            return
+        self._commit_fields(routines=[item for item in self.routines if item.id != item_id],
+                            notified={key for key in self.notified if not key.startswith(f"routine:{item_id}:")})
 
     def clear_routine_notifications(self, item_id: str) -> None:
         prefix = f"routine:{item_id}:"
@@ -756,8 +780,9 @@ class Store:
         if item.kind == "todo":
             return (day >= item.created_date and self.is_workday(day)
                     and (not item.completed_on or day <= date.fromisoformat(item.completed_on)))
-        return (habit_scheduled_on(item, day)
-                and (not item.workdays_only or self.is_workday(day)))
+        rule = rule_on(item, day)
+        return (habit_scheduled_on(rule, day)
+                and (not rule.workdays_only or self.is_workday(day)))
 
     def routine_progress(self, item: RoutineItem, start: date, end: date) -> tuple[int, int]:
         """(planned, completed) for an explicit period; non-plan days never count."""
@@ -784,16 +809,29 @@ class Store:
         return self.date_states.get(day.isoformat(), "normal")
 
     def set_date_status(self, day: date, status: object) -> None:
-        normalized = normalize_date_status(status)
-        key = day.isoformat()
-        if normalized == "normal":
-            self.date_states.pop(key, None)
-        else:
-            self.date_states[key] = normalized
-        for event in self.events:
-            if event.skip_non_working_days:
-                self.clear_notifications(event.id)
-        self.save()
+        self.set_date_status_range(day, day, status)
+
+    def set_date_status_range(self, start: date, end: date, status: object) -> bool:
+        states = self.prepare_date_status_range(start, end, status)
+        if states == self.date_states:
+            return False
+        prefixes = tuple(e.id + ':' for e in self.events if e.skip_non_working_days)
+        return self._commit_fields(date_states=states,
+            notified={key for key in self.notified if not key.startswith(prefixes)})
+
+    def prepare_date_status_range(self, start: date, end: date, status: object) -> dict:
+        if type(start) is not date or type(end) is not date or end < start:
+            raise ValueError("日期范围无效。")
+        if status not in DATE_STATUSES:
+            raise ValueError("日期状态无效。")
+        states = dict(self.date_states)
+        for offset in range((end - start).days + 1):
+            key = (start + timedelta(days=offset)).isoformat()
+            if status == "normal":
+                states.pop(key, None)
+            else:
+                states[key] = status
+        return states
 
     def is_workday(self, day: date) -> bool:
         if self.date_status(day) in ("leave", "holiday"):
@@ -919,8 +957,24 @@ class Store:
         return due
 
     def toggle_routine(self, item: RoutineItem, day: date) -> None:
+        current = next((r for r in self.routines if r.id == item.id), None)
+        if current is None:
+            raise ValueError("习惯已不存在。")
+        if self.set_routine_completed(item.id, day, not current.is_done_on(day)):
+            updated = next(r for r in self.routines if r.id == item.id)
+            item.habit_done, item.completed_on = list(updated.habit_done), updated.completed_on
+
+    def set_routine_completed(self, identifier: str, day: date, completed: bool) -> bool:
+        if type(day) is not date or type(completed) is not bool:
+            raise ValueError("打卡日期或状态无效。")
+        current = next((r for r in self.routines if r.id == identifier), None)
+        if current is None:
+            raise ValueError("习惯已不存在。")
+        if current.is_done_on(day) == completed:
+            return False
+        item = deepcopy(current)
         if not self.routine_planned_on(item, day) and not item.is_done_on(day):
-            return
+            return False
         day_key = day.isoformat()
         if item.kind == "habit":
             if day_key in item.habit_done:
@@ -930,4 +984,6 @@ class Store:
                 item.habit_done.sort()
         else:
             item.completed_on = None if item.completed_on == day_key else day_key
-        self.upsert_routine(item)
+        self.persist_routine(item)
+        current.habit_done, current.completed_on = list(item.habit_done), item.completed_on
+        return True

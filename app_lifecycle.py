@@ -270,6 +270,9 @@ class ApplicationLifecycleMixin:
             self.search_window.close(restore_focus=False)
         if self.search_service is not None:
             self.search_service.close()
+        chat_runtime = getattr(self, 'chat_runtime', None)
+        if chat_runtime is not None:
+            chat_runtime.stop()
         notification_stop = getattr(self, "stop_native_reminders", None)
         if notification_stop is not None:
             notification_stop()
@@ -281,7 +284,9 @@ class ApplicationLifecycleMixin:
         state.stopped = True
         while not self._ui_actions.empty():
             self._ui_actions.get_nowait()
-        if self.instance_guard:
+        if self.instance_guard and not (getattr(self, '_pending_storage_restore', None) or getattr(self, '_pending_storage_upgrade', False)):
             self.instance_guard.close()
+        from desktop_storage_startup import stop_desktop_storage
+        stop_desktop_storage(self)
         self.destroy()
         return True

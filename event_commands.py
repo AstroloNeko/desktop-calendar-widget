@@ -5,12 +5,27 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
+import json
 
-from calendar_core import Event, Store
+from calendar_core import Event, Store, RoutineItem
 
 
 class CommandConflictError(ValueError):
     """A preview/history item no longer describes the canonical event."""
+
+
+@dataclass(frozen=True)
+class RoutineCommand:
+    routine_id: str
+    label: str
+    before: Optional[str]
+    after: Optional[str]
+
+
+@dataclass(frozen=True)
+class RoutineChange:
+    routine_id: str
+    label: str
 
 
 @dataclass(frozen=True)
@@ -95,8 +110,8 @@ class EventCommandHistory:
     def __init__(self, store: Store, limit: int = 100) -> None:
         self.store = store
         self.limit = max(50, limit)
-        self._undo: list[EventPreview | BatchPreview] = []
-        self._redo: list[EventPreview | BatchPreview] = []
+        self._undo: list[EventPreview | BatchPreview | RoutineCommand] = []
+        self._redo: list[EventPreview | BatchPreview | RoutineCommand] = []
 
     @property
     def can_undo(self) -> bool:
@@ -125,6 +140,51 @@ class EventCommandHistory:
     def clear(self) -> None:
         self._undo.clear()
         self._redo.clear()
+
+    def routine_snapshot(self, identifier):
+        item = next((r for r in self.store.routines if r.id == identifier), None)
+        return json.dumps(asdict(item), sort_keys=True, ensure_ascii=False) if item else None
+
+    def upsert_routine(self, item):
+        candidate = self.store.prepare_routine(item)
+        command = RoutineCommand(item.id, '修改习惯' if self.routine_snapshot(item.id) else '新建习惯',
+                                 self.routine_snapshot(item.id), json.dumps(asdict(candidate), sort_keys=True, ensure_ascii=False))
+        if command.before == command.after:
+            return None
+        change = self._apply_routine(command, forward=True)
+        self._undo.append(command)
+        del self._undo[:-self.limit]
+        self._redo.clear()
+        return change
+
+    def _apply_routine(self, command, *, forward):
+        source, target = (command.before, command.after) if forward else (command.after, command.before)
+        live = self.routine_snapshot(command.routine_id)
+        source_data, live_data = json.loads(source) if source else None, json.loads(live) if live else None
+        if (source_data is None) != (live_data is None):
+            raise CommandConflictError('习惯已被删除或重新创建。')
+        if source_data:
+            protected = ('habit_done', 'completed_on')
+            if {k: v for k, v in source_data.items() if k not in protected} != {k: v for k, v in live_data.items() if k not in protected}:
+                raise CommandConflictError('习惯已在历史之外修改。')
+        item = RoutineItem(**json.loads(target)) if target else None
+        if item and live_data:
+            item.habit_done, item.completed_on = live_data['habit_done'], live_data['completed_on']
+        if item is None and live_data and (live_data['habit_done'] or live_data['completed_on']):
+            raise CommandConflictError('习惯已有打卡记录，不能撤销创建；请在清单中管理。')
+        before_items, before_keys = list(self.store.routines), set(self.store.notified)
+        try:
+            if item:
+                self.store.persist_routine(item)
+            else:
+                self.store.delete_routine(command.routine_id)
+        except BaseException as exc:
+            from calendar_core import MutationUncertainError
+            if isinstance(exc, MutationUncertainError):
+                raise
+            self.store.routines, self.store.notified = before_items, before_keys
+            raise
+        return RoutineChange(command.routine_id, command.label)
 
     def _capture(self, event_id: str) -> EventState:
         matches = [(index, event) for index, event in enumerate(self.store.events) if event.id == event_id]
@@ -285,6 +345,8 @@ class EventCommandHistory:
         return self.commit_bulk(self.preview_bulk(event_ids, operation, **options))
 
     def _apply(self, command: EventPreview | BatchPreview, *, forward: bool) -> EventChange | BatchChange:
+        if isinstance(command, RoutineCommand):
+            return self._apply_routine(command, forward=forward)
         if isinstance(command, BatchPreview):
             return self._apply_batch(command, forward=forward)
         source, target = (command.before, command.after) if forward else (command.after, command.before)

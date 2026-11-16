@@ -59,6 +59,7 @@ from global_timeline_ui import (
 from tray_icon import TrayIcon
 from global_hotkey import saved_shortcut
 from global_hotkey_ui import open_hotkey_settings
+from calendar_chat_ui import open_chat, start_chat_if_enabled
 from app_lifecycle import ApplicationLifecycleMixin
 from reminder_ui import NativeReminderMixin
 from win_integration import (
@@ -81,6 +82,8 @@ from win_integration import (
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
 from event_commands import BatchChange, EventChange, EventCommandHistory, EventPreview
+from calendar_event_service import event_service, EventOperationResult
+from calendar_mutation_service import mutation_service
 from event_selection import EventSelection
 from bulk_ui import BulkActionsMixin
 from schedule_drag import ScheduleHit
@@ -363,11 +366,8 @@ def resource_path(relative: str) -> Path:
 
 
 def parse_event_due(date_text: str, time_text: str) -> tuple[datetime, bool]:
-    selected_date = datetime.strptime(date_text.strip(), "%Y-%m-%d").date()
-    cleaned_time = time_text.strip()
-    if cleaned_time:
-        return datetime.strptime(f"{selected_date.isoformat()} {cleaned_time}", "%Y-%m-%d %H:%M"), True
-    return datetime.combine(selected_date, datetime.min.time()).replace(hour=23, minute=59), False
+    from event_input import parse_event_due as parse
+    return parse(date_text, time_text)
 
 
 def log_exception(exc_type, exc_value, exc_traceback) -> None:
@@ -1518,11 +1518,10 @@ class EventEditor(tk.Toplevel):
         except ValueError:
             owned_messagebox(self, messagebox.showinfo, APP_NAME, "持续天数请输入 1～365 之间的整数。")
             return
-        item = Event(
-            id=self.event.id if self.event else str(uuid.uuid4()),
+        values = dict(
             title=title,
-            due=due.isoformat(timespec="minutes"),
-            has_time=has_time,
+            date=due.date().isoformat(),
+            time=due.strftime('%H:%M') if has_time else None,
             duration_days=duration_days,
             skip_non_working_days=self.skip_non_working_var.get(),
             end_as_ddl=self.end_as_ddl_var.get(),
@@ -1533,9 +1532,14 @@ class EventEditor(tk.Toplevel):
             reminder=REMINDERS[self.reminder_var.get()] if has_time else None,
             notes=self.notes.get("1.0", "end").strip(),
             done=self.event.done if self.event else False,
-            created_at=self.event.created_at if self.event else "",
-            snooze_until=self.event.snooze_until if self.event else None,
         )
+        from event_input import build_event_candidate, EventInputError
+        try:
+            item = build_event_candidate(values, current=self.event,
+                identifier=self.event.id if self.event else str(uuid.uuid4()), context=self.master_app.store)
+        except EventInputError as exc:
+            owned_messagebox(self, messagebox.showinfo, APP_NAME, str(exc))
+            return
         if self.master_app.upsert_event(item):
             self.close()
 
@@ -1811,24 +1815,23 @@ class RoutineEditor(tk.Toplevel):
             created_on=self.item.created_on if self.item else date.today().isoformat(),
             completed_on=self.item.completed_on if self.item else None,
             habit_done=list(self.item.habit_done) if self.item else [],
+            schedule_history=list(self.item.schedule_history) if self.item else [],
             enabled=self.item.enabled if self.item else True,
             reminder_enabled=self.reminder_enabled_var.get(),
             reminder_time=reminder_time,
             **schedule,
         )
-        self.master_app.store.upsert_routine(item)
-        self.master_app.render()
-        if self.master_app.routine_manager and self.master_app.routine_manager.winfo_exists():
-            self.master_app.routine_manager.refresh()
-        self.close()
+        if self.master_app._run_aux_mutation(
+            lambda: mutation_service(self.master_app.event_commands).upsert_routine(item),
+            self.master_app._refresh_routine_mutation, owner=self):
+            self.close()
 
     def delete(self) -> None:
         if self.item and owned_messagebox(self, messagebox.askyesno, APP_NAME, f"确定删除“{self.item.title}”？"):
-            self.master_app.store.delete_routine(self.item.id)
-            self.master_app.render()
-            if self.master_app.routine_manager and self.master_app.routine_manager.winfo_exists():
-                self.master_app.routine_manager.refresh()
-            self.close()
+            if self.master_app._run_aux_mutation(
+                lambda: mutation_service(self.master_app.event_commands).delete_routine(self.item.id),
+                self.master_app._refresh_routine_mutation, owner=self):
+                self.close()
 
     def close(self) -> None:
         if getattr(self, "_closing", False):
@@ -2089,9 +2092,10 @@ class CategoryEditor(tk.Toplevel):
             sort_order=self.category.sort_order if self.category else len(self.master_app.store.categories),
             created_at=self.category.created_at if self.category else "",
         )
-        self.master_app.store.upsert_category(category)
-        self.master_app.category_data_changed()
-        self.close()
+        if self.master_app._run_aux_mutation(
+            lambda: mutation_service(self.master_app.event_commands).upsert_category(category),
+            self.master_app.category_data_changed, owner=self):
+            self.close()
 
     def close(self) -> None:
         if self._closing:
@@ -2206,9 +2210,9 @@ class CategoryManager(tk.Toplevel):
             f"确定删除分类“{category.name}”？\n\n所属事项会保留并转为无分类，当前显示颜色也会保留。",
         ):
             return
-        self.master_app.store.delete_category(category.id)
-        self.master_app.category_data_changed()
-        self.refresh()
+        self.master_app._run_aux_mutation(
+            lambda: mutation_service(self.master_app.event_commands).delete_category(category.id),
+            self.master_app.category_data_changed, owner=self)
 
     def close(self) -> None:
         if self._closing:
@@ -2518,10 +2522,10 @@ class DayDetailDialog(tk.Toplevel):
             widget.bind("<Button-1>", lambda _event: self._open_routine_editor(item))
 
     def _save_status(self) -> None:
-        self.master_app.store.set_date_status(self.day, self.status_var.get())
-        if getattr(self.master_app, "search_service", None) is not None:
-            self.master_app._invalidate_search()
-        self.master_app.render()
+        if not self.master_app._run_aux_mutation(
+            lambda: mutation_service(self.master_app.event_commands).set_date_status(self.day, self.status_var.get()),
+            self.master_app._refresh_date_mutation, owner=self):
+            self.status_var.set(self.master_app.store.date_status(self.day))
 
     def _update_scrollbar(self) -> None:
         self.list_inner.update_idletasks()
@@ -3082,7 +3086,14 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.destroy()
             raise DataCompatibilityError(self.store.load_error)
         self.backup_warning = None
-        if not self.store.load_error:
+        from sqlite_calendar_repository import SqliteCalendarRepository
+        if isinstance(self.store.repository, SqliteCalendarRepository):
+            try:
+                from desktop_backup import automatic_sqlite_backup
+                automatic_sqlite_backup(self.store)
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.backup_warning = str(exc)
+        if not self.store.load_error and not isinstance(self.store.repository, SqliteCalendarRepository):
             try:
                 automatic_backup(self.store.data_file)
             except (OSError, ValueError) as exc:
@@ -3214,6 +3225,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.after(220, self._start_tray_icon)
         self._tray_poll_job = self.after(250, self._poll_tray_actions)
         self._init_native_reminders(resource_path("."))
+        self.after(500, lambda: start_chat_if_enabled(self))
         self.after(1200, self.check_reminders)
 
     @staticmethod
@@ -3328,6 +3340,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         )
         self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
 
+        self.build_storage_banner()
         self.header = LogicalCanvas(
             self.shell,
             dpi=self.dpi,
@@ -3471,6 +3484,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.shell = tk.Frame(self.inner_frame, bg=theme.panel_background)
         self.shell.pack(fill="both", expand=True, padx=dp(theme.metrics.inner_border_width), pady=dp(theme.metrics.inner_border_width))
 
+        self.build_storage_banner()
         self.global_header = GlobalHeader(
             self.shell, self, button_factory=ThemeButton, tooltip_factory=Tooltip, font_family=FONT
         )
@@ -4242,6 +4256,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
     def _desired_window_height(self, pinned_ddl_count: int, regular_ddl_count: int) -> int:
         base_height = OPEN_HEIGHT if self.agenda_open else CLOSED_HEIGHT
+        if self.storage_banner_visible():
+            base_height += 36
         base_height += self._ddl_region_height(pinned_ddl_count)
         if self.agenda_open:
             base_height += self._ddl_region_height(regular_ddl_count)
@@ -5542,12 +5558,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         menu.tk_popup(x, y)
 
     def _set_flow_range_status(self, start_date: date, end_date: date, status: str) -> None:
-        current = start_date
-        while current <= end_date:
-            self.store.set_date_status(current, status)
-            current += timedelta(days=1)
-        self._invalidate_search()
-        self.render()
+        self._run_aux_mutation(
+            lambda: mutation_service(self.event_commands).set_date_status(start_date, status, end_date),
+            self._refresh_date_mutation)
 
     def _sync_global_xscroll(self, first: str, last: str) -> None:
         self.global_hscroll.set(first, last)
@@ -6641,6 +6654,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def _run_event_command(self, action: Callable[[], Optional[EventChange | BatchChange]], *, focus_result: bool = False) -> bool:
         try:
             change = action()
+            if isinstance(change, EventOperationResult):
+                change = change.change
         except (OSError, ValueError, OverflowError) as exc:
             owner = self._active_modal_window() or self
             owned_messagebox(owner, messagebox.showerror, APP_NAME, f"事项操作未完成，数据已保留。\n\n{exc}")
@@ -6653,6 +6668,12 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         return True
 
     def _refresh_event_change(self, change: EventChange | BatchChange, *, focus_day: Optional[date] = None) -> None:
+        if getattr(change, 'routine_id', None):
+            self.invalidate_reminders()
+            self.render()
+            if self.routine_manager and self.routine_manager.winfo_exists():
+                self.routine_manager.refresh()
+            return
         if hasattr(self, "invalidate_reminders"):
             self.invalidate_reminders()
         if getattr(self, "search_service", None) is not None:
@@ -6692,20 +6713,20 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.ddl_list_window.refresh()
 
     def upsert_event(self, event: Event) -> bool:
-        return self._run_event_command(lambda: self.event_commands.upsert(event), focus_result=True)
+        return self._run_event_command(lambda: event_service(self.event_commands).upsert(event), focus_result=True)
 
     def commit_event_preview(self, preview: EventPreview, *, focus_result: bool = False) -> bool:
         """Shared mouse-release endpoint for future Flow and Timeline dragging."""
-        return self._run_event_command(lambda: self.event_commands.commit(preview), focus_result=focus_result)
+        return self._run_event_command(lambda: event_service(self.event_commands).commit(preview), focus_result=focus_result)
 
     def delete_event(self, event_id: str) -> bool:
-        return self._run_event_command(lambda: self.event_commands.delete(event_id))
+        return self._run_event_command(lambda: event_service(self.event_commands).delete(event_id))
 
     def toggle_done(self, event: Event) -> bool:
         current = self.store.event_by_id(event.id)
         if current is None:
             return False
-        return self._run_event_command(lambda: self.event_commands.update(
+        return self._run_event_command(lambda: event_service(self.event_commands).update(
             current.id, label="取消完成" if current.done else "完成事项", done=not current.done, snooze_until=None,
         ))
 
@@ -6734,18 +6755,45 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.undo_event()
         return "break"
 
-    def toggle_routine(self, item: RoutineItem, day: Optional[date] = None) -> None:
-        target_day = day or self.selected
-        self.store.toggle_routine(item, target_day)
+    def _run_aux_mutation(self, operation, refresh, *, owner=None) -> bool:
+        """Never replay a successful business commit when a view refresh fails."""
+        owner = owner or self._active_modal_window() or self
+        try:
+            result = operation()
+        except (ValueError, OSError) as exc:
+            owned_messagebox(owner, messagebox.showerror, APP_NAME, str(exc))
+            return False
+        if result.changed:
+            try:
+                refresh()
+            except Exception:
+                owned_messagebox(owner, messagebox.showwarning, APP_NAME,
+                                 "数据已保存，但界面刷新未完成。请重新打开视图，不要重复提交。")
+        return True
+
+    def _refresh_date_mutation(self) -> None:
+        if getattr(self, "search_service", None) is not None:
+            self._invalidate_search()
+        self._refresh_routine_mutation()
+
+    def _refresh_routine_mutation(self) -> None:
+        self.invalidate_reminders()
         self.render()
         if self.routine_manager and self.routine_manager.winfo_exists():
             self.routine_manager.refresh()
+
+    def toggle_routine(self, item: RoutineItem, day: Optional[date] = None) -> None:
+        target_day = day or self.selected
+        current = next((r for r in self.store.routines if r.id == item.id), item)
+        self._run_aux_mutation(
+            lambda: mutation_service(self.event_commands).set_routine_completed(item.id, target_day, not current.is_done_on(target_day)),
+            self._refresh_routine_mutation)
 
     def quick_add(self, _event=None) -> str:
         title = self.quick_var.get().strip()
         if not title or self.quick_placeholder_active:
             return "break"
-        if not self._run_event_command(lambda: self.event_commands.create_quick(
+        if not self._run_event_command(lambda: event_service(self.event_commands).create_quick(
             title,
             self.selected,
             color=self.quick_color,
@@ -7127,7 +7175,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def defer_to_tomorrow(self, event: Event) -> None:
         current = self.store.event_by_id(event.id)
         if current is not None:
-            self._run_event_command(lambda: self.event_commands.commit(self.event_commands.preview_schedule(
+            self._run_event_command(lambda: event_service(self.event_commands).commit(event_service(self.event_commands).preview_schedule(
                 current.id, start_date=current.due_date + timedelta(days=1),
             )), focus_result=True)
 
@@ -7206,10 +7254,16 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_settings))
         menu.add_command(label="全局唤起快捷键…",
                          command=lambda: self._queue_context_menu_action(menu, lambda: open_hotkey_settings(self)))
+        menu.add_command(label="AI 私人助理…",
+                         command=lambda: self._queue_context_menu_action(menu, lambda: open_chat(self)))
         menu.add_command(label="提醒计划…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_plans))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
         data_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        data_menu.add_command(label='当前存储：SQLite 已启用' if self._sqlite_backup_boundary() else '当前存储：JSON', state='disabled')
+        data_menu.add_command(label='SQLite 已启用' if self._sqlite_backup_boundary() else '升级到 SQLite…',
+            state='disabled' if self._sqlite_backup_boundary() else 'normal',
+            command=lambda: self._queue_context_menu_action(menu, self.request_storage_upgrade))
         data_menu.add_command(label="备份数据…", command=self.export_backup)
         data_menu.add_command(label="恢复数据…", command=self.restore_data_backup)
         if self.backup_warning:
@@ -7368,6 +7422,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.after(100, self.apply_window_mode)
 
     def _start_update_download(self, info: UpdateInfo) -> None:
+        if getattr(self, 'storage_session', None) is not None and not self.storage_session.manager.existing_only:
+            messagebox.showinfo(APP_NAME, '此隔离存储测试会话不允许覆盖安装正式程序。', parent=self)
+            return
         if not running_as_packaged_app():
             messagebox.showinfo(
                 APP_NAME,
@@ -7529,13 +7586,13 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.notification_windows.remove(popup)
 
     def snooze_event(self, event: Event, popup: tk.Toplevel) -> None:
-        if self._run_event_command(lambda: self.event_commands.update(
+        if self._run_event_command(lambda: event_service(self.event_commands).update(
             event.id, label="稍后提醒", snooze_until=(datetime.now() + timedelta(minutes=10)).isoformat(timespec="minutes"),
         )):
             popup.destroy()
 
     def complete_from_notification(self, event: Event, popup: tk.Toplevel) -> None:
-        if self._run_event_command(lambda: self.event_commands.update(
+        if self._run_event_command(lambda: event_service(self.event_commands).update(
             event.id, label="完成事项", done=True, snooze_until=None,
         )):
             popup.destroy()
@@ -7543,15 +7600,19 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
 
 
-def main() -> None:
+def main(arguments=None) -> None:
     # Late activation after an opted-in app exits must not read/migrate data,
     # create another calendar instance, or register/schedule notifications.
     if "--native-notification-activation" in sys.argv:
         return
     enable_dpi_awareness()
     sys.excepthook = log_exception
+    from desktop_storage_startup import parse_startup_options, create_desktop_app, stop_desktop_storage
+    from calendar_storage_lifecycle import LifecycleError
+    from storage_startup_ui import StartupDialogs
+    options = parse_startup_options(arguments or [])
     try:
-        busy = update_in_progress()
+        busy = update_in_progress() if options.isolated_directory is None else False
     except OSError as exc:
         root = tk.Tk()
         root.withdraw()
@@ -7564,8 +7625,10 @@ def main() -> None:
         messagebox.showinfo(APP_NAME, "更新尚未完成，请等待安装结束后再打开月历。", parent=root)
         root.destroy()
         return
-    instance = SingleInstance()
-    if instance.already_running:
+    # Isolated desktops coordinate through the directory lease, not the real
+    # user's legacy global instance mutex.
+    instance = SingleInstance() if options.isolated_directory is None else None
+    if instance is not None and instance.already_running:
         root = tk.Tk()
         root.withdraw()
         messagebox.showinfo(APP_NAME, "桌面月历已经在运行了。")
@@ -7573,16 +7636,41 @@ def main() -> None:
         instance.close()
         return
     try:
-        app = CalendarApp(instance=instance)
-    except DataCompatibilityError as exc:
-        instance.close()
+        if options.recover_storage:
+            from storage_startup_ui import offline_recovery
+            if not offline_recovery(options):
+                return
+        while True:
+            if options.offer_migration or options.upgrade_storage:
+                with StartupDialogs() as dialogs:
+                    app = create_desktop_app(options, CalendarApp, instance=instance,
+                        confirm=dialogs.confirm, notify=dialogs.notify, startup_complete=dialogs.close)
+            else:
+                app = create_desktop_app(options, CalendarApp, instance=instance)
+            try:
+                app.mainloop()
+            finally:
+                stop_desktop_storage(app)
+            request = getattr(app, '_pending_storage_restore', None)
+            if getattr(app, '_pending_storage_upgrade', False):
+                from dataclasses import replace
+                options = replace(options, upgrade_storage=True)
+                continue
+            if not request:
+                break
+            # Old Tk owner, Store, history and HTTP admission are stopped before
+            # taking the offline lifecycle lease and activating a fresh epoch.
+            options.manager().restore(request[0], authorize_replacement=True,
+                reminder_replay_reviewed=True, expected_backup_hash=request[1])
+    except (DataCompatibilityError, RuntimeError, OSError, KeyError, ValueError) as exc:
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror(APP_NAME, f"无法安全打开日历。\n\n{exc}\n\n已拒绝不兼容的数据写入；请勿用旧程序覆盖或重建数据。", parent=root)
+        messagebox.showerror(APP_NAME, f"无法安全打开或恢复日历。\n\n{exc}\n\n未回退旧 JSON。若数据库损坏，可使用 --recover-storage 选择有效备份；请保留原件。", parent=root)
         root.destroy()
-        return
-    app.mainloop()
+    finally:
+        if instance is not None:
+            instance.close()
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

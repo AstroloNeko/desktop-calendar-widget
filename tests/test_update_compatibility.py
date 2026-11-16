@@ -45,7 +45,7 @@ class DataCompatibilityTests(unittest.TestCase):
         store.save()
         loaded = Store(self.path)
         self.assertIsNone(loaded.load_error)
-        self.assertEqual(json.loads(self.path.read_bytes())["version"], 8)
+        self.assertEqual(json.loads(self.path.read_bytes())["version"], DATA_SCHEMA_VERSION)
         self.assertEqual(loaded.events[0].id, "original")
         self.assertEqual(loaded.categories[0].id, "work")
         self.assertEqual(loaded.routines[0].habit_done, ["2026-10-19"])
@@ -154,6 +154,13 @@ class DataCompatibilityTests(unittest.TestCase):
 
 
 class HandoffTests(unittest.TestCase):
+    def setUp(self):
+        profile = tempfile.TemporaryDirectory()
+        self.addCleanup(profile.cleanup)
+        guard = patch('update_storage_guard.profile_root', return_value=Path(profile.name))
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def fake(self):
         calls = []
         app = SimpleNamespace(update_dialog=Mock(), update_busy=True,

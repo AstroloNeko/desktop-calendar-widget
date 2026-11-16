@@ -1,7 +1,7 @@
 """Calendar schema gate shared by storage and backup readers; never writes data."""
 import json
 
-DATA_SCHEMA_VERSION = 8
+DATA_SCHEMA_VERSION = 9
 
 
 class DataCompatibilityError(ValueError):

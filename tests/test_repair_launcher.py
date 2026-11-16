@@ -9,6 +9,13 @@ import repair_launcher
 
 
 class RepairLauncherTests(unittest.TestCase):
+    def setUp(self):
+        profile = tempfile.TemporaryDirectory()
+        self.addCleanup(profile.cleanup)
+        guard = patch('update_storage_guard.profile_root', return_value=Path(profile.name))
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def test_repair_window_reserves_space_for_controls_at_common_dpis(self) -> None:
         for dpi in (96, 120, 144, 168, 192):
             with self.subTest(dpi=dpi):

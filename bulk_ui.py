@@ -1,5 +1,6 @@
 """Global-only bulk adapter. Event history owns all mutations and persistence."""
 import tkinter as tk
+from calendar_event_service import event_service
 from tkinter import messagebox
 
 from interaction_visuals import CanvasOverlay
@@ -191,7 +192,7 @@ class BulkActionsMixin:
         except ValueError as exc:
             self._bulk_message(str(exc))
             return False
-        success = self._run_event_command(lambda: self.event_commands.bulk(ids, operation, **options))
+        success = self._run_event_command(lambda: event_service(self.event_commands).bulk(ids, operation, **options))
         if success:
             self.clear_bulk_selection()
             if hasattr(self, "_show_feedback"):

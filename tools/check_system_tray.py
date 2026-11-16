@@ -62,12 +62,19 @@ def send(tray, action):
     assert U.PostMessageW(tray._hwnd, TrayIcon.WM_COMMAND, identifier, 0)
 
 
-def source_checks():
+def source_checks(sqlite=False):
     errors = []
     with tempfile.TemporaryDirectory(prefix="calendar-tray-qa-") as temporary:
         store = Store(Path(temporary)/"calendar_data.json")
         with patch.object(CalendarApp, "check_reminders"):
-            app = CalendarApp(store)
+            if sqlite:
+                from desktop_storage_startup import StartupOptions, create_desktop_app
+                store.save()
+                app = create_desktop_app(StartupOptions(Path(temporary), True), CalendarApp, confirm=lambda: True)
+                store = app.store
+            else:
+                app = CalendarApp(store)
+            snapshot = store.repository.revision if sqlite else store.data_file.read_bytes
             app.report_callback_exception = lambda *parts: errors.append("".join(traceback.format_exception(*parts)))
             try:
                 wait(app, lambda: app.tray_icon and app.tray_icon.is_available, "tray registration")
@@ -83,7 +90,7 @@ def source_checks():
                             app.desktop_session_active = True
                             app.apply_window_mode()
                             pump(app, .3)
-                            before = store.data_file.read_bytes()
+                            before = snapshot()
                             geometry = app._capture_window_geometry()
                             history = app.event_commands
                             send(tray, "hide")
@@ -96,7 +103,7 @@ def source_checks():
                             pump(app, .3)
                             assert app.view_mode == view and app.event_commands is history
                             assert app._capture_window_geometry() == geometry, (geometry, app._capture_window_geometry())
-                            assert store.data_file.read_bytes() == before, "hide/restore wrote user data"
+                            assert snapshot() == before, "hide/restore wrote user data"
                             assert is_window_topmost(app) == pinned
                             hwnd = window_handle(app)
                             assert not U.GetWindowLongPtrW(hwnd, -16) & 0x00C00000, "native caption returned"
@@ -350,9 +357,10 @@ def packaged_checks(executable):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=Path, help="Normal app.py PyInstaller QA executable")
+    parser.add_argument("--sqlite", action="store_true", help="Use isolated production SQLite startup")
     args = parser.parse_args()
     if args.exe:
         packaged_checks(args.exe)
     else:
-        source_checks()
+        source_checks(sqlite=args.sqlite)
         repeated_start_stop()

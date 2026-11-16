@@ -134,9 +134,26 @@ def main() -> int:
         with reserve_installation():
             safe_extract(args.archive, extracted)
             source = payload_root(extracted)
-            data_file = Path(os.getenv("APPDATA", str(Path.home()))) / "DesktopCalendar" / "calendar_data.json"
-            automatic_backup(data_file, reason="before-update", force=True)
-            copy_payload(source, args.install_dir, args.executable)
+            from update_storage_guard import profile_root
+            data_file = profile_root() / "calendar_data.json"
+            from calendar_storage_lifecycle import StorageLifecycle
+            from update_storage_guard import check_directory
+            from calendar_sqlite_backup import create_sqlite_backup
+            manager = StorageLifecycle(data_file.parent, existing_only=True)
+            install = args.install_dir.resolve()
+            if install == manager.root or install in manager.root.parents or manager.root in install.parents:
+                raise RuntimeError('程序安装目录与日历数据目录重叠，已拒绝覆盖。')
+            with manager.lease():
+                state, authority, factory = manager._select()
+                if factory is not None:
+                    check_directory(source)
+                    import uuid
+                    folder = data_file.parent / 'backups'
+                    folder.mkdir(exist_ok=True)
+                    create_sqlite_backup(authority, folder / ('before-update-'+uuid.uuid4().hex+'.dcalbackup'))
+                else:
+                    automatic_backup(data_file, reason="before-update", force=True)
+                copy_payload(source, args.install_dir, args.executable)
         executable = args.install_dir / args.executable
         subprocess.Popen([str(executable)], cwd=str(args.install_dir), close_fds=True)
         args.archive.unlink(missing_ok=True)

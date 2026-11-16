@@ -2,10 +2,31 @@
 from __future__ import annotations
 
 import calendar
+from copy import copy, deepcopy
 from datetime import date
 
 FREQUENCIES = ("daily", "weekly", "monthly", "yearly")
 SCHEDULE_FIELDS = ("frequency", "interval", "weekdays", "month_day", "year_month", "start_on", "end_on", "workdays_only")
+
+
+def rule_on(item, day):
+    for entry in item.schedule_history:
+        if day.isoformat() < entry['until']:
+            historical = copy(item)
+            for name in SCHEDULE_FIELDS:
+                setattr(historical, name, deepcopy(entry['rule'][name]))
+            return historical
+    return item
+
+
+def preserve_schedule_history(previous, candidate, effective_on=None):
+    candidate.schedule_history = deepcopy(previous.schedule_history)
+    if any(getattr(previous, key) != getattr(candidate, key) for key in SCHEDULE_FIELDS):
+        boundary = (effective_on or date.today()).isoformat()
+        if not any(entry['until'] == boundary for entry in candidate.schedule_history):
+            candidate.schedule_history.append(dict(until=boundary,
+                rule={name: deepcopy(getattr(previous, name)) for name in SCHEDULE_FIELDS}))
+            candidate.schedule_history.sort(key=lambda entry: entry['until'])
 
 
 def _date_or(value, default):

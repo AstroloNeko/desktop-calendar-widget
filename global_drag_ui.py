@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 from schedule_drag import ScheduleDrag, hit_at
+from calendar_event_service import event_service
 from calendar_flow_layout import highlight_range_day
 from interaction_visuals import CanvasOverlay, elide, preview_bounds
 from ui_draw import blend, draw_drag_bubble, pooled_rounded_rectangle, rounded_rectangle
@@ -33,7 +34,7 @@ class GlobalDragMixin:
         self._cancel_flow_drag(redraw=False)
         operation = hit.operation_at(canvas.canvasx(event.x), self.dpi.px(6))
         try:
-            self._schedule_drag = ScheduleDrag(self.event_commands, hit.event_id, operation, day,
+            self._schedule_drag = ScheduleDrag(event_service(self.event_commands), hit.event_id, operation, day,
                                                 (event.x_root, event.y_root), threshold=self.dpi.px(5))
         except ValueError as exc:
             self.global_status_label.configure(text=str(exc))

@@ -9,6 +9,44 @@ from view_mode import WindowGeometry
 
 
 class BackupActionsMixin:
+    def storage_banner_visible(self):
+        return bool(getattr(self, 'store', None)) and not getattr(self, '_storage_prompt_dismissed', False)
+
+    def build_storage_banner(self):
+        if not self.storage_banner_visible():
+            return
+        import tkinter as tk
+        from reminder_ui import reminder_button
+        frame = tk.Frame(self.shell, bg=self.theme.panel_background)
+        frame.pack(fill='x')
+        self.storage_banner = frame
+        if self._sqlite_backup_boundary():
+            tk.Label(frame, text='SQLite 已启用', bg=self.theme.panel_background,
+                fg=self.theme.text_secondary).pack(side='left', padx=self.dpi.px(10))
+        else:
+            self.storage_upgrade_button = reminder_button(frame, self, '升级到 SQLite', self.request_storage_upgrade, primary=True)
+            self.storage_upgrade_button.pack(side='left', padx=self.dpi.px(8))
+            def dismiss():
+                self._storage_prompt_dismissed = True
+                frame.destroy()
+                self.render()
+            self.storage_dismiss_button = reminder_button(frame, self, '本次不再提示', dismiss)
+            self.storage_dismiss_button.pack(side='right')
+
+    def request_storage_upgrade(self):
+        if self._sqlite_backup_boundary() or self.update_busy or self._active_modal_window() is not None:
+            return
+        if getattr(self, 'storage_session', None) is None:
+            self._data_message(messagebox.showinfo, '请通过正式启动入口打开月历后升级存储。')
+            return
+        self._pending_storage_upgrade = True
+        if not self.on_close():
+            self._pending_storage_upgrade = False
+
+    def _sqlite_backup_boundary(self):
+        from desktop_backup import sqlite_store
+        return sqlite_store(self.store)
+
     def _data_message(self, function, text):
         return self._owned_data_dialog(lambda: function("桌面月历 · 数据管理", text, parent=self))
 
@@ -31,11 +69,15 @@ class BackupActionsMixin:
             if destination.resolve() == self.store.data_file.resolve():
                 raise BackupError("不能用备份覆盖当前日历数据文件。")
             self._save_window_settings()
-            create_backup(self.store.data_file.read_bytes(), destination, overwrite=overwrite)
-        except (OSError, BackupError) as exc:
+            if self._sqlite_backup_boundary():
+                from desktop_backup import export_sqlite
+                export_sqlite(self.store, destination, overwrite=overwrite)
+            else:
+                create_backup(self.store.data_file.read_bytes(), destination, overwrite=overwrite)
+        except (OSError, ValueError, RuntimeError) as exc:
             self._data_message(messagebox.showerror, f"备份未完成：{exc}")
             return
-        self._data_message(messagebox.showinfo, "备份已创建。")
+        self._data_message(messagebox.showinfo, "备份已创建。日历备份不包含外部 AI 配置、凭据或 ChatJournal。")
 
     def restore_data_backup(self):
         if self._active_modal_window() is not None or self.update_busy:
@@ -43,6 +85,25 @@ class BackupActionsMixin:
         filename = self._owned_data_dialog(lambda: filedialog.askopenfilename(
             parent=self, title="恢复数据", filetypes=(("月历数据备份", "*.dcalbackup"),)))
         if not filename:
+            return
+        if self._sqlite_backup_boundary():
+            try:
+                from calendar_sqlite_backup import read_container
+                from calendar_storage_lifecycle import digest
+                fingerprint = digest(filename)
+                manifest, _, _ = read_container(Path(filename))
+                if not self._data_message(messagebox.askyesno,
+                        f"备份时间：{manifest['created_at']}\n\n恢复将覆盖此后变更，当前数据库会先保护。"
+                        "\n旧备份可能遗忘已投递提醒，继续表示接受恢复后可能再次提醒。"
+                        "\n窗口将重新打开；撤销历史和旧待执行 AI 操作将失效，原聊天历史保留归档。是否继续？"):
+                    return
+                if getattr(self, 'storage_session', None) is None:
+                    raise RuntimeError('恢复需要通过正式存储启动入口打开应用。')
+                self._pending_storage_restore = (Path(filename), fingerprint)
+                if not self.on_close():
+                    self._pending_storage_restore = None
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._data_message(messagebox.showerror, f"恢复未完成：{exc}")
             return
         refreshed = False
         def refresh():
