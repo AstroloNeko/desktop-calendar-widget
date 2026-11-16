@@ -55,13 +55,20 @@ print(json.dumps(dict(input=raw,document=dict(events=[asdict(e) for e in partial
  categories=[asdict(c) for c in partial.categories],routines=[asdict(r) for r in partial.routines]))))
 '''
 
-def generate(defaults=False):
+def generate(defaults=False, backup=False):
     archive=subprocess.check_output(['git','archive','--format=zip',REV],cwd=ROOT)
     with tempfile.TemporaryDirectory() as folder:
         root=Path(folder)
         with zipfile.ZipFile(io.BytesIO(archive)) as z:z.extractall(root)
         env=dict(os.environ,APPDATA=str(root/'private-appdata'),PYTHONIOENCODING='utf-8')
         script=SCRIPT if not defaults else SCRIPT.split('s=Store(')[0]+DEFAULT_SCRIPT
+        if backup:
+            script=SCRIPT.split('print(json.dumps(dict(document=')[0]+r'''
+import base64
+from data_backup import create_backup
+create_backup(Path('isolated.json').read_bytes(),Path('legacy.dcalbackup'))
+print(json.dumps(dict(backup=base64.b64encode(Path('legacy.dcalbackup').read_bytes()).decode('ascii'))))
+'''
         result=json.loads(subprocess.check_output([sys.executable,'-c',script],cwd=root,env=env,text=True,encoding='utf8'))
     result['provenance']=dict(tag='v0.10.2',commit=REV,generated_by='tagged Store.save; synthetic data',source_app_version='0.10.2')
     return result
