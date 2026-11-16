@@ -84,10 +84,10 @@ class DirectoryLease:
 
 
 class StorageLifecycle:
-    def __init__(self, directory, *, isolated=False, existing_only=False, checkpoint=lambda name:None):
+    def __init__(self, directory, *, isolated=False, existing_only=False, migration_authorized=False, checkpoint=lambda name:None):
         self.root=Path(directory).resolve()
         actual=DATA_DIR.resolve()
-        if not existing_only and (not isolated or self.root==actual or actual in self.root.parents):
+        if not existing_only and not migration_authorized and (not isolated or self.root==actual or actual in self.root.parents):
             raise LifecycleError('explicit_isolated_directory_required')
         self.existing_only = existing_only
         self.root.mkdir(parents=True,exist_ok=True)
@@ -191,7 +191,7 @@ class StorageLifecycle:
             self._write(state)
             durable_new(self._path(state['protection']),source.read_bytes());self._verify_source(state)
             self.checkpoint('PROTECTED')
-            report=dry_run_migration(source,self.root/('stage-'+token))
+            report=dry_run_migration(source,self.root/('stage-'+token),managed_directory=self.root)
             if not report['candidate_ready']:raise LifecycleError('staging_failed')
             # Use backup API to produce a closed, standalone, WAL-independent candidate.
             store=Store(Path(report['candidate_path']),repository_factory=SqliteCalendarRepository)

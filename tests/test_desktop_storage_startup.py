@@ -131,6 +131,23 @@ class DesktopStartupTests(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError, 'explicit_isolated'):
             StartupOptions(offer_migration=True).manager()
 
+    def test_explicit_upgrade_gate_production_path_in_isolated_profile(self):
+        with patch('desktop_storage_startup.DATA_DIR', self.root), patch('calendar_migration.DATA_DIR', self.root):
+            options = StartupOptions(upgrade_storage=True)
+            session = open_desktop_storage(options, confirm=lambda: True)
+        self.addCleanup(session.close)
+        self.assertTrue(session.sqlite)
+
+    def test_new_profile_upgrade_consent_and_cancel(self):
+        self.source.unlink()
+        options = StartupOptions(self.root, upgrade_storage=True)
+        session = open_desktop_storage(options, confirm=lambda: False)
+        session.close()
+        self.assertFalse(self.source.exists())
+        session = open_desktop_storage(options, confirm=lambda: True)
+        self.addCleanup(session.close)
+        self.assertTrue(session.sqlite)
+
     def test_chat_folder_retained(self):
         folder = self.root / 'ai-assistant'
         folder.mkdir()

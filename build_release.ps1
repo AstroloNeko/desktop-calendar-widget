@@ -1,4 +1,7 @@
 $ErrorActionPreference = "Stop"
+# Python paths may contain Chinese characters. PowerShell 5.1 otherwise decodes
+# redirected Python UTF-8 output using a legacy console code page.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $distDir = Join-Path $projectDir "dist"

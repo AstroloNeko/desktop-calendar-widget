@@ -21,7 +21,7 @@ def candidate_from_backup(manager, backup, token):
     else:
         source = manager._path('restore-input-' + token + '.json')
         durable_new(source, data)
-        report = dry_run_migration(source, manager.root / ('restore-stage-' + token))
+        report = dry_run_migration(source, manager.root / ('restore-stage-' + token), managed_directory=manager.root)
         if not report['candidate_ready']:
             raise LifecycleError('legacy_backup_invalid')
         store = Store(Path(report['candidate_path']), repository_factory=SqliteCalendarRepository)

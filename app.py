@@ -7633,7 +7633,7 @@ def main(arguments=None) -> None:
             if not offline_recovery(options):
                 return
         while True:
-            if options.offer_migration:
+            if options.offer_migration or options.upgrade_storage:
                 with StartupDialogs() as dialogs:
                     app = create_desktop_app(options, CalendarApp, instance=instance,
                         confirm=dialogs.confirm, notify=dialogs.notify)

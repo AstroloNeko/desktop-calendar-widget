@@ -37,6 +37,16 @@ class MigrationTests(unittest.TestCase):
         self.data=fixture();self.write()
 
     def write(self):self.source.write_text(json.dumps(self.data,ensure_ascii=False),encoding='utf8')
+
+    def test_managed_user_directory_staging_requires_explicit_confined_parent(self):
+        stage=self.root/'stage-explicit-test'
+        with patch('calendar_migration.DATA_DIR',self.root):
+            rejected=dry_run_migration(self.source,stage)
+            self.assertFalse(rejected['candidate_ready'])
+            rejected=dry_run_migration(self.source,stage,managed_directory=self.root.parent)
+            self.assertFalse(rejected['candidate_ready'])
+            accepted=dry_run_migration(self.source,stage,managed_directory=self.root)
+            self.assertTrue(accepted['candidate_ready'],accepted['issues'])
     def result(self):self.write();return validate_source(self.source)
     def codes(self):return {i.code for i in self.result().issues}
     def run_dry(self):self.write();return dry_run_migration(self.source,self.stage)

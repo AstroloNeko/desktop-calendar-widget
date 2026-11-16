@@ -145,7 +145,7 @@ def _write_reports(stage,report):
         temporary.replace(stage/name)
 
 
-def dry_run_migration(source, staging_directory, *, clock=datetime(2026,1,15,12)):
+def dry_run_migration(source, staging_directory, *, clock=datetime(2026,1,15,12), managed_directory=None):
     """Stable explicit interface for B3b. Returns a redacted, JSON-serializable report.
 
     A successful candidate is NOT permission to activate. No implicit input/output
@@ -173,7 +173,9 @@ def dry_run_migration(source, staging_directory, *, clock=datetime(2026,1,15,12)
     try:
         if not isinstance(clock,datetime) or clock.tzinfo is not None or not 2<=clock.year<=9998:
             raise ValueError('Clock must be explicit naive datetime away from date bounds')
-        if stage==DATA_DIR.resolve() or DATA_DIR.resolve() in stage.parents or stage==source.parent:
+        managed = (managed_directory is not None and stage.parent == Path(managed_directory).resolve()
+                   and stage.name.startswith(('stage-', 'restore-stage-')))
+        if stage==source.parent or (not managed and (stage==DATA_DIR.resolve() or DATA_DIR.resolve() in stage.parents)):
             issue('unsafe_staging_directory','必须使用正式用户目录及源目录以外的显式隔离暂存目录。')
             return report
         if target.exists() or any((stage/name).exists() for name in ('migration-report.json','migration-report.txt')):

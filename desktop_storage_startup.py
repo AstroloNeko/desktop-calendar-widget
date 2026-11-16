@@ -19,12 +19,14 @@ class StartupOptions:
     isolated_directory: Path | None = None
     offer_migration: bool = False
     recover_storage: bool = False
+    upgrade_storage: bool = False
 
     def manager(self):
         if self.isolated_directory is None:
             if self.offer_migration:
                 raise LifecycleError('explicit_isolated_directory_required')
-            return StorageLifecycle(DATA_DIR, existing_only=True)
+            return StorageLifecycle(DATA_DIR, existing_only=not self.upgrade_storage,
+                                    migration_authorized=self.upgrade_storage)
         return StorageLifecycle(self.isolated_directory, isolated=True)
 
 
@@ -61,10 +63,17 @@ def open_desktop_storage(options=StartupOptions(), *, confirm=lambda: False,
     store = None
     try:
         state = manager._read()
-        if state['state'] == 'NOT_STARTED' and options.offer_migration:
+        if state['state'] == 'NOT_STARTED' and (options.offer_migration or options.upgrade_storage):
             source = manager._path('calendar_data.json')
-            original = digest(source)
+            original = digest(source) if source.exists() else None
             if confirm():
+                if original is None:
+                    # Explicit consent only; a new profile is first serialized
+                    # through the existing default model, then strictly migrated.
+                    initial = Store(source)
+                    initial.save()
+                    initial.repository.close()
+                    original = digest(source)
                 # migrate() owns its own exclusive lease and revalidates source.
                 # A contender in this narrow gap makes startup fail, not bypass locking.
                 lease.__exit__(None, None, None)
@@ -97,10 +106,11 @@ def parse_startup_options(arguments):
     parser.add_argument('--isolated-data-dir', type=Path)
     parser.add_argument('--offer-storage-migration', action='store_true')
     parser.add_argument('--recover-storage', action='store_true')
+    parser.add_argument('--upgrade-storage', action='store_true', help='Explicit consent wizard for production SQLite upgrade')
     args = parser.parse_args(arguments)
     if args.offer_storage_migration and args.isolated_data_dir is None:
         parser.error('--offer-storage-migration requires --isolated-data-dir')
-    return StartupOptions(args.isolated_data_dir, args.offer_storage_migration, args.recover_storage)
+    return StartupOptions(args.isolated_data_dir, args.offer_storage_migration, args.recover_storage, args.upgrade_storage)
 
 
 def stop_desktop_storage(app):
