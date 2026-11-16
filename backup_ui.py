@@ -10,20 +10,14 @@ from view_mode import WindowGeometry
 
 class BackupActionsMixin:
     def _sqlite_backup_boundary(self):
-        from sqlite_calendar_repository import SqliteCalendarRepository
-        if isinstance(self.store.repository, SqliteCalendarRepository):
-            self._data_message(messagebox.showinfo,
-                'SQLite 桌面备份与恢复入口将在 C2 接入。当前不会调用旧 JSON 备份流程，数据未被恢复或替换。')
-            return True
-        return False
+        from desktop_backup import sqlite_store
+        return sqlite_store(self.store)
 
     def _data_message(self, function, text):
         return self._owned_data_dialog(lambda: function("桌面月历 · 数据管理", text, parent=self))
 
     def export_backup(self):
         if self._active_modal_window() is not None or self.update_busy:
-            return
-        if self._sqlite_backup_boundary():
             return
         name = f"桌面月历备份-{datetime.now():%Y%m%d-%H%M%S}.dcalbackup"
         filename = self._owned_data_dialog(lambda: filedialog.asksaveasfilename(
@@ -41,20 +35,41 @@ class BackupActionsMixin:
             if destination.resolve() == self.store.data_file.resolve():
                 raise BackupError("不能用备份覆盖当前日历数据文件。")
             self._save_window_settings()
-            create_backup(self.store.data_file.read_bytes(), destination, overwrite=overwrite)
-        except (OSError, BackupError) as exc:
+            if self._sqlite_backup_boundary():
+                from desktop_backup import export_sqlite
+                export_sqlite(self.store, destination, overwrite=overwrite)
+            else:
+                create_backup(self.store.data_file.read_bytes(), destination, overwrite=overwrite)
+        except (OSError, ValueError, RuntimeError) as exc:
             self._data_message(messagebox.showerror, f"备份未完成：{exc}")
             return
-        self._data_message(messagebox.showinfo, "备份已创建。")
+        self._data_message(messagebox.showinfo, "备份已创建。日历备份不包含外部 AI 配置、凭据或 ChatJournal。")
 
     def restore_data_backup(self):
         if self._active_modal_window() is not None or self.update_busy:
             return
-        if self._sqlite_backup_boundary():
-            return
         filename = self._owned_data_dialog(lambda: filedialog.askopenfilename(
             parent=self, title="恢复数据", filetypes=(("月历数据备份", "*.dcalbackup"),)))
         if not filename:
+            return
+        if self._sqlite_backup_boundary():
+            try:
+                from calendar_sqlite_backup import read_container
+                from calendar_storage_lifecycle import digest
+                fingerprint = digest(filename)
+                manifest, _, _ = read_container(Path(filename))
+                if not self._data_message(messagebox.askyesno,
+                        f"备份时间：{manifest['created_at']}\n\n恢复将覆盖此后变更，当前数据库会先保护。"
+                        "\n旧备份可能遗忘已投递提醒，继续表示接受恢复后可能再次提醒。"
+                        "\n窗口将重新打开；撤销历史和旧待执行 AI 操作将失效，原聊天历史保留归档。是否继续？"):
+                    return
+                if getattr(self, 'storage_session', None) is None:
+                    raise RuntimeError('恢复需要通过正式存储启动入口打开应用。')
+                self._pending_storage_restore = (Path(filename), fingerprint)
+                if not self.on_close():
+                    self._pending_storage_restore = None
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._data_message(messagebox.showerror, f"恢复未完成：{exc}")
             return
         refreshed = False
         def refresh():

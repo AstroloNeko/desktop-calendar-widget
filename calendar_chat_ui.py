@@ -20,8 +20,11 @@ class ChatRuntime:
         self.app, self.window, self.http = app, None, None
         self.folder = app.store.data_file.parent / 'ai-assistant'
         self.configuration = AIConfiguration(self.folder)
+        from calendar_chat_sessions import ChatJournal
+        session = getattr(app, 'storage_session', None)
+        journal = ChatJournal(session.journal_path, self.configuration.protector) if session else None
         self.core = CalendarRuntime(app.store, app.event_commands, TkDispatcher(app),
-            configuration=self.configuration, refresh=app._refresh_event_change,
+            configuration=self.configuration, journal=journal, refresh=app._refresh_event_change,
             writable=lambda: not app.lifecycle.exiting and not app.update_busy and not app._lifecycle_operation_depth
             and (app._active_modal_window() is None or app._active_modal_window() is self.window),
             habit_refresh=self.refresh_habits)

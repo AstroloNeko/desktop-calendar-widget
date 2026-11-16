@@ -3087,6 +3087,12 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             raise DataCompatibilityError(self.store.load_error)
         self.backup_warning = None
         from sqlite_calendar_repository import SqliteCalendarRepository
+        if isinstance(self.store.repository, SqliteCalendarRepository):
+            try:
+                from desktop_backup import automatic_sqlite_backup
+                automatic_sqlite_backup(self.store)
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.backup_warning = str(exc)
         if not self.store.load_error and not isinstance(self.store.repository, SqliteCalendarRepository):
             try:
                 automatic_backup(self.store.data_file)
@@ -7408,9 +7414,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.after(100, self.apply_window_mode)
 
     def _start_update_download(self, info: UpdateInfo) -> None:
-        if getattr(self, 'storage_session', None) is not None and (
-                self.storage_session.sqlite or not self.storage_session.manager.existing_only):
-            messagebox.showinfo(APP_NAME, '此存储测试会话不允许安装更新；SQLite 更新协调将在 C2 接入。', parent=self)
+        if getattr(self, 'storage_session', None) is not None and not self.storage_session.manager.existing_only:
+            messagebox.showinfo(APP_NAME, '此隔离存储测试会话不允许覆盖安装正式程序。', parent=self)
             return
         if not running_as_packaged_app():
             messagebox.showinfo(
@@ -7623,26 +7628,34 @@ def main(arguments=None) -> None:
         instance.close()
         return
     try:
-        if options.offer_migration:
-            with StartupDialogs() as dialogs:
-                app = create_desktop_app(options, CalendarApp, instance=instance,
-                    confirm=dialogs.confirm, notify=dialogs.notify)
-        else:
-            app = create_desktop_app(options, CalendarApp, instance=instance)
-    except (DataCompatibilityError, LifecycleError, OSError, KeyError, ValueError) as exc:
-        if instance is not None:
-            instance.close()
+        if options.recover_storage:
+            from storage_startup_ui import offline_recovery
+            if not offline_recovery(options):
+                return
+        while True:
+            if options.offer_migration:
+                with StartupDialogs() as dialogs:
+                    app = create_desktop_app(options, CalendarApp, instance=instance,
+                        confirm=dialogs.confirm, notify=dialogs.notify)
+            else:
+                app = create_desktop_app(options, CalendarApp, instance=instance)
+            try:
+                app.mainloop()
+            finally:
+                stop_desktop_storage(app)
+            request = getattr(app, '_pending_storage_restore', None)
+            if not request:
+                break
+            # Old Tk owner, Store, history and HTTP admission are stopped before
+            # taking the offline lifecycle lease and activating a fresh epoch.
+            options.manager().restore(request[0], authorize_replacement=True,
+                reminder_replay_reviewed=True, expected_backup_hash=request[1])
+    except (DataCompatibilityError, RuntimeError, OSError, KeyError, ValueError) as exc:
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror(APP_NAME, f"无法安全打开日历。\n\n{exc}\n\n已拒绝不兼容的数据写入；请勿用旧程序覆盖或重建数据。", parent=root)
+        messagebox.showerror(APP_NAME, f"无法安全打开或恢复日历。\n\n{exc}\n\n未回退旧 JSON。若数据库损坏，可使用 --recover-storage 选择有效备份；请保留原件。", parent=root)
         root.destroy()
-        return
-    try:
-        app.mainloop()
     finally:
-        # Stop dispatch before relinquishing authority. This also guards an
-        # unexpected mainloop termination; late Chat callbacks cannot write.
-        stop_desktop_storage(app)
         if instance is not None:
             instance.close()
 

@@ -1,6 +1,6 @@
 """Short-lived, owned native migration dialogs; no calendar services yet."""
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, filedialog
 
 
 class StartupDialogs:
@@ -27,3 +27,25 @@ class StartupDialogs:
 
     def __exit__(self, *args):
         self.root.destroy()
+
+
+def offline_recovery(options):
+    from calendar_sqlite_backup import read_container
+    from calendar_storage_lifecycle import digest
+    from calendar_disaster_recovery import disaster_restore
+    with StartupDialogs() as dialogs:
+        path = filedialog.askopenfilename(parent=dialogs.root, title='离线灾难恢复：选择备份',
+            filetypes=(('月历备份', '*.dcalbackup'),))
+        if not path:
+            return False
+        fingerprint = digest(path)
+        manifest, _, _ = read_container(path)
+        if not messagebox.askyesno('桌面月历 · 离线灾难恢复',
+            f"备份时间：{manifest['created_at']}\n将原样归档数据库和 WAL/SHM 后恢复。"
+            '\n备份之后的变更可能丢失；旧待执行操作和撤销历史失效。'
+            '\n备份可能遗忘已发提醒，继续即接受可能再次提醒。是否恢复？', parent=dialogs.root):
+            return False
+        disaster_restore(options.manager(), path, authorize_replacement=True,
+            reminder_replay_reviewed=True, expected_backup_hash=fingerprint)
+        messagebox.showinfo('桌面月历', '恢复验证完成，原件已归档。即将启动恢复后的日历。', parent=dialogs.root)
+        return True

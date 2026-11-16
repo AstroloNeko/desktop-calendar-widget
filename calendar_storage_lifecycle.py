@@ -135,7 +135,10 @@ class StorageLifecycle:
                 if row!=(state['identity']['revision'],):raise LifecycleError('migration_receipt_missing')
 
     def _verify_source(self,state):
-        if state['operation']=='migration':
+        if state['operation']=='disaster_restore':
+            from calendar_disaster_recovery import verify_archive
+            verify_archive(self, state)
+        elif state['operation']=='migration':
             if digest(self._path(state['source']))!=state['source_hash']:raise LifecycleError('source_changed')
             if digest(self._path(state['protection']))!=state['source_hash']:raise LifecycleError('protection_changed')
             if 'report_hash' in state:
@@ -230,32 +233,23 @@ class StorageLifecycle:
             durable_new(self.root/('abandoned-'+uuid.uuid4().hex+'.json'),json.dumps(state).encode())
             self._write(dict(format=1,state='NOT_STARTED'))
 
-    def restore(self,backup,*,authorize_replacement=False):
+    def restore(self,backup,*,authorize_replacement=False,reminder_replay_reviewed=False,expected_backup_hash=None):
         """Offline only. Explicit consent required even for a same-revision backup.
 
         Every restore changes the persistent epoch and starts a fresh journal/Undo
         context. Prior database and original AI history remain retained.
         """
-        if self.existing_only:raise LifecycleError('production_restore_disabled')
-        from calendar_sqlite_backup import read_container
         with self.lease():
+            if expected_backup_hash is not None and digest(backup) != expected_backup_hash:
+                raise LifecycleError('backup_changed_since_review')
             previous,path,factory=self._select()
             if factory is None:raise LifecycleError('sqlite_not_active')
             if not authorize_replacement:raise LifecycleError('restore_requires_explicit_authorization')
-            manifest,data,backend=read_container(backup)
-            token=uuid.uuid4().hex;candidate=self._path('candidate-'+token+'.sqlite3')
-            if backend=='sqlite':
-                durable_new(candidate,data)
-                identity=inspect_database(candidate)
-                if identity!=manifest.get('identity'):raise LifecycleError('backup_identity')
-            else:
-                source=self._path('restore-input-'+token+'.json');durable_new(source,data)
-                report=dry_run_migration(source,self.root/('restore-stage-'+token))
-                if not report['candidate_ready']:raise LifecycleError('legacy_backup_invalid')
-                store=Store(Path(report['candidate_path']),repository_factory=SqliteCalendarRepository)
-                try:store.repository.backup_to(candidate)
-                finally:store.repository.close()
-                identity=inspect_database(candidate)
+            from calendar_disaster_recovery import candidate_from_backup
+            token=uuid.uuid4().hex
+            candidate,identity=candidate_from_backup(self,backup,token)
+            if expected_backup_hash is not None and digest(backup) != expected_backup_hash:
+                raise LifecycleError('backup_changed_since_review')
             protection=self._path('before-restore-'+token+'.sqlite3')
             store=Store(path,repository_factory=SqliteCalendarRepository)
             try:store.repository.backup_to(protection)
@@ -266,7 +260,7 @@ class StorageLifecycle:
                 previous_epoch=previous['epoch'],previous_database=path.name,previous_identity=old_identity,
                 protection=protection.name,protection_hash=digest(protection),candidate=candidate.name,
                 database='calendar-'+token+'.sqlite3',database_hash=digest(candidate),identity=identity,
-                reminder_replay_warning=True)
+                reminder_replay_warning=True,reminder_replay_reviewed=reminder_replay_reviewed)
             self._write(state)
             return self._finish(state)
 

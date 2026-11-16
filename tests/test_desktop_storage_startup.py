@@ -121,7 +121,7 @@ class DesktopStartupTests(unittest.TestCase):
     def test_production_cannot_migrate(self):
         manager = StorageLifecycle(self.root, existing_only=True)
         with self.assertRaisesRegex(LifecycleError, 'production_migration_disabled'): manager.migrate()
-        with self.assertRaisesRegex(LifecycleError, 'production_restore_disabled'): manager.restore('unused')
+        with self.assertRaisesRegex(LifecycleError, 'sqlite_not_active'): manager.restore('unused')
 
     def test_real_directory_rejected_for_isolated_mode(self):
         with patch('calendar_storage_lifecycle.DATA_DIR', self.root):
@@ -247,7 +247,10 @@ class DesktopStartupTests(unittest.TestCase):
             update_busy = False
             def _active_modal_window(self): return None
             def _data_message(self, *args): pass
-        with patch('backup_ui.create_backup') as export, patch('backup_ui.restore_store') as restore:
+            def _owned_data_dialog(self, function): return function()
+        with patch('backup_ui.create_backup') as export, patch('backup_ui.restore_store') as restore, \
+                patch('backup_ui.filedialog.asksaveasfilename', return_value=''), \
+                patch('backup_ui.filedialog.askopenfilename', return_value=''):
             App().export_backup()
             App().restore_data_backup()
             export.assert_not_called()

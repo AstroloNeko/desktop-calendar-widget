@@ -154,6 +154,13 @@ class DataCompatibilityTests(unittest.TestCase):
 
 
 class HandoffTests(unittest.TestCase):
+    def setUp(self):
+        profile = tempfile.TemporaryDirectory()
+        self.addCleanup(profile.cleanup)
+        guard = patch('update_storage_guard.profile_root', return_value=Path(profile.name))
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def fake(self):
         calls = []
         app = SimpleNamespace(update_dialog=Mock(), update_busy=True,

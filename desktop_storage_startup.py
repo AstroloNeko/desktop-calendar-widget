@@ -5,6 +5,7 @@ The session owns the repository and directory lease for the desktop lifetime.
 """
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from calendar_core import DATA_DIR, Store, DataCompatibilityError
 from calendar_storage_lifecycle import StorageLifecycle, LifecycleError, digest
@@ -17,6 +18,7 @@ _QUARANTINED_DESKTOPS = []
 class StartupOptions:
     isolated_directory: Path | None = None
     offer_migration: bool = False
+    recover_storage: bool = False
 
     def manager(self):
         if self.isolated_directory is None:
@@ -34,6 +36,13 @@ class DesktopStorageSession:
     @property
     def sqlite(self):
         return self.state['state'] == 'ACTIVE'
+
+    @property
+    def journal_path(self):
+        folder = self.manager.root / 'ai-assistant'
+        if self.state.get('operation') in ('restore', 'disaster_restore'):
+            folder = folder / ('epoch-' + self.state['epoch'])
+        return folder / 'sessions.sqlite3'
 
     def close(self):
         # Caller must stop producers and the Tk dispatcher before closing.
@@ -66,9 +75,10 @@ def open_desktop_storage(options=StartupOptions(), *, confirm=lambda: False,
                 lease.__enter__()
                 notify('activated')
         state, path, factory = manager._select()
-        # Restore replay/epoch UI belongs to C2. Never start desktop reminders or
-        # reuse old chat pending operations until that review is implemented.
-        if state.get('operation') == 'restore':
+        if factory is not None and not re.fullmatch(r'[0-9a-f]{32}', str(state.get('epoch', ''))):
+            raise LifecycleError('invalid_storage_epoch')
+        # Legacy/offline restores without explicit replay review remain blocked.
+        if state.get('operation') in ('restore', 'disaster_restore') and state.get('reminder_replay_reviewed') is not True:
             raise LifecycleError('restored_desktop_requires_review_c2')
         store = Store(path, repository_factory=factory)
         if store.load_error:
@@ -86,10 +96,11 @@ def parse_startup_options(arguments):
     parser = argparse.ArgumentParser(description='Desktop Calendar')
     parser.add_argument('--isolated-data-dir', type=Path)
     parser.add_argument('--offer-storage-migration', action='store_true')
+    parser.add_argument('--recover-storage', action='store_true')
     args = parser.parse_args(arguments)
     if args.offer_storage_migration and args.isolated_data_dir is None:
         parser.error('--offer-storage-migration requires --isolated-data-dir')
-    return StartupOptions(args.isolated_data_dir, args.offer_storage_migration)
+    return StartupOptions(args.isolated_data_dir, args.offer_storage_migration, args.recover_storage)
 
 
 def stop_desktop_storage(app):

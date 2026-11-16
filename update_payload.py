@@ -10,6 +10,11 @@ class PayloadError(RuntimeError):
 
 
 def stage_verified_updater(archive: Path) -> Path:
+    from update_storage_guard import check_archive
+    try:
+        check_archive(archive)
+    except RuntimeError as exc:
+        raise PayloadError(str(exc)) from exc
     app_member = "DesktopCalendar/DesktopCalendar.exe"
     updater_member = "DesktopCalendar/DesktopCalendarUpdater.exe"
     try:
