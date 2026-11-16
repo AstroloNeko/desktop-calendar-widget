@@ -149,7 +149,10 @@ class SqliteCalendarRepository(JsonCalendarRepository):
             raw = self._document(db)
         for table in COLUMNS:
             current = store.sorted_categories() if table == 'categories' else getattr(store, table)
-            if [asdict(item) for item in current] != raw[table]:
+            expected_rows = raw[table]
+            if table == 'categories':
+                expected_rows = sorted(expected_rows, key=lambda c:(c['sort_order'],c['created_at'],c['id']))
+            if [asdict(item) for item in current] != expected_rows:
                 raise RepositoryConflictError('SQLite 不支持通过 Store.save 修改业务对象，请使用 Application Service。')
         if store.date_states != raw['date_states']:
             raise RepositoryConflictError('日期状态必须通过 Application Service 提交。')
@@ -166,6 +169,19 @@ class SqliteCalendarRepository(JsonCalendarRepository):
         except sqlite3.Error as exc:
             raise OSError('SQLite 存储操作未完成：' + str(exc)) from exc
 
+    def import_snapshot(self, changes, preferences, *, source_hash):
+        """B3a only: validated complete snapshot into an unused isolated database.
+
+        No defaults/settings merge, no history generation, no notification pruning.
+        Schema creation precedes this one atomic data/receipt transaction.
+        """
+        if len(source_hash) != 64 or any(c not in '0123456789abcdef' for c in source_hash):
+            raise ValueError('Invalid source hash')
+        if set(changes) != {'events','routines','categories','date_states','notified'} or not isinstance(preferences,dict):
+            raise ValueError('A complete validated import snapshot is required')
+        return self._apply(changes, preferences=deepcopy(preferences),
+                           operation_id='migration:'+source_hash, initial_import=True)
+
     def _commit(self, db):
         db.commit()  # Narrow fault-injection point, not a second persistence path.
 
@@ -174,7 +190,7 @@ class SqliteCalendarRepository(JsonCalendarRepository):
             row = db.execute('SELECT * FROM operation_receipts WHERE operation_id=?', (operation_id,)).fetchone()
             return dict(row) if row else None
 
-    def _apply(self, changes, *, expected_revision=None, operation_id=None, preferences=None):
+    def _apply(self, changes, *, expected_revision=None, operation_id=None, preferences=None, initial_import=False):
         from calendar_core import MutationUncertainError
         store = self.legacy_store
         if store.load_error: raise DataCompatibilityError(store.load_error)
@@ -201,6 +217,11 @@ class SqliteCalendarRepository(JsonCalendarRepository):
             db.execute('BEGIN IMMEDIATE')
             committing = False
             try:
+                if initial_import:
+                    # Also reject a pre-populated revision-0 file; never overwrite it.
+                    tables = (*COLUMNS,'date_states','preferences','reminder_delivery_state','operation_receipts')
+                    if self._revision(db).generation != 0 or any(db.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone() for table in tables):
+                        raise RepositoryConflictError('迁移导入仅允许全新空数据库。')
                 previous = db.execute('SELECT * FROM operation_receipts WHERE operation_id=?', (operation_id,)).fetchone()
                 if previous:
                     if previous['request_hash'] != digest:
@@ -213,12 +234,13 @@ class SqliteCalendarRepository(JsonCalendarRepository):
                 actual = self._revision(db)
                 if actual != expected or actual != self._loaded:
                     raise RepositoryConflictError('SQLite Revision 冲突，请重新加载后重新预览。')
-                changed = False
+                changed = initial_import  # Empty calendars still get a source-bound receipt.
                 new_revision = actual.generation + 1
                 # Deferred FK allows category deletion + event unlink as ONE transaction.
                 for table in ('categories','events','routines'):
                     if table in candidates:
-                        changed |= self._sync_records(db, table, candidates[table], actual.session, new_revision)
+                        options = {'preserve_order':True} if initial_import else {}
+                        changed |= self._sync_records(db, table, candidates[table], actual.session, new_revision, **options)
                 if 'date_states' in candidates:
                     changed |= self._sync_pairs(db, 'date_states', 'day', 'state', candidates['date_states'], actual.session)
                 if 'notified' in candidates:
@@ -274,7 +296,7 @@ class SqliteCalendarRepository(JsonCalendarRepository):
         self._loaded = SnapshotToken(actual.session,new_revision)
         return RepositoryCommit(True,self._loaded,operation_id)
 
-    def _sync_records(self, db, table, items, calendar_id, revision):
+    def _sync_records(self, db, table, items, calendar_id, revision, *, preserve_order=False):
         columns = tuple(COLUMNS[table])
         # Safe only after the transaction has matched the Store's loaded revision.
         # Avoid scanning/deserializing every database row for one object edit.
@@ -286,7 +308,7 @@ class SqliteCalendarRepository(JsonCalendarRepository):
             db.execute(f'DELETE FROM {table} WHERE id=? AND calendar_id=?',(identifier,calendar_id))
             changed = True
         # Categories are exposed in established sort_order order after reload.
-        if table == 'categories': items = sorted(items, key=lambda c:(c.sort_order,c.created_at,c.id))
+        if table == 'categories' and not preserve_order: items = sorted(items, key=lambda c:(c.sort_order,c.created_at,c.id))
         for order,item in enumerate(items):
             prior = old.get(item.id)
             if prior is not None and prior[0] == order and prior[1] == item:
