@@ -220,15 +220,20 @@ def performance(app):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--performance", action="store_true")
+    parser.add_argument("--sqlite", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as temporary:
-        store = Store(Path(temporary) / "data.json")
+        store = Store(Path(temporary) / ("calendar_data.json" if args.sqlite else "data.json"))
         store.categories = [EventCategory("art", "绘画", "#52B788")]
         store.events = [Event("task", "task smoke", "2026-08-07T10:30", duration_days=5, end_as_ddl=True)]
         store.save()
         # Avoid real tray registration and scheduled notifications in a test.
         with patch.object(CalendarApp, "_start_tray_icon"), patch.object(CalendarApp, "check_reminders"):
-            app = CalendarApp(store)
+            if args.sqlite:
+                from desktop_storage_startup import StartupOptions, create_desktop_app
+                app = create_desktop_app(StartupOptions(Path(temporary), True), CalendarApp, confirm=lambda: True)
+            else:
+                app = CalendarApp(store)
             errors = []
             app.report_callback_exception = lambda *parts: errors.append(parts)
             try:

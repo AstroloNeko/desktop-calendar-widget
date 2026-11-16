@@ -9,11 +9,21 @@ from view_mode import WindowGeometry
 
 
 class BackupActionsMixin:
+    def _sqlite_backup_boundary(self):
+        from sqlite_calendar_repository import SqliteCalendarRepository
+        if isinstance(self.store.repository, SqliteCalendarRepository):
+            self._data_message(messagebox.showinfo,
+                'SQLite 桌面备份与恢复入口将在 C2 接入。当前不会调用旧 JSON 备份流程，数据未被恢复或替换。')
+            return True
+        return False
+
     def _data_message(self, function, text):
         return self._owned_data_dialog(lambda: function("桌面月历 · 数据管理", text, parent=self))
 
     def export_backup(self):
         if self._active_modal_window() is not None or self.update_busy:
+            return
+        if self._sqlite_backup_boundary():
             return
         name = f"桌面月历备份-{datetime.now():%Y%m%d-%H%M%S}.dcalbackup"
         filename = self._owned_data_dialog(lambda: filedialog.asksaveasfilename(
@@ -39,6 +49,8 @@ class BackupActionsMixin:
 
     def restore_data_backup(self):
         if self._active_modal_window() is not None or self.update_busy:
+            return
+        if self._sqlite_backup_boundary():
             return
         filename = self._owned_data_dialog(lambda: filedialog.askopenfilename(
             parent=self, title="恢复数据", filetypes=(("月历数据备份", "*.dcalbackup"),)))

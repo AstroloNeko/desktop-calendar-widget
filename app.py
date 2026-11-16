@@ -3086,7 +3086,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.destroy()
             raise DataCompatibilityError(self.store.load_error)
         self.backup_warning = None
-        if not self.store.load_error:
+        from sqlite_calendar_repository import SqliteCalendarRepository
+        if not self.store.load_error and not isinstance(self.store.repository, SqliteCalendarRepository):
             try:
                 automatic_backup(self.store.data_file)
             except (OSError, ValueError) as exc:
@@ -7407,6 +7408,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.after(100, self.apply_window_mode)
 
     def _start_update_download(self, info: UpdateInfo) -> None:
+        if getattr(self, 'storage_session', None) is not None and (
+                self.storage_session.sqlite or not self.storage_session.manager.existing_only):
+            messagebox.showinfo(APP_NAME, '此存储测试会话不允许安装更新；SQLite 更新协调将在 C2 接入。', parent=self)
+            return
         if not running_as_packaged_app():
             messagebox.showinfo(
                 APP_NAME,
@@ -7582,15 +7587,19 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
 
 
-def main() -> None:
+def main(arguments=None) -> None:
     # Late activation after an opted-in app exits must not read/migrate data,
     # create another calendar instance, or register/schedule notifications.
     if "--native-notification-activation" in sys.argv:
         return
     enable_dpi_awareness()
     sys.excepthook = log_exception
+    from desktop_storage_startup import parse_startup_options, create_desktop_app, stop_desktop_storage
+    from calendar_storage_lifecycle import LifecycleError
+    from storage_startup_ui import StartupDialogs
+    options = parse_startup_options(arguments or [])
     try:
-        busy = update_in_progress()
+        busy = update_in_progress() if options.isolated_directory is None else False
     except OSError as exc:
         root = tk.Tk()
         root.withdraw()
@@ -7603,8 +7612,10 @@ def main() -> None:
         messagebox.showinfo(APP_NAME, "更新尚未完成，请等待安装结束后再打开月历。", parent=root)
         root.destroy()
         return
-    instance = SingleInstance()
-    if instance.already_running:
+    # Isolated desktops coordinate through the directory lease, not the real
+    # user's legacy global instance mutex.
+    instance = SingleInstance() if options.isolated_directory is None else None
+    if instance is not None and instance.already_running:
         root = tk.Tk()
         root.withdraw()
         messagebox.showinfo(APP_NAME, "桌面月历已经在运行了。")
@@ -7612,16 +7623,29 @@ def main() -> None:
         instance.close()
         return
     try:
-        app = CalendarApp(instance=instance)
-    except DataCompatibilityError as exc:
-        instance.close()
+        if options.offer_migration:
+            with StartupDialogs() as dialogs:
+                app = create_desktop_app(options, CalendarApp, instance=instance,
+                    confirm=dialogs.confirm, notify=dialogs.notify)
+        else:
+            app = create_desktop_app(options, CalendarApp, instance=instance)
+    except (DataCompatibilityError, LifecycleError, OSError, KeyError, ValueError) as exc:
+        if instance is not None:
+            instance.close()
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror(APP_NAME, f"无法安全打开日历。\n\n{exc}\n\n已拒绝不兼容的数据写入；请勿用旧程序覆盖或重建数据。", parent=root)
         root.destroy()
         return
-    app.mainloop()
+    try:
+        app.mainloop()
+    finally:
+        # Stop dispatch before relinquishing authority. This also guards an
+        # unexpected mainloop termination; late Chat callbacks cannot write.
+        stop_desktop_storage(app)
+        if instance is not None:
+            instance.close()
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

@@ -1,4 +1,4 @@
-"""Explicit isolated-directory authority and recovery; never desktop defaults.
+"""Storage authority and recovery; migration remains isolated-directory only.
 
 Cooperating runtimes hold an exclusive OS lease for their entire lifetime.
 Old executables do not honor this lease: deployment coordination belongs to B3c.
@@ -84,11 +84,12 @@ class DirectoryLease:
 
 
 class StorageLifecycle:
-    def __init__(self, directory, *, isolated=False, checkpoint=lambda name:None):
+    def __init__(self, directory, *, isolated=False, existing_only=False, checkpoint=lambda name:None):
         self.root=Path(directory).resolve()
         actual=DATA_DIR.resolve()
-        if not isolated or self.root==actual or actual in self.root.parents:
+        if not existing_only and (not isolated or self.root==actual or actual in self.root.parents):
             raise LifecycleError('explicit_isolated_directory_required')
+        self.existing_only = existing_only
         self.root.mkdir(parents=True,exist_ok=True)
         self.state_path=self.root/'storage-state.json'
         self.witness=self.root/'.storage-managed'
@@ -164,14 +165,19 @@ class StorageLifecycle:
         candidate.unlink(missing_ok=True)
         return state
 
-    def migrate(self):
+    def migrate(self, *, expected_source_hash=None):
+        if self.existing_only:raise LifecycleError('production_migration_disabled')
         with self.lease():
             state=self._read()
             if state['state']=='ACTIVE':raise LifecycleError('already_active')
+            if expected_source_hash is not None and state['state'] in ('STAGED','ACTIVATING') and state.get('source_hash') != expected_source_hash:
+                raise LifecycleError('source_changed')
             if state['state'] in ('STAGED','ACTIVATING'):return self._finish(state)
             if state['state']!='NOT_STARTED':raise LifecycleError('preparation_requires_review')
             source=self._path('calendar_data.json');validation=validate_source(source)
             if not validation.valid:raise LifecycleError('invalid_source')
+            if expected_source_hash is not None and validation.source['sha256'] != expected_source_hash:
+                raise LifecycleError('source_changed')
             token=uuid.uuid4().hex
             if not self.witness.exists():durable_new(self.witness,b'Explicit isolated storage lifecycle v1\n')
             state=dict(format=1,state='PREPARING',operation='migration',epoch=token,source=source.name,
@@ -213,6 +219,7 @@ class StorageLifecycle:
 
     def abandon_preparation(self):
         """Explicit retry gate before activation only; retain all forensic files."""
+        if self.existing_only:raise LifecycleError('production_migration_disabled')
         with self.lease():
             state=self._read()
             if state['state']!='PREPARING' or state['operation']!='migration':
@@ -229,6 +236,7 @@ class StorageLifecycle:
         Every restore changes the persistent epoch and starts a fresh journal/Undo
         context. Prior database and original AI history remain retained.
         """
+        if self.existing_only:raise LifecycleError('production_restore_disabled')
         from calendar_sqlite_backup import read_container
         with self.lease():
             previous,path,factory=self._select()

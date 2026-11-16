@@ -286,5 +286,7 @@ class ApplicationLifecycleMixin:
             self._ui_actions.get_nowait()
         if self.instance_guard:
             self.instance_guard.close()
+        from desktop_storage_startup import stop_desktop_storage
+        stop_desktop_storage(self)
         self.destroy()
         return True

@@ -156,6 +156,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--product-exe', type=Path)
+    parser.add_argument('--sqlite', action='store_true', help='Use production SQLite startup factory in a temporary profile')
     args = parser.parse_args()
     if args.product_exe:
         result = check_product(args.product_exe)
@@ -165,9 +166,16 @@ def main():
         return
     errors, cases = [], []
     with tempfile.TemporaryDirectory(prefix='calendar-ai-qa-') as folder:
-        store = Store(Path(folder)/'calendar.json')
+        if args.sqlite:
+            from desktop_storage_startup import StartupOptions, create_desktop_app
+            fixture = json.loads((Path(__file__).resolve().parents[1]/'tests/fixtures/schema8_v0102.json').read_text(encoding='utf8'))['document']
+            (Path(folder)/'calendar_data.json').write_text(json.dumps(fixture), encoding='utf8')
+        else:
+            store = Store(Path(folder)/'calendar.json')
         with patch.object(CalendarApp, '_start_tray_icon'), patch.object(CalendarApp, 'check_reminders'):
-            app = CalendarApp(store)
+            app = (create_desktop_app(StartupOptions(Path(folder), True), CalendarApp, confirm=lambda: True)
+                   if args.sqlite else CalendarApp(store))
+            store = app.store
             app.report_callback_exception = lambda *parts: errors.append(str(parts))
             try:
                 pump(app, .2)
