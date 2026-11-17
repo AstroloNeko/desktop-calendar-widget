@@ -10,7 +10,8 @@ from view_mode import WindowGeometry
 
 class BackupActionsMixin:
     def storage_banner_visible(self):
-        return bool(getattr(self, 'store', None)) and not getattr(self, '_storage_prompt_dismissed', False)
+        return (bool(getattr(self, 'store', None)) and not self._sqlite_backup_boundary()
+                and not getattr(self, '_storage_prompt_dismissed', False))
 
     def build_storage_banner(self):
         if not self.storage_banner_visible():
