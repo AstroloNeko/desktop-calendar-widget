@@ -45,4 +45,15 @@ def run(approve):
         print('Modern desktop button, consent='+str(approve)+', persistence/restart passed',flush=True)
 
 if __name__=='__main__':
-    run(True);run(False)
+    if '--manual-exe' in sys.argv:
+        import os, subprocess, uuid
+        folder=Path(__file__).resolve().parents[1]/'build'/('final-button-'+uuid.uuid4().hex[:8])
+        profile=folder/'DesktopCalendar';profile.mkdir(parents=True)
+        fixture=json.loads((Path(__file__).resolve().parents[1]/'tests/fixtures/schema8_v0102.json').read_text(encoding='utf8'))['document']
+        fixture['settings']['theme']='modern'
+        (profile/'calendar_data.json').write_text(json.dumps(fixture),encoding='utf8')
+        exe=Path(__file__).resolve().parents[1]/'dist/DesktopCalendar/DesktopCalendar.exe'
+        p=subprocess.Popen([str(exe)],cwd=exe.parent,env={**os.environ,'APPDATA':str(folder)})
+        print(str(profile),p.pid,flush=True)
+    else:
+        run(True);run(False)
