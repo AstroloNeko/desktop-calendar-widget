@@ -22,12 +22,12 @@ if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Store
-from calendar_chat_ui import open_chat, AISettings
-from calendar_chat_http import LocalChatHTTP
+from desktop_calendar.assistant.calendar_chat_ui import open_chat, AISettings
+from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP
 from dpi_utils import dpi_for_window
 from tools.check_interactions import cleanup, pump
 from tools.check_habit_schedules import capture_own_window
-from llm_provider import AIConfiguration
+from desktop_calendar.assistant.llm_provider import AIConfiguration
 from win_integration import SingleInstance
 
 

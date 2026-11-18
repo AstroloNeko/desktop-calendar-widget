@@ -16,9 +16,9 @@ import urllib.error
 from calendar_runtime import HeadlessRuntime, CalendarRuntime
 from calendar_executor import SerialExecutor
 from calendar_core import RoutineItem, EventCategory, Store
-from calendar_chat_tools import ChatError
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
 from calendar_event_service import EventOperationError
-from llm_provider import AIConfiguration
+from desktop_calendar.assistant.llm_provider import AIConfiguration
 from test_calendar_chat import ScriptedProvider, tool
 
 
@@ -166,7 +166,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual({t.ident for t in threading.enumerate()},before)
 
     def test_production_protection_failure_never_plaintext(self):
-        with patch('llm_provider.UserProtection',side_effect=OSError('DPAPI')):
+        with patch('desktop_calendar.assistant.llm_provider.UserProtection',side_effect=OSError('DPAPI')):
             with self.assertRaises(OSError):
                 HeadlessRuntime(self.path,provider=self.provider)
         self.assertFalse((self.path.parent/'ai-assistant/configuration.dpapi').exists())
@@ -261,7 +261,7 @@ print('headless process passed')
         self.assertEqual(normalize_theme_name('gemini_reviewing'),'slate')
 
     def test_explicit_journal_injection(self):
-        from calendar_chat_sessions import ChatJournal
+        from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
         journal=ChatJournal(self.path.parent/'custom.sqlite3',self.protection)
         with self.make(journal=journal) as runtime:
             self.assertIs(runtime.service.journal,journal)

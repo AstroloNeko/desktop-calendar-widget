@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from calendar_chat_tools import ChatError
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
 
 
 class ChatJournal:

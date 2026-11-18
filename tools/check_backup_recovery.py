@@ -29,7 +29,7 @@ def main():
         original = source.read_bytes()
         manager = StorageLifecycle(root, isolated=True)
         manager.migrate()
-        from llm_provider import AIConfiguration
+        from desktop_calendar.assistant.llm_provider import AIConfiguration
         config = AIConfiguration(root/'ai-assistant')
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))

@@ -15,11 +15,11 @@ import urllib.request
 from calendar_core import Event, EventCategory, Store
 from event_commands import EventCommandHistory
 from calendar_action_gateway import CalendarActionGateway, fingerprint, TkDispatcher
-from calendar_chat_sessions import ChatJournal
-from calendar_chat_service import CalendarChatService, OWNER
-from calendar_chat_tools import ChatError, SCHEMAS, request_context, validate_call
-from calendar_chat_http import LocalChatHTTP
-from llm_provider import UserProtection, AIConfiguration, DeepSeekProvider, NoRedirect
+from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
+from desktop_calendar.assistant.calendar_chat_service import CalendarChatService, OWNER
+from desktop_calendar.assistant.calendar_chat_tools import ChatError, SCHEMAS, request_context, validate_call
+from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP
+from desktop_calendar.assistant.llm_provider import UserProtection, AIConfiguration, DeepSeekProvider, NoRedirect
 
 
 class TestProtection:
@@ -220,7 +220,7 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn(str(self.root), system)
 
     def test_query_today_tomorrow_week_category_completion_ddl(self):
-        from calendar_chat_tools import request_context
+        from desktop_calendar.assistant.calendar_chat_tools import request_context
         context = request_context()
         for start, end in [(context['today'], context['today']), (context['tomorrow'], context['tomorrow']),
                            (context['this_week_start'], context['this_week_end'])]:
@@ -484,10 +484,10 @@ class HTTPTests(unittest.TestCase):
 class DispatchTests(unittest.TestCase):
     def test_delayed_startup_does_not_replace_an_already_open_runtime(self):
         from types import SimpleNamespace
-        from calendar_chat_ui import start_chat_if_enabled
+        from desktop_calendar.assistant.calendar_chat_ui import start_chat_if_enabled
         runtime = object()
         app = SimpleNamespace(chat_runtime=runtime)
-        with patch('calendar_chat_ui.AIConfiguration') as config:
+        with patch('desktop_calendar.assistant.calendar_chat_ui.AIConfiguration') as config:
             start_chat_if_enabled(app)
             config.assert_not_called()
         self.assertIs(app.chat_runtime, runtime)

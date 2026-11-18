@@ -5,8 +5,8 @@ import json
 from unittest.mock import patch
 import unittest
 
-from calendar_chat_tools import ChatError
-from calendar_chat_service import OWNER, MAX_ROUNDS
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
+from desktop_calendar.assistant.calendar_chat_service import OWNER, MAX_ROUNDS
 import test_calendar_chat as fixture
 
 tool = fixture.tool
@@ -283,7 +283,7 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_request_deadline_expires_before_any_proposal(self):
         before = self.store.data_file.read_bytes()
-        with patch('calendar_chat_service.time.monotonic', side_effect=[0, 0, 91]):
+        with patch('desktop_calendar.assistant.calendar_chat_service.time.monotonic', side_effect=[0, 0, 91]):
             result = self.send([tool('preview_create', {'title': '会议', 'date': '2026-11-22'})], '11.22开会')
         self.assertEqual(result['error_code'], 'planning_timeout')
         self.assertEqual(self.store.data_file.read_bytes(), before)

@@ -10,7 +10,7 @@ from event_input import build_event_candidate, EventInputError
 from calendar_event_service import CalendarEventService, OperationContext
 from event_commands import CommandConflictError
 from event_search import EventSearchIndex, capture_search_store
-from calendar_chat_tools import ChatError, iso_day, fail, validate_call
+from desktop_calendar.assistant.calendar_chat_tools import ChatError, iso_day, fail, validate_call
 
 
 def fingerprint(value):

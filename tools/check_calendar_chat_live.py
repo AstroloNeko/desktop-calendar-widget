@@ -16,10 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from calendar_core import Store, Event, EventCategory, COLORS
 from event_commands import EventCommandHistory
 from calendar_action_gateway import CalendarActionGateway
-from calendar_chat_sessions import ChatJournal
-from calendar_chat_service import CalendarChatService
-from calendar_chat_tools import ChatError
-from llm_provider import AIConfiguration, DeepSeekProvider, UserProtection
+from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
+from desktop_calendar.assistant.calendar_chat_service import CalendarChatService
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
+from desktop_calendar.assistant.llm_provider import AIConfiguration, DeepSeekProvider, UserProtection
 
 
 class LimitedProvider:

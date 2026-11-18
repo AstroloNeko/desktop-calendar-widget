@@ -1,7 +1,7 @@
 """Two-stage reviewed deletion. All calendar access stays on gateway dispatcher."""
 import secrets
 
-from calendar_chat_tools import fail, ChatError
+from desktop_calendar.assistant.calendar_chat_tools import fail, ChatError
 from calendar_action_gateway import fingerprint
 from calendar_event_service import EventOperationError
 

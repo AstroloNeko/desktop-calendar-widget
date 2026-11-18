@@ -6,9 +6,9 @@ import tkinter as tk
 from tkinter import ttk
 
 from tk_dispatcher import TkDispatcher
-from calendar_chat_service import envelope
-from calendar_chat_tools import ChatError
-from llm_provider import AIConfiguration
+from desktop_calendar.assistant.calendar_chat_service import envelope
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
+from desktop_calendar.assistant.llm_provider import AIConfiguration
 from reminder_ui import reminder_button
 from themed_controls import themed_check
 from update_dialog import dialog_geometry
@@ -20,7 +20,7 @@ class ChatRuntime:
         self.app, self.window, self.http = app, None, None
         self.folder = app.store.data_file.parent / 'ai-assistant'
         self.configuration = AIConfiguration(self.folder)
-        from calendar_chat_sessions import ChatJournal
+        from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
         session = getattr(app, 'storage_session', None)
         journal = ChatJournal(session.journal_path, self.configuration.protector) if session else None
         self.core = CalendarRuntime(app.store, app.event_commands, TkDispatcher(app),

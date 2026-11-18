@@ -95,7 +95,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertIn(identifier,[e['id'] for e in runtime.snapshot()['events']])
             self.assertIsNone(runtime.undo())
             self.assertIn(restored['epoch'],str(runtime._core.configuration.folder))
-            from calendar_chat_tools import ChatError
+            from desktop_calendar.assistant.calendar_chat_tools import ChatError
             with self.assertRaises(ChatError):runtime._core.journal.get('pending','old-pending','desktop')
             with self.assertRaises(ChatError):runtime.service.send_message(session,'继续','stale-request')
             self.assertEqual(runtime.snapshot()['routines'][0]['title'],'Synthetic changed habit')
@@ -208,7 +208,7 @@ class LifecycleTests(unittest.TestCase):
     def test_loopback_http(self):
         from test_calendar_runtime import EphemeralProtection
         from test_calendar_chat import ScriptedProvider
-        from calendar_chat_http import LocalChatHTTP
+        from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP
         import urllib.request
         self.manager.migrate()
         with self.manager.runtime(protector=EphemeralProtection(),provider=ScriptedProvider([])) as runtime:

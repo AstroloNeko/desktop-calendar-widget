@@ -9,8 +9,8 @@ import time
 import uuid
 
 from calendar_action_gateway import fingerprint
-from calendar_chat_tools import ChatError, TOOLS, SCHEMAS, validate_call, request_context, fail
-from calendar_chat_attributes import adapt_attributes
+from desktop_calendar.assistant.calendar_chat_tools import ChatError, TOOLS, SCHEMAS, validate_call, request_context, fail
+from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
 from calendar_task_plan import TASK_TOOLS, run_task, recover_task
 
 OWNER = 'local-owner'  # Derived from the adapter's authentication, never client sender_id.

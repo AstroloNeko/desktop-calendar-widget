@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from calendar_chat_tools import ChatError
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
 
 
 class UserProtection:

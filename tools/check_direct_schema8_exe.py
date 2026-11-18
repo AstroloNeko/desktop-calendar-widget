@@ -14,7 +14,7 @@ from contextlib import closing
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from tools.generate_schema8_fixture import generate
 from tools.check_sqlite_rc_exe import wait,close
-from llm_provider import AIConfiguration
+from desktop_calendar.assistant.llm_provider import AIConfiguration
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('exe',type=Path);parser.add_argument('report',type=Path);args=parser.parse_args()

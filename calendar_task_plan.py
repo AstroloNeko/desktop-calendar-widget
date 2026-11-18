@@ -6,11 +6,11 @@ import re
 from datetime import date, timedelta
 
 from calendar_core import COLORS
-from calendar_chat_tools import fail, ChatError
+from desktop_calendar.assistant.calendar_chat_tools import fail, ChatError
 from event_input import build_event_candidate
 from event_commands import BatchPreview
 from calendar_event_service import EventOperationError
-from calendar_chat_attributes import adapt_attributes
+from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
 
 
 TASK_TOOLS = {'batch_create_events','batch_update_events','batch_set_completion'}

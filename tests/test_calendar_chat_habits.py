@@ -6,7 +6,7 @@ import unittest
 
 import test_calendar_chat as fixture
 from calendar_core import COLORS, Store, RoutineItem
-from calendar_chat_tools import ChatError, validate_call
+from desktop_calendar.assistant.calendar_chat_tools import ChatError, validate_call
 from data_backup import create_backup, read_backup, restore_store
 
 

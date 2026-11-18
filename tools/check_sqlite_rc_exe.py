@@ -21,7 +21,7 @@ from contextlib import closing
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from tools.generate_schema8_fixture import generate
-from llm_provider import AIConfiguration
+from desktop_calendar.assistant.llm_provider import AIConfiguration
 from calendar_storage_lifecycle import StorageLifecycle
 
 U=ctypes.WinDLL('user32')

@@ -6,8 +6,8 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Store, Event
-from calendar_chat_ui import open_chat
-from calendar_chat_service import OWNER
+from desktop_calendar.assistant.calendar_chat_ui import open_chat
+from desktop_calendar.assistant.calendar_chat_service import OWNER
 from tools.check_calendar_chat import wait
 from tools.check_interactions import cleanup, pump
 

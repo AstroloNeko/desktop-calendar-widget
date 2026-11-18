@@ -272,7 +272,7 @@ class StorageLifecycle:
         pending requests without modifying the ChatJournal schema or old history.
         """
         from calendar_runtime import HeadlessRuntime
-        from llm_provider import AIConfiguration
+        from desktop_calendar.assistant.llm_provider import AIConfiguration
         if any(key in options for key in ('journal','configuration','repository_factory')):
             raise LifecycleError('lifecycle_owned_runtime_options')
         lease=self.lease();lease.__enter__()

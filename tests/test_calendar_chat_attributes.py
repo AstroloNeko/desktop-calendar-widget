@@ -3,7 +3,7 @@ from dataclasses import asdict
 import unittest
 import test_calendar_chat as fixture
 from calendar_core import EventCategory, COLORS
-from calendar_chat_attributes import adapt_attributes
+from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
 
 
 class AttributeTests(unittest.TestCase):
@@ -67,7 +67,7 @@ class AttributeTests(unittest.TestCase):
         self.assertEqual(before, self.store.data_file.read_bytes())
 
     def test_unknown_explicit_name_cannot_fall_back_to_real_but_wrong_id(self):
-        from calendar_chat_tools import ChatError
+        from desktop_calendar.assistant.calendar_chat_tools import ChatError
         with self.assertRaises(ChatError):
             adapt_attributes({'title': 'x', 'date': '2026-11-23', 'category_id': 'lab'},
                              '归到不存在分类', True, self.catalog())
@@ -134,8 +134,8 @@ class AttributeTests(unittest.TestCase):
     def test_yearless_past_date_clarifies_not_rollover(self):
         from datetime import date
         from unittest.mock import patch
-        from calendar_chat_tools import ChatError
-        with patch('calendar_chat_attributes.date') as local:
+        from desktop_calendar.assistant.calendar_chat_tools import ChatError
+        with patch('desktop_calendar.assistant.calendar_chat_attributes.date') as local:
             local.today.return_value = date(2026, 11, 13)
             local.side_effect = date
             with self.assertRaises(ChatError):

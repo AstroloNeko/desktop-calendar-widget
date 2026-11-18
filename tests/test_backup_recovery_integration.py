@@ -93,8 +93,8 @@ class RecoveryIntegrationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): old_store.repository.revision()
 
     def test_pending_journal_epoch_isolation_configuration_retained(self):
-        from calendar_chat_sessions import ChatJournal
-        from calendar_chat_tools import ChatError
+        from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
+        from desktop_calendar.assistant.calendar_chat_tools import ChatError
         from test_calendar_runtime import EphemeralProtection
         session = self.session()
         protector = EphemeralProtection()

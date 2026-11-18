@@ -3,7 +3,7 @@ from concurrent.futures import Future, TimeoutError, CancelledError
 from queue import Queue
 import threading
 
-from calendar_chat_tools import ChatError
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
 
 
 class SerialExecutor:

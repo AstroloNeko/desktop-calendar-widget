@@ -2,8 +2,8 @@
 from unittest import TestCase
 from unittest.mock import patch
 from calendar_core import Event, RoutineItem
-from calendar_chat_tools import ChatError
-from calendar_chat_service import OWNER
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
+from desktop_calendar.assistant.calendar_chat_service import OWNER
 import test_calendar_chat as fixture
 
 
@@ -160,7 +160,7 @@ class BatchDeleteTests(TestCase):
     def test_http_two_confirmations_same_service(self):
         import json
         import urllib.request
-        from calendar_chat_http import LocalChatHTTP
+        from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP
         server=LocalChatHTTP(self.service,'Q'*48,port=0)
         server.start()
         self.addCleanup(server.stop)

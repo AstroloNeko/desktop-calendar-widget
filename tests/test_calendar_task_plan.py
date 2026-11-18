@@ -3,7 +3,7 @@ from unittest.mock import patch
 from datetime import date
 from dataclasses import asdict
 import test_calendar_chat as fixture
-from calendar_chat_service import OWNER
+from desktop_calendar.assistant.calendar_chat_service import OWNER
 from calendar_core import Event
 
 
@@ -155,7 +155,7 @@ class TaskPlanTests(TestCase):
     def test_http_uses_same_batch_service(self):
         import json
         import urllib.request
-        from calendar_chat_http import LocalChatHTTP
+        from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP
         self.service.auto_execute=True
         self.provider.replies=[fixture.tool('batch_create_events',dict(items=[
             dict(title='HTTP隔离',date='2026-12-10'),dict(title='HTTP隔离',date='2026-12-11')]))]

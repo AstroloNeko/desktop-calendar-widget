@@ -3,8 +3,8 @@ import re
 from datetime import date
 
 from calendar_core import COLORS
-from calendar_chat_tools import fail
-from calendar_chat_intent import requested_fields, scope_patch
+from desktop_calendar.assistant.calendar_chat_tools import fail
+from desktop_calendar.assistant.calendar_chat_intent import requested_fields, scope_patch
 
 
 def adapt_attributes(values, message, creating, categories, continuation=()):

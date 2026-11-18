@@ -59,7 +59,7 @@ from global_timeline_ui import (
 from tray_icon import TrayIcon
 from global_hotkey import saved_shortcut
 from global_hotkey_ui import open_hotkey_settings
-from calendar_chat_ui import open_chat, start_chat_if_enabled
+from desktop_calendar.assistant.calendar_chat_ui import open_chat, start_chat_if_enabled
 from app_lifecycle import ApplicationLifecycleMixin
 from reminder_ui import NativeReminderMixin
 from win_integration import (

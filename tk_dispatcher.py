@@ -1,6 +1,6 @@
 """Desktop owner-thread bridge. No Tk root is created by importing this module."""
 import threading
-from calendar_chat_tools import fail
+from desktop_calendar.assistant.calendar_chat_tools import fail
 
 
 class TkDispatcher:
