@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from reminder_engine import CATCHUP, RETRY, local_wall, snoozed_plan
+from desktop_calendar.reminders.reminder_engine import CATCHUP, RETRY, local_wall, snoozed_plan
 
 
 @dataclass(frozen=True)

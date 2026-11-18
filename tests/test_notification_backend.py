@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from native_notifications import NativeNotificationError
 from notification_backend import WindowsNotificationBackend
-from reminder_engine import ReminderPlan
+from desktop_calendar.reminders.reminder_engine import ReminderPlan
 
 
 class NotificationBackendTests(unittest.TestCase):

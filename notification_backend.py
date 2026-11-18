@@ -16,7 +16,7 @@ import threading
 import uuid
 
 from native_notifications import NativeNotificationError, WinRTTransport, toast_xml
-from reminder_engine import notification_arguments
+from desktop_calendar.reminders.reminder_engine import notification_arguments
 
 
 def notification_identity(executable, data_file, *, frozen):

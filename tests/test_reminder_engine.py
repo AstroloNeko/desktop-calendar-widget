@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from calendar_core import Event, Store
 from event_commands import EventCommandHistory
-from reminder_engine import (CONFIG_KEY, STATE_KEY, ReminderEngine, ReminderError,
+from desktop_calendar.reminders.reminder_engine import (CONFIG_KEY, STATE_KEY, ReminderEngine, ReminderError,
                              normalize_config, notification_arguments, parse_activation, plans_for_store)
 from notification_backend import notification_identity
 

@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from reminder_engine import ReminderPlan, notification_arguments
-from reminder_ui import NativeReminderMixin
+from desktop_calendar.reminders.reminder_engine import ReminderPlan, notification_arguments
+from desktop_calendar.reminders.reminder_ui import NativeReminderMixin
 
 
 class FakeApp(NativeReminderMixin):
@@ -159,15 +159,15 @@ class ReminderRoutingTests(unittest.TestCase):
     def test_test_lease_prevents_premature_shutdown_while_off(self):
         self.app.reminder_engine.config.return_value = {"enabled": False}
         self.app._notification_test_until = 200
-        with patch("reminder_ui.time.monotonic", return_value=100):
+        with patch("desktop_calendar.reminders.reminder_ui.time.monotonic", return_value=100):
             self.app._native_reminders_tick()
         self.app.notification_backend.close.assert_not_called()
 
     def test_disabled_backend_stops_when_test_lease_expires(self):
         self.app.reminder_engine.config.return_value = {"enabled": False}
         old_backend = self.app.notification_backend
-        with patch("reminder_ui.time.monotonic", return_value=201), \
-             patch("reminder_ui.WindowsNotificationBackend") as constructor:
+        with patch("desktop_calendar.reminders.reminder_ui.time.monotonic", return_value=201), \
+             patch("desktop_calendar.reminders.reminder_ui.WindowsNotificationBackend") as constructor:
             self.app._native_reminders_tick()
         old_backend.close.assert_called_once()
         constructor.assert_called_once()
@@ -185,7 +185,7 @@ class ReminderRoutingTests(unittest.TestCase):
         dialog = Mock(revision=1, refreshed_at=100)
         self.app.notification_plan_window = dialog
         self.app.reminder_engine.revision = 1
-        with patch("reminder_ui.time.monotonic", return_value=101):
+        with patch("desktop_calendar.reminders.reminder_ui.time.monotonic", return_value=101):
             self.app._refresh_reminder_views()
             self.app._refresh_reminder_views()
         dialog.refresh.assert_called_once()
@@ -195,7 +195,7 @@ class ReminderRoutingTests(unittest.TestCase):
         self.app.notification_plan_window = dialog
         self.app.reminder_engine.revision = 2
         self.app._reminder_views_dirty = False
-        with patch("reminder_ui.time.monotonic", return_value=101):
+        with patch("desktop_calendar.reminders.reminder_ui.time.monotonic", return_value=101):
             self.app._refresh_reminder_views()
         dialog.refresh.assert_called_once()
 

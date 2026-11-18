@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 from calendar_core import Event, Store
-from reminder_engine import CONFIG_KEY, STATE_KEY, ReminderEngine
+from desktop_calendar.reminders.reminder_engine import CONFIG_KEY, STATE_KEY, ReminderEngine
 
 
 class ReminderOverviewTests(unittest.TestCase):

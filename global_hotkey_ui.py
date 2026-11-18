@@ -2,7 +2,7 @@
 import tkinter as tk
 
 from global_hotkey import DEFAULT_HOTKEY, saved_shortcut, save_shortcut
-from reminder_ui import reminder_button
+from desktop_calendar.reminders.reminder_ui import reminder_button
 from update_dialog import dialog_geometry
 
 

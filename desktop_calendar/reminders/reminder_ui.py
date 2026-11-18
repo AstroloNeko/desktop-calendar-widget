@@ -10,7 +10,7 @@ from tkinter import ttk
 
 from calendar_core import normalize_reminder_time
 from notification_backend import WindowsNotificationBackend
-from reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
+from desktop_calendar.reminders.reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
 from update_dialog import dialog_geometry
 from ui_draw import blend
 from themed_controls import themed_check
@@ -185,7 +185,7 @@ class NativeReminderMixin:
         except (OSError, ValueError) as error:
             self._show_feedback(str(error))
             return
-        from reminder_center import ReminderPlanDialog
+        from desktop_calendar.reminders.reminder_center import ReminderPlanDialog
         self.notification_plan_window = ReminderPlanDialog(self)
 
     def _set_test_status(self, text):

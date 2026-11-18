@@ -114,7 +114,7 @@ class HeadlessRuntime:
                     writable=lambda: self.state == 'running',
                     refresh=lambda change: self._invalidate_reminders(), habit_refresh=self._invalidate_reminders)
                 if notification_backend is not None:
-                    from reminder_engine import ReminderEngine
+                    from desktop_calendar.reminders.reminder_engine import ReminderEngine
                     self._reminders = ReminderEngine(self._store, notification_backend)
             self.executor(compose)
             self.events = _OwnedService(self, self._core.events)

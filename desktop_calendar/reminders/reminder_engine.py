@@ -256,7 +256,7 @@ class ReminderEngine:
 
     def overview(self, now):
         """Detached read-only projection; no rebuild, writes, send or removal."""
-        from reminder_overview import build_overview
+        from desktop_calendar.reminders.reminder_overview import build_overview
         config, state = self.config(), self._state()
         plans = plans_for_store(self.store, config)
         self._import_legacy({plan.event_id: plan for plan in plans}, state)

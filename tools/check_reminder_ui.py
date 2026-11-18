@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Event, Store
 from dpi_utils import dpi_for_window
-from reminder_engine import notification_arguments
-from reminder_ui import ReminderSettingsDialog
+from desktop_calendar.reminders.reminder_engine import notification_arguments
+from desktop_calendar.reminders.reminder_ui import ReminderSettingsDialog
 from tools.check_interactions import cleanup, pump
 from win_integration import is_window_topmost
 

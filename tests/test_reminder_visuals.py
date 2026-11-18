@@ -3,7 +3,7 @@ import tkinter as tk
 from types import SimpleNamespace
 import unittest
 
-from reminder_ui import reminder_button
+from desktop_calendar.reminders.reminder_ui import reminder_button
 from ui_theme import get_theme
 
 

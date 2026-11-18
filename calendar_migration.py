@@ -39,7 +39,7 @@ def _raw_snapshot(store):
 
 def _semantic_snapshot(store, clock):
     """All Event occurrences; bounded deterministic query/recurrence probes."""
-    from reminder_engine import normalize_config, plans_for_store, CONFIG_KEY
+    from desktop_calendar.reminders.reminder_engine import normalize_config, plans_for_store, CONFIG_KEY
     event_rows=[]
     all_days=set()
     for event in store.events:

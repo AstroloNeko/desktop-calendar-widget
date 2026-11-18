@@ -17,7 +17,7 @@ class BackupActionsMixin:
         if not self.storage_banner_visible():
             return
         import tkinter as tk
-        from reminder_ui import reminder_button
+        from desktop_calendar.reminders.reminder_ui import reminder_button
         frame = tk.Frame(self.shell, bg=self.theme.panel_background)
         frame.pack(fill='x')
         self.storage_banner = frame

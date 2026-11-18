@@ -6,7 +6,7 @@ from tkinter import ttk
 from types import SimpleNamespace
 
 from update_dialog import dialog_geometry
-from reminder_ui import reminder_button
+from desktop_calendar.reminders.reminder_ui import reminder_button
 
 
 class ReminderPlanDialog(tk.Toplevel):
