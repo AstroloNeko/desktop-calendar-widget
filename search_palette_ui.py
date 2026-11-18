@@ -3,8 +3,8 @@
 import tkinter as tk
 from tkinter import font as tkfont
 
-from interaction_visuals import elide, match_spans, palette_rows
-from ui_draw import blend, rounded_rectangle
+from desktop_calendar.ui.interaction_visuals import elide, match_spans, palette_rows
+from desktop_calendar.ui.ui_draw import blend, rounded_rectangle
 
 
 class PaletteList(tk.Canvas):

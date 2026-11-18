@@ -247,7 +247,7 @@ from calendar_runtime import HeadlessRuntime
 with tempfile.TemporaryDirectory() as folder:
     with HeadlessRuntime(Path(folder)/'calendar.json') as runtime:
         assert runtime.snapshot()['events']==[]
-assert not any(m in sys.modules for m in ('tkinter','app','ui_theme','win_integration'))
+assert not any(m in sys.modules for m in ('tkinter','app','desktop_calendar.ui.ui_theme','win_integration'))
 print('headless process passed')
 """
         result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=15)
@@ -255,7 +255,7 @@ print('headless process passed')
 
     def test_theme_identifiers_unchanged(self):
         from desktop_preferences import VALID_THEME_NAMES,normalize_theme_name
-        from ui_theme import THEMES
+        from desktop_calendar.ui.ui_theme import THEMES
         self.assertEqual(set(VALID_THEME_NAMES),set(THEMES))
         self.assertEqual(normalize_theme_name('win7_aero'),'aero')
         self.assertEqual(normalize_theme_name('gemini_reviewing'),'slate')

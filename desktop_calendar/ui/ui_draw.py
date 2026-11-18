@@ -5,7 +5,7 @@ import tkinter as tk
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
-    from ui_theme import Theme
+    from desktop_calendar.ui.ui_theme import Theme
 
 
 def _rgb(color: str) -> tuple[int, int, int]:

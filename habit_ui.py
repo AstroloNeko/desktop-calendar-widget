@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from habit_schedule import SCHEDULE_FIELDS, schedule_label, validate_schedule_input
-from themed_controls import themed_check
+from desktop_calendar.ui.themed_controls import themed_check
 
 CHOICES = ("每天", "每隔 N 天", "每周", "每月", "每年", "自定义…")
 UNITS = {"天": "daily", "周": "weekly", "月": "monthly", "年": "yearly"}

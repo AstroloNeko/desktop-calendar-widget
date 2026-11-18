@@ -1,6 +1,6 @@
 import unittest
 
-from ui_theme import DEFAULT_THEME_NAME, FRUTIGER, PAPER, THEMES, WIN7_AERO, get_theme, normalize_theme_name
+from desktop_calendar.ui.ui_theme import DEFAULT_THEME_NAME, FRUTIGER, PAPER, THEMES, WIN7_AERO, get_theme, normalize_theme_name
 
 
 class ThemeRegistryTests(unittest.TestCase):

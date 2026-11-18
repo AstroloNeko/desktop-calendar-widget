@@ -2,8 +2,8 @@ import tkinter as tk
 from tkinter import ttk
 import unittest
 
-from themed_controls import RoundedCardShell, configure_scrollbars, themed_check
-from ui_theme import get_theme
+from desktop_calendar.ui.themed_controls import RoundedCardShell, configure_scrollbars, themed_check
+from desktop_calendar.ui.ui_theme import get_theme
 
 
 class SlateControlTests(unittest.TestCase):

@@ -12,8 +12,8 @@ from calendar_core import normalize_reminder_time
 from notification_backend import WindowsNotificationBackend
 from desktop_calendar.reminders.reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
 from desktop_calendar.updates.update_dialog import dialog_geometry
-from ui_draw import blend
-from themed_controls import themed_check
+from desktop_calendar.ui.ui_draw import blend
+from desktop_calendar.ui.themed_controls import themed_check
 
 
 def reminder_button(parent, app, text, command, *, primary=False):

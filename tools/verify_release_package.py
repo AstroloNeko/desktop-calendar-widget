@@ -72,11 +72,11 @@ def main():
         assert not any(name.startswith(("tests", "tools")) for name in pyz.toc)
         if name == "DesktopCalendar.exe":
             for module in ("habit_schedule", "habit_ui", "bulk_ui", "event_selection", "data_backup",
-                           "event_commands", "ui_theme", "dpi_utils", "win_integration",
+                           "event_commands", "desktop_calendar.ui.ui_theme", "dpi_utils", "win_integration",
                            "data_compat", "desktop_calendar.updates.update_state",
                            "desktop_calendar.updates.release_notes", "desktop_calendar.updates.release_notes_ui"):
                 assert module in pyz.toc, module
-            constants = pyz.extract("ui_theme").co_consts
+            constants = pyz.extract("desktop_calendar.ui.ui_theme").co_consts
             assert all(theme in constants for theme in ("modern", "aero", "paper", "frutiger", "slate"))
         if name == "DesktopCalendarRepair.exe":
             assert "app" not in pyz.toc and "calendar_core" not in pyz.toc

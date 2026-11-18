@@ -974,7 +974,7 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertEqual(actions, ["redraw"])
 
     def test_global_detail_keeps_existing_task_semantics(self) -> None:
-        from ui_theme import get_theme
+        from desktop_calendar.ui.ui_theme import get_theme
 
         class Capture:
             def __init__(self) -> None:

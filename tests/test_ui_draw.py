@@ -1,7 +1,7 @@
 import unittest
 
-from ui_draw import draw_calendar_date_ring, draw_calendar_date_state, draw_color_swatch, readable_text
-from ui_theme import get_theme
+from desktop_calendar.ui.ui_draw import draw_calendar_date_ring, draw_calendar_date_state, draw_color_swatch, readable_text
+from desktop_calendar.ui.ui_theme import get_theme
 
 
 class _RecordingCanvas:

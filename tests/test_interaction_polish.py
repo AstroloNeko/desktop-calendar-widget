@@ -7,7 +7,7 @@ from app import CalendarApp
 from desktop_calendar.global_view.global_drag_ui import GlobalDragMixin
 from desktop_calendar.global_view.global_search_ui import SearchDialog
 from event_search import SearchResult
-from interaction_visuals import CanvasLayer, CanvasOverlay, InteractionFeedbackMixin, elide, match_spans, palette_rows, preview_bounds, visible_rows
+from desktop_calendar.ui.interaction_visuals import CanvasLayer, CanvasOverlay, InteractionFeedbackMixin, elide, match_spans, palette_rows, preview_bounds, visible_rows
 
 
 class _Canvas:

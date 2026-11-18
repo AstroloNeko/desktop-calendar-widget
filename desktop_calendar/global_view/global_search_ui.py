@@ -6,7 +6,7 @@ from tkinter import ttk
 from event_search import EventSearchService
 from dpi_utils import LogicalCanvas
 from search_palette_ui import PaletteList
-from ui_draw import draw_control_icon
+from desktop_calendar.ui.ui_draw import draw_control_icon
 
 
 class GlobalSearchMixin:

@@ -3,10 +3,10 @@ import tkinter as tk
 from calendar_event_service import event_service
 from tkinter import messagebox
 
-from interaction_visuals import CanvasOverlay
+from desktop_calendar.ui.interaction_visuals import CanvasOverlay
 from desktop_calendar.global_view.global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
 from timeline_model import build_month_timeline
-from ui_draw import pooled_rounded_rectangle
+from desktop_calendar.ui.ui_draw import pooled_rounded_rectangle
 
 
 def shift_summary(value):

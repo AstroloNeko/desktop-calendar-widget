@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from app import CalendarApp, ThemeButton, Tooltip
 from desktop_calendar.global_view.global_header import GlobalHeader, HEADER_HEIGHT, header_layout
-from ui_draw import draw_compact_view_icon
+from desktop_calendar.ui.ui_draw import draw_compact_view_icon
 import win_integration as native
 from tools.check_frameless_global import native_click, require_editor, wait_until
 
@@ -124,7 +124,7 @@ class GlobalHeaderTests(unittest.TestCase):
                     self.assertLessEqual(scale_px(y + height, dpi), scale_px(HEADER_HEIGHT, dpi))
 
     def test_compact_icon_is_two_vector_rectangles(self):
-        with patch("ui_draw.rounded_rectangle") as rectangle:
+        with patch("desktop_calendar.ui.ui_draw.rounded_rectangle") as rectangle:
             draw_compact_view_icon(object(), 16, 16, foreground="outline", background="surface")
         self.assertEqual(rectangle.call_count, 2)
         first, second = rectangle.call_args_list

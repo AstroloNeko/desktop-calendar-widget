@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 
 from desktop_calendar.reminders.reminder_ui import reminder_button
-from ui_theme import get_theme
+from desktop_calendar.ui.ui_theme import get_theme
 
 
 class ReminderControlTests(unittest.TestCase):

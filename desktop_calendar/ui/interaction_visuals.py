@@ -3,7 +3,7 @@
 import tkinter as tk
 from dataclasses import dataclass
 
-from ui_draw import blend
+from desktop_calendar.ui.ui_draw import blend
 
 
 def visible_rows(count, top, height, row_height, overscan=3):

@@ -90,7 +90,7 @@ from schedule_drag import ScheduleHit
 from desktop_calendar.global_view.global_drag_ui import GlobalDragMixin
 from desktop_calendar.global_view.global_header import GlobalHeader
 from desktop_calendar.global_view.global_search_ui import GlobalSearchMixin
-from interaction_visuals import CanvasLayer, InteractionFeedbackMixin, elide, visible_rows
+from desktop_calendar.ui.interaction_visuals import CanvasLayer, InteractionFeedbackMixin, elide, visible_rows
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
 from desktop_calendar.updates.update_manager import (
     UpdateError,
@@ -109,7 +109,7 @@ from desktop_calendar.updates.update_state import update_in_progress
 from desktop_calendar.updates.update_dialog import UpdateAvailableDialog, ReleaseHistoryDialog
 from habit_schedule import schedule_label
 from habit_ui import HabitScheduleForm
-from ui_draw import (
+from desktop_calendar.ui.ui_draw import (
     bevel_control,
     blend,
     draw_bubble_motif,
@@ -126,8 +126,8 @@ from ui_draw import (
     vertical_gradient,
     vertical_multi_gradient,
 )
-from ui_theme import THEMES, Theme, get_theme, normalize_theme_name
-from themed_controls import RoundedCardShell, configure_scrollbars, themed_check
+from desktop_calendar.ui.ui_theme import THEMES, Theme, get_theme, normalize_theme_name
+from desktop_calendar.ui.themed_controls import RoundedCardShell, configure_scrollbars, themed_check
 
 
 WINDOW_WIDTH = 372

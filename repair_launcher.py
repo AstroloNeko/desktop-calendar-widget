@@ -23,7 +23,7 @@ from desktop_calendar.updates.update_payload import PayloadError, stage_verified
 from dpi_utils import dpi_for_window, work_area_for_window
 from desktop_calendar.updates.release_notes_ui import NotesDocument
 from desktop_calendar.updates.update_dialog import dialog_geometry
-from ui_theme import get_theme
+from desktop_calendar.ui.ui_theme import get_theme
 
 
 APP_EXE = "DesktopCalendar.exe"

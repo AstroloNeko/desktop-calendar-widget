@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from ui_draw import blend, vertical_gradient
+from desktop_calendar.ui.ui_draw import blend, vertical_gradient
 from win_integration import IS_WINDOWS
 
 

@@ -4,8 +4,8 @@
 
 - `app.py`: main window, UI interaction and application coordination
 - `calendar_core.py`: calendar settings, storage and business logic
-- `ui_theme.py`: semantic tokens for Modern and Win7 Aero themes
-- `ui_draw.py`: reusable Canvas drawing helpers
+- `desktop_calendar/ui/ui_theme.py`: semantic theme tokens
+- `desktop_calendar/ui/ui_draw.py`: reusable Canvas drawing helpers
 - `tests/`: automated tests
 - `build_release.ps1`: Windows release build
 - `version.py`: application version

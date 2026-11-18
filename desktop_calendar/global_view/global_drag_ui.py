@@ -6,8 +6,8 @@ from tkinter import font as tkfont
 from schedule_drag import ScheduleDrag, hit_at
 from calendar_event_service import event_service
 from calendar_flow_layout import highlight_range_day
-from interaction_visuals import CanvasOverlay, elide, preview_bounds
-from ui_draw import blend, draw_drag_bubble, pooled_rounded_rectangle, rounded_rectangle
+from desktop_calendar.ui.interaction_visuals import CanvasOverlay, elide, preview_bounds
+from desktop_calendar.ui.ui_draw import blend, draw_drag_bubble, pooled_rounded_rectangle, rounded_rectangle
 
 
 class GlobalDragMixin:
