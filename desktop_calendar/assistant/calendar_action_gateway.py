@@ -38,11 +38,15 @@ class CalendarActionGateway:
         title=args.get('keyword','').strip(' \t\r\n\"\'“”‘’「」')
         if not title or title in ('全部','所有') or not all(k in args for k in ('start','end')):
             fail('请提供精确标题和起止日期。','clarification_required')
+        return self.delete_candidates(args, (title,))
+
+    def delete_candidates(self, args, titles):
+        """A bounded interval, optionally restricted to a union of exact titles."""
         start,end=iso_day(args['start']),iso_day(args['end'])
         if end<start or (end-start).days>366:
             fail('删除查询范围应为0至366天。','clarification_required')
         def read():
-            found=[self._detail(e) for e in self.repository.list_events() if e.title.strip()==title
+            found=[self._detail(e) for e in self.repository.list_events() if (titles is None or e.title.strip() in titles)
                 and ('done' not in args or e.done==args['done'])
                 and ('category_id' not in args or e.category_id==args['category_id'])
                 and any(start<=d<=end for d in self.store.event_dates(e))]

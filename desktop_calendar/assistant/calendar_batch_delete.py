@@ -1,9 +1,147 @@
 """Two-stage reviewed deletion. All calendar access stays on gateway dispatcher."""
+import re
 import secrets
+from datetime import date
 
 from desktop_calendar.assistant.calendar_chat_tools import fail, ChatError
 from desktop_calendar.assistant.calendar_action_gateway import fingerprint
 from calendar_event_service import EventOperationError
+
+
+_ENDPOINT = r'(?:(?:(\d{4})[-年/])?(\d{1,2})[-月/])?(\d{1,2})(?:日|号)?'
+_RANGE = re.compile(r'(?<![\d/-])' + _ENDPOINT + r'\s*(?:到|至|[-~～—])\s*' + _ENDPOINT + r'(?![\d/-])')
+_COMMAND = re.compile(r'(?:全部|全都|都|全)?(?:删除|删掉|删了|移除)(?:掉|了)?[。！!\s]*$')
+_ALL = {'事项','事情','安排','日程','任务','不管是什么事情','不管是什么事项','不管什么事情'}
+
+
+def _interval(match, today):
+    year, month, day, end_year, end_month, end_day = match.groups()
+    start = date(int(year or today.year), int(month or today.month), int(day))
+    end = date(int(end_year or start.year), int(end_month or start.month), int(end_day))
+    if not 0 <= (end-start).days <= 366:
+        raise ValueError()
+    return dict(start=start.isoformat(), end=end.isoformat())
+
+
+def _titles(subject):
+    """An empty list explicitly means every Event; None means still ambiguous."""
+    subject = re.sub(r'^(?:(?:请|帮我|把|将|这几天|这些天|这?[一二三四五六七八九十\d]+天|所有的?|全部的?|的)\s*)+', '', subject)
+    subject = subject.strip(' ，,。')
+    if subject in _ALL:
+        return []
+    if not subject or subject in ('实验安排','实验','全部','所有'):
+        return None
+    parts = re.split(r'(?:[，,、]\s*(?:还有|以及)?|还有|以及)', subject)
+    names = [part.strip(' \t"\'“”‘’「」') for part in parts]
+    return list(dict.fromkeys(names)) if all(names) else None
+
+
+def handle_message(service, session, message, owner, request_id):
+    from desktop_calendar.assistant.calendar_chat_service import envelope
+
+    def reply(text, status='clarification_required'):
+        return envelope(session['session_id'], request_id, status=status, assistant_message=text)
+
+    text = message.strip()
+    active = session.get('batch_delete_intent')
+    all_answer = active and text in ('全部事项','所有事项','不管是什么事情')
+    bounds = session.get('delete_range') or session.get('clarified_query') or {}
+    if text in ('全部','全选','所有','全部删除','全删') and session.get('delete_intent'):
+        scope = session.get('delete_scope')
+        if scope and scope['ids']:
+            session['batch_delete_intent'] = True
+            return prepare(service,session,scope['ids'],owner,request_id)
+        if active and session.get('delete_title') is None and session.get('delete_range'):
+            all_answer = True
+        else:
+            return reply('请明确日期范围，以及要删除全部事项还是哪些标题。')
+    command = _COMMAND.search(text)
+    interval = _RANGE.search(text)
+    date_answer = active and interval and interval.group() == text
+    named_answer = None
+    if active and session.get('delete_title') is None and session.get('delete_range') and not (interval or command or all_answer):
+        names = _titles(text)
+        if names and service.gateway.delete_candidates(bounds,names)['total']:
+            named_answer = names
+    if not (date_answer or named_answer or all_answer or (command and (active or re.search(r'全|所有|都删', text)))):
+        return None
+
+    pending = service._operation(session['session_id'],session['pending'],owner) if session.get('pending') else None
+    def discard_preview():
+        if pending and pending['status']=='pending' and pending['preview'].get('object_type')=='batch_delete':
+            service.cancel_operation(session['session_id'],pending['operation_id'],owner)
+            session['pending'] = None
+        session.pop('delete_scope',None)
+
+    session.update(batch_delete_intent=True, delete_intent=True)
+    old_filters = (session.get('delete_scope') or {}).get('filters')
+    if interval:
+        try:
+            bounds = _interval(interval,date.today())
+            if len(list(_RANGE.finditer(text))) != 1:
+                raise ValueError()
+        except ValueError:
+            discard_preview()
+            session.pop('delete_range',None)
+            session.pop('clarified_query',None)
+            return reply('日期范围无效，请给出一个有效的开始和结束日期。')
+    if named_answer:
+        session['delete_title'] = named_answer
+    elif all_answer:
+        session['delete_title'] = []
+    elif command:
+        subject = text[:command.start()]
+        if interval:
+            subject = subject[:interval.start()] + subject[interval.end():]
+        if re.search(r'除了?|保留|别删|不要删|不删', subject):
+            discard_preview()
+            session['delete_title'] = None
+            return reply('请列出要删除的标题，或取消当前操作。')
+        subject = re.sub(r'^(?:不要精确匹配标题|拜托|算了)[，,]\s*', '', subject.strip())
+        subject = subject.removeprefix('我的意思是').strip()
+        # A conversational aside before a named, dated subject is outside the title.
+        subject = re.sub(r'^[^，,]{1,6}[吧把][，,]\s*(?=这几天[^，,]*实验)', '', subject)
+        if subject.strip(' ，,') or not active:
+            session['delete_title'] = _titles(subject)
+    titles = session.get('delete_title')
+    if isinstance(titles,str):  # Existing sessions stored a single title.
+        titles = [titles]
+    if not bounds and '这几天' in text and session.get('recent_task'):
+        days = [e['date'] for e in session['recent_task']['events']]
+        if days:
+            bounds = dict(start=min(days),end=max(days))
+    if 'start' not in bounds or 'end' not in bounds:
+        discard_preview()
+        return reply('请给出开始和结束日期，例如 11-18 到 11-20。')
+    bounds = {key:bounds[key] for key in ('start','end')}
+    session['delete_range'] = bounds
+    label = bounds['start']+' 至 '+bounds['end']
+    if titles is None:
+        discard_preview()
+        return reply(label+'：要删除这段时间的全部事项，还是只删某些实验？请指定标题或回复“全部事项全删”。')
+    filters = dict(**bounds,titles=titles)
+    if filters != old_filters:
+        discard_preview()
+    result = service.gateway.delete_candidates(bounds,titles or None)
+    if pending and session.get('pending') and old_filters == filters and (
+            pending['preview'].get('event_ids') != [e['id'] for e in result['events']]):
+        discard_preview()
+    if not result['total']:
+        session.pop('delete_scope',None)
+        return reply(label+' 没有'+('标题为「'+'」「'.join(titles)+'」的' if titles else '')+'事项。','ok')
+    if result['total'] > 10:
+        session.pop('delete_scope',None)
+        return reply(f"{label} 共匹配 {result['total']} 项，超过每批 10 项的上限，请缩小日期或标题范围。",'failed')
+    found_titles = {item['title'].strip() for item in result['events']}
+    missing = [title for title in titles if title not in found_titles]
+    if missing:
+        session.pop('delete_scope',None)
+        return reply(label+' 未找到「'+'」「'.join(missing)+'」。请核对标题，或明确只删除已匹配的标题。')
+    service._bind_delete_scope(session,result,filters)
+    result = prepare(service,session,session['delete_scope']['ids'],owner,request_id)
+    description = '全部事项' if not titles else '标题为「'+'」「'.join(titles)+'」的事项'
+    result['assistant_message'] = f'{label}，{description}，共 {len(session["delete_scope"]["ids"])} 项。' + result['assistant_message']
+    return result
 
 
 def prepare(service, session, ids, owner, request_id):

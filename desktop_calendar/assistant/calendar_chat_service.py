@@ -554,38 +554,10 @@ class CalendarChatService:
         if re.search(r'查询|查找|有什么|有哪些|查一下',message) and not re.search(r'删|移除',message):
             for key in ('batch_delete_intent','delete_intent','delete_title','delete_range','delete_scope'):
                 session.pop(key,None)
-        if re.search(r'删|删除|移除',message) and re.search(r'全部|全删|所有|这几天.*全',message):
-            session.update(batch_delete_intent=True,delete_intent=True)
-            title=re.sub(r'^(?:请|帮我|把|这几天|这些天|所有的|所有|全部|的|\s)+','',message.strip())
-            title=re.sub(r'(?:全部|全)?(?:删除了|删除|删了|删掉|移除)[。！!\s]*$','',title)
-            title=title.strip(' \t\r\n\"\'“”‘’「」')
-            if title and len(title)<=100 and title!=message.strip():
-                session['delete_title']=title
-        if message.strip() in ('全部','全选','所有','全部删除','全删') and session.get('delete_intent'):
-            session['batch_delete_intent']=True
-        if session.get('batch_delete_intent') and message.strip() in ('全部','全选','所有','全部删除','全删'):
-            scope=session.get('delete_scope')
-            if not scope:
-                return envelope(session['session_id'],request_id,status='clarification_required',assistant_message='没有有效删除清单，请指定标题和起止日期；不会选择整个日历。')
-            from desktop_calendar.assistant.calendar_batch_delete import prepare
-            return prepare(self,session,scope['ids'],owner,request_id)
-        if session.get('batch_delete_intent') and session.get('delete_title') and (re.search(r'删|移除',message) or len(re.findall(r'\d{4}-\d{2}-\d{2}',message))==2):
-            dates=re.findall(r'\d{4}-\d{2}-\d{2}',message)
-            bounds=session.get('delete_range') or session.get('clarified_query') or {}
-            if len(dates)==2:
-                bounds=dict(start=dates[0],end=dates[1])
-            elif not all(k in bounds for k in ('start','end')) and session.get('recent_task'):
-                days=[e['date'] for e in session['recent_task']['events']]
-                bounds=dict(start=min(days),end=max(days))
-            if not all(k in bounds for k in ('start','end')):
-                return envelope(session['session_id'],request_id,status='clarification_required',assistant_message='请明确“这几天”的开始和结束日期，例如 2026-11-15 至 2026-11-17。')
-            session['delete_range']=dict(start=bounds['start'],end=bounds['end'])
-            result=self._tool('query_events',dict(keyword=session['delete_title'],**session['delete_range']),
-                session,owner,request_id,source,message=message,diagnostic=diagnostic)
-            if not result['total']:
-                return envelope(session['session_id'],request_id,status='ok',assistant_message='该日期范围内没有精确匹配标题的事项，未删除任何内容。')
-            from desktop_calendar.assistant.calendar_batch_delete import prepare
-            return prepare(self,session,session['delete_scope']['ids'],owner,request_id)
+        from desktop_calendar.assistant.calendar_batch_delete import handle_message
+        deletion = handle_message(self, session, message, owner, request_id)
+        if deletion is not None:
+            return deletion
         recent = session.get('recent_task')
         if recent and (not session.get('active_task') or self.journal.get('task',session['active_task'],owner)['status']=='completed') and message.strip() in ('继续','继续添加'):
             return envelope(session['session_id'],request_id,status='ok',assistant_message='上一批事项已完成，没有重复添加。请说明新的安排。')
@@ -673,7 +645,7 @@ class CalendarChatService:
                   '修改时changes必须是本次用户要求的局部Patch，改名仅传title，不要重发其他Event字段或默认值。'
                   '多候选只能请用户点击候选项或回复序号，不可替用户选择。未确认的修改使用相同event_id合并。')
         system += ('明确多个独立Event使用一个propose_events工具，最多10项，宿主原子保存；不可分成多个单事项提案。'
-                   '批量删除使用delete_events_batch，先按精确标题与明确起止日期查询完整目标集合；用户全部表示当前完整集合，不是单选；必须两级本地确认，不能自动删除。'
+                   '批量删除使用delete_events_batch，先确定起止日期及标题范围（全部事项或多个精确标题），再核对完整目标集合；用户全部表示当前完整集合，不是单选；必须两级本地确认，不能自动删除。'
                    '往后/未来三天各一个表示从明天起三天，连续三天一个任务不是三个独立Event。随机不同颜色传distinct_colors=true，本地固定抽取。'
                    '第二天/第二个/最后一个和前面那批优先用recent_task日期顺序和稳定ID，不重新模糊搜索。'
                    '明确删除或可信状态delete_intent=true时只定位并preview_delete，不询问删除还是未完成；删除仍需一次确认。')
@@ -729,6 +701,8 @@ class CalendarChatService:
                     messages.append({'role': 'system', 'content': '刚才仅查询，没有修改或保存。本次用户明确要求调整习惯，请用preview_update_habit提交仅对应字段的Patch；已是该值也可提交无变化提案。若有歧义请clarify。'})
                     continue
                 if last_query is not None:
+                    if last_query['total'] == 0:
+                        return envelope(session['session_id'], request_id, assistant_message='当前查询条件下没有匹配结果。')
                     if 'habits' in last_query:
                         return envelope(session['session_id'], request_id, habit_candidates=last_query['habits'],
                                         assistant_message=f"查询到{last_query['total']}个习惯，请选择后描述修改。")
