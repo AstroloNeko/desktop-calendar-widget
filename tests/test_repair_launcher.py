@@ -1,4 +1,6 @@
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -9,6 +11,19 @@ import repair_launcher
 
 
 class RepairLauncherTests(unittest.TestCase):
+    def test_repair_guard_neither_creates_profile_nor_imports_calendar(self):
+        with tempfile.TemporaryDirectory() as folder:
+            subprocess.run([sys.executable, '-c', """
+import sys
+from pathlib import Path
+import repair_launcher
+from desktop_calendar.updates.update_storage_guard import managed_state
+profile = Path(sys.argv[1]) / 'missing'
+assert not managed_state(profile)
+assert not profile.exists()
+assert {'app', 'calendar_core', 'desktop_calendar.storage.calendar_storage_lifecycle'}.isdisjoint(sys.modules)
+""", folder], cwd=Path(__file__).resolve().parents[1], check=True)
+
     def setUp(self):
         profile = tempfile.TemporaryDirectory()
         self.addCleanup(profile.cleanup)

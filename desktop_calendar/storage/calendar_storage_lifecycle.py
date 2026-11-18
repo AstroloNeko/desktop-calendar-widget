@@ -16,16 +16,11 @@ import uuid
 _QUARANTINED = {}
 
 from calendar_core import DATA_DIR, Store
+from desktop_calendar.storage.authority_state import LifecycleError, read_authority_state
 from desktop_calendar.storage.calendar_migration import dry_run_migration
 from desktop_calendar.storage.calendar_migration_validation import validate_source, ValidationResult, _validate_document
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from desktop_calendar.storage.sqlite_calendar_schema import APPLICATION_ID, SCHEMA_VERSION
-
-
-class LifecycleError(RuntimeError):
-    def __init__(self, code):
-        self.code=code
-        super().__init__(code)
 
 
 def digest(path):
@@ -105,16 +100,7 @@ class StorageLifecycle:
         return path
 
     def _read(self):
-        if not self.state_path.exists():
-            if self.witness.exists():raise LifecycleError('state_missing_recovery_required')
-            return dict(format=1,state='NOT_STARTED')
-        try:
-            state=json.loads(self.state_path.read_text(encoding='utf8'))
-            if state['format']!=1 or state['state'] not in ('NOT_STARTED','PREPARING','STAGED','ACTIVATING','ACTIVE','RECOVERY_REQUIRED'):
-                raise ValueError()
-            if state['state']!='NOT_STARTED' and not self.witness.is_file():raise ValueError()
-            return state
-        except (ValueError,KeyError,TypeError,OSError) as exc:raise LifecycleError('state_corrupt_recovery_required') from exc
+        return read_authority_state(self.root)
 
     def _write(self,state):
         temporary=self.root/('.state-'+uuid.uuid4().hex)

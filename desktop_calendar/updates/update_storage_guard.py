@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 import zipfile
-from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle, LifecycleError
+from desktop_calendar.storage.authority_state import LifecycleError, read_authority_state
 
 
 def profile_root():
@@ -25,10 +25,7 @@ def validate_capabilities(data, version):
 
 
 def managed_state(root):
-    root = Path(root)
-    if not (root / 'storage-state.json').exists() and not (root / '.storage-managed').exists():
-        return False
-    state = StorageLifecycle(root, existing_only=True)._read()
+    state = read_authority_state(root)
     if state['state'] == 'NOT_STARTED': return False
     if state['state'] != 'ACTIVE':
         raise LifecycleError('存储迁移或恢复尚未完成，已拒绝更新。')
