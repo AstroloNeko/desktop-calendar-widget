@@ -2,9 +2,12 @@
 from unittest import TestCase
 from unittest.mock import patch
 from datetime import date
-from calendar_core import Event, RoutineItem
+from calendar_core import Event, RoutineItem, Store
+from event_commands import BatchPreview, EventCommandHistory
+from desktop_calendar.assistant.calendar_action_gateway import CalendarActionGateway
 from desktop_calendar.assistant.calendar_chat_tools import ChatError
-from desktop_calendar.assistant.calendar_chat_service import OWNER
+from desktop_calendar.assistant.calendar_chat_service import CalendarChatService, OWNER
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 import test_calendar_chat as fixture
 
 
@@ -34,6 +37,19 @@ class BatchDeleteTests(TestCase):
 
     def confirm(self,op):
         return self.service.confirm_operation(self.sid,op['operation_id'],revision=op['revision'])
+
+    def use_sqlite(self, *, reopen=False):
+        seed = [] if reopen else self.store.events
+        if reopen:
+            self.store.repository.close()
+        self.store = Store(self.root/'delete-test.sqlite3',repository_factory=SqliteCalendarRepository)
+        self.addCleanup(self.store.repository.close)
+        self.commands = EventCommandHistory(self.store)
+        for event in seed:
+            self.commands.upsert(event)
+        self.commands = EventCommandHistory(self.store)
+        self.gateway = CalendarActionGateway(self.store,self.commands,refresh=self.refresh)
+        self.service = CalendarChatService(self.gateway,self.journal,self.provider,clock=lambda:self.clock)
 
     def test_full_transcript_no_single_selection_loop_two_stages(self):
         op=self.preview()
@@ -226,6 +242,7 @@ class BatchDeleteTests(TestCase):
         self.assertEqual(response['pending_operation']['preview']['event_ids'],['A','B','C','D'])
 
     def test_receipt_failure_observes_never_replays(self):
+        self.use_sqlite()
         op=self.preview()
         final=self.confirm(op)['pending_operation']
         original=self.journal.put
@@ -236,9 +253,97 @@ class BatchDeleteTests(TestCase):
         with patch.object(self.journal,'put',side_effect=broken):
             response=self.confirm(final)
         self.assertEqual(response['error_code'],'execution_uncertain')
+        self.assertTrue(self.store.repository.receipt(op['operation_id']))
+        self.use_sqlite(reopen=True)
         response=self.service.get_operation_result(self.sid,op['operation_id'])
         self.assertEqual(response['status'],'succeeded')
-        self.assertEqual(self.commands.undo_count,1)
+        self.assertTrue(response['operation_result']['recovered'])
+        self.assertTrue(response['operation_result']['goal_satisfied'])
+        self.assertEqual(self.commands.undo_count,0)
+        self.assertEqual(self.confirm(final)['operation_result'],response['operation_result'])
+
+    def test_sqlite_deletion_receipt_is_claimed_once_and_matches_frozen_ids(self):
+        self.use_sqlite()
+        op = self.preview()
+        final = self.confirm(op)['pending_operation']
+        self.assertIsNone(self.store.repository.receipt(op['operation_id']))
+        with self.assertRaises(ChatError):
+            self.confirm(op)
+        commit = self.gateway.events.commit
+
+        def check_claim(preview, *, operation_id):
+            claimed = self.journal.get('operation',operation_id,OWNER)
+            self.assertEqual(claimed['status'],'executing')
+            self.assertEqual(operation_id,op['operation_id'])
+            self.assertEqual(claimed['preview']['event_ids'],['A','B','C','D'])
+            return commit(preview,operation_id=operation_id)
+
+        with patch.object(self.gateway.events,'commit',side_effect=check_claim) as writer:
+            result = self.confirm(final)
+            self.assertEqual(self.confirm(final)['operation_result'],result['operation_result'])
+            writer.assert_called_once()
+        self.assertEqual(result['status'],'succeeded')
+        self.assertTrue(result['operation_result']['committed'])
+        self.assertEqual(result['operation_result']['remaining_event_ids'],[])
+        self.assertEqual(self.store.repository.existing_event_ids(['A','B','C','D','E']),{'E'})
+        self.commands.undo()
+        self.assertEqual(len(self.store.events),6)
+
+    def test_legacy_single_delete_confirmation_uses_same_sqlite_evidence(self):
+        self.use_sqlite()
+        reply = self.say('删除组会',[fixture.tool('query_events',dict(keyword='组会')),
+                                fixture.tool('preview_delete',dict(event_id='F'))])
+        op = reply['pending_operation']
+        result = self.confirm(op)
+        self.assertEqual(result['status'],'succeeded')
+        self.assertTrue(self.store.repository.receipt(op['operation_id']))
+        self.assertEqual(result['operation_result']['event_id'],'F')
+        self.assertEqual(result['operation_result']['remaining_event_ids'],[])
+        self.assertEqual(self.confirm(op)['operation_result'],result['operation_result'])
+
+    def test_missing_receipt_and_missing_rows_stay_uncertain(self):
+        self.use_sqlite()
+        op = self.preview()
+        final = self.confirm(op)['pending_operation']
+        with patch.object(self.gateway.events,'commit',side_effect=OSError('interrupted before write')):
+            self.assertEqual(self.confirm(final)['status'],'uncertain')
+        self.commands.bulk(op['preview']['event_ids'],'delete')
+        self.assertIsNone(self.store.repository.receipt(op['operation_id']))
+        self.use_sqlite(reopen=True)
+        recovered = self.service.get_operation_result(self.sid,op['operation_id'])
+        self.assertEqual(recovered['status'],'uncertain')
+        self.assertIsNone(recovered['operation_result']['committed'])
+        self.assertFalse(recovered['operation_result']['deleted'])
+        self.assertEqual(self.confirm(final)['status'],'uncertain')
+        self.assertEqual(self.commands.undo_count,0)
+
+    def test_sqlite_partial_effect_is_committed_unverified_and_never_retried(self):
+        self.use_sqlite()
+        op = self.preview()
+        final = self.confirm(op)['pending_operation']
+        commit = self.gateway.events.commit
+        def commit_partial(preview, *, operation_id):
+            return commit(BatchPreview(preview.entries[:1],preview.label),operation_id=operation_id)
+        with patch.object(self.gateway.events,'commit',side_effect=commit_partial) as writer:
+            result = self.confirm(final)
+            self.assertEqual(self.confirm(final)['status'],'committed_unverified')
+            writer.assert_called_once()
+        self.assertTrue(self.store.repository.receipt(op['operation_id']))
+        self.assertTrue(result['operation_result']['committed'])
+        self.assertFalse(result['operation_result']['goal_satisfied'])
+        self.assertEqual(result['operation_result']['remaining_event_ids'],['B','C','D'])
+        self.assertIn('已提交',result['error_message'])
+
+    def test_sqlite_rollback_is_distinct_from_unknown(self):
+        self.use_sqlite()
+        op = self.preview()
+        final = self.confirm(op)['pending_operation']
+        with patch.object(self.store.repository,'_commit',side_effect=OSError('disk')):
+            result = self.confirm(final)
+        self.assertEqual(result['status'],'failed')
+        self.assertFalse(result['operation_result']['committed'])
+        self.assertIsNone(self.store.repository.receipt(op['operation_id']))
+        self.assertEqual(self.store.repository.existing_event_ids(op['preview']['event_ids']),{'A','B','C','D'})
 
     def test_http_two_confirmations_same_service(self):
         import json

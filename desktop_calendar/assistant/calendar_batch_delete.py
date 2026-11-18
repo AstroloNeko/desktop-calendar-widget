@@ -5,7 +5,7 @@ from datetime import date
 
 from desktop_calendar.assistant.calendar_chat_tools import fail, ChatError
 from desktop_calendar.assistant.calendar_action_gateway import fingerprint
-from calendar_event_service import EventOperationError
+from desktop_calendar.assistant.operation_engine import event_result, execute as execute_plan
 
 
 _ENDPOINT = r'(?:(?:(\d{4})[-年/])?(\d{1,2})[-月/])?(\d{1,2})(?:日|号)?'
@@ -165,6 +165,8 @@ def prepare(service, session, ids, owner, request_id):
     pending=session.get('pending')
     if pending:
         old=service._operation(session['session_id'],pending,owner)
+        if old['status'] in ('ready','executing','uncertain'):
+            fail('上一操作仍待核查，请先查看原执行结果。','execution_uncertain')
         if old['status']=='pending':
             if old['preview'].get('object_type')=='batch_delete' and old['preview']['event_ids']==ids:
                 return service.get_operation_result(session['session_id'],pending,owner)
@@ -188,12 +190,14 @@ def prepare(service, session, ids, owner, request_id):
 
 
 def response(op):
+    from desktop_calendar.assistant.calendar_chat_service import envelope
+
     message='请核对完整清单，先选择“删除这N项”，再进行最终确认。' if op['stage']=='reviewing_batch' else '请再次核对清单，然后点击“最终确认删除”。'
     if op['status']=='succeeded':
-        message='✓ 已实际删除'+str(len(op['preview']['event_ids']))+'项，可一次撤销。'
+        message=''
     elif op['status']!='pending':
         message=op.get('error_message') or '批量删除已终止。'
-    return dict(session_id=op['session_id'],request_id=op['request_id'],status=op['status'],pending_operation=op,
+    return envelope(session_id=op['session_id'],request_id=op['request_id'],status=op['status'],pending_operation=op,
         assistant_message=message,
         operation_result=op.get('operation_result'),error_code=op.get('error_code'),error_message=op.get('error_message'))
 
@@ -207,32 +211,26 @@ def confirm(service, op, owner, revision, automatic):
         if not service.gateway.writable():
             fail('请先关闭编辑器或等待当前操作完成。','execution_failed')
         ids=op['preview']['event_ids']
+        before = {'status':'pending','revision':revision,'stage':op['stage']}
         if any(fingerprint(service.gateway._state(i))!=op['preview']['hashes'][i] for i in ids):
             op.update(status='failed',stage='conflict',error_code='operation_conflict',error_message='清单中的事项已变化，整批未删除。请重新查询、核对并确认。')
-            service.journal.put('operation',op['operation_id'],owner,op)
+            op['operation_result'] = event_result(op,ids,changed=False,committed=False,verified=None)
+            service.journal.transition('operation',op['operation_id'],owner,before,op)
             return None
         if op['stage']=='reviewing_batch':
             op.update(stage='awaiting_final_confirmation',revision=secrets.token_urlsafe(24))
-            service.journal.put('operation',op['operation_id'],owner,op)
+            service.journal.transition('operation',op['operation_id'],owner,before,op)
             return None
         preview=service.gateway.events.preview_bulk(ids,'delete')
-        op.update(status='executing',stage='executing')
-        service.journal.put('operation',op['operation_id'],owner,op)
-        try:
-            result=service.gateway.events.commit(preview)
-        except EventOperationError as exc:
-            op.update(status='failed',stage='failed',error_code=exc.code,error_message=str(exc))
-            service.journal.put('operation',op['operation_id'],owner,op)
-            return None
-        op.update(status='succeeded',stage='completed',operation_result=dict(deleted=True,event_ids=ids,count=len(ids),operation_id=op['operation_id']))
-        service.journal.put('operation',op['operation_id'],owner,op)
-        return result.change
+        op['confirmed_at'] = service.clock()
+        result = execute_plan(service.gateway,service.journal,'operation',op,owner,preview)
+        return result.change if result else None
     try:
         change=service.gateway.dispatch(execute)
     except ChatError:
         raise
     except Exception:
-        return dict(session_id=op['session_id'],status='failed',error_code='execution_uncertain',
+        return dict(session_id=op['session_id'],status='uncertain',operation_id=op['operation_id'],error_code='execution_uncertain',
             error_message='无法确认批量删除结果，请查询操作状态；不会自动重试删除。')
     try:
         service._audit(op,owner,'batch-delete-confirm')

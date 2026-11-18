@@ -190,6 +190,16 @@ class SqliteCalendarRepository(JsonCalendarRepository):
             row = db.execute('SELECT * FROM operation_receipts WHERE operation_id=?', (operation_id,)).fetchone()
             return dict(row) if row else None
 
+    def existing_event_ids(self, identifiers):
+        """Read the frozen target IDs from SQLite without updating the Store revision."""
+        identifiers = tuple(identifiers)
+        if not identifiers:
+            return set()
+        placeholders = ','.join('?' for _ in identifiers)
+        with closing(self._connect()) as db:
+            return {row[0] for row in db.execute(
+                'SELECT id FROM events WHERE id IN ('+placeholders+')', identifiers)}
+
     def _apply(self, changes, *, expected_revision=None, operation_id=None, preferences=None, initial_import=False):
         from calendar_core import MutationUncertainError
         store = self.legacy_store

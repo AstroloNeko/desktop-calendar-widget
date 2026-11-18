@@ -5,7 +5,7 @@ from desktop_calendar.assistant.calendar_chat_tools import fail
 
 
 def compile_proposal(proposal):
-    if 'items' not in proposal or set(proposal) - {'action','items','distinct_colors'} or proposal['action']=='delete':
+    if 'items' not in proposal or set(proposal) - {'action','items','distinct_colors','preview_only'} or proposal['action']=='delete':
         fail('成员计划需要提供合法的动作和 items；按条件定位事项请使用 target。')
     action, items = proposal['action'], proposal['items']
     keys = {'create': {'fields'}, 'update': {'fields','event_id'}, 'complete': {'event_id','done'}}
@@ -56,7 +56,7 @@ def member_count(message):
 
 
 def independent_dates(message, anchor):
-    if re.search(r'明天[、，和与及\s]*后天', message):
+    if re.search(r'明后天|明天[、，和与及\s]*后天', message):
         return [(anchor + timedelta(days=n)).isoformat() for n in (1, 2)]
     return []
 
@@ -65,6 +65,22 @@ def check_create_count(message, actual):
     count = member_count(message)
     if count and actual != count:
         fail(f'请求包含{count}个成员，请提交一个包含全部成员的批量创建计划。', 'invalid_arguments')
+
+
+def check_creation_members(members, message, days):
+    check_create_count(message, len(members))
+    if not days:
+        return
+    separate = re.search(r'各|分别|独立', message)
+    spanning = re.search(r'(?:一个|一条|一项).{0,8}跨日|(?:同一|一个).{0,8}跨[两二]天', message)
+    if spanning or (len(members) == 1 and not separate):
+        first = members[0]
+        end_matches = first.get('end_date') == days[-1] if 'end_date' in first else (
+            first.get('duration_days') == len(days) and not first.get('skip_non_working_days'))
+        if len(members) != 1 or first['date'] != days[0] or not end_matches:
+            fail('请保留一个覆盖所述日期的跨日事项。')
+    elif sorted(item['date'] for item in members) != days:
+        fail('成员日期与原请求不一致，请重新规划明天和后天的两个成员。')
 
 
 def selected_reply(message, candidates):

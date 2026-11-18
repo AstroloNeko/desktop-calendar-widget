@@ -174,6 +174,7 @@ class CalendarActionGateway:
         preview = self.events.preview_upsert(candidate, label='AI新建事项' if current is None else 'AI修改事项')
         return dict(event_id=identifier, before_hash=fingerprint(before),
                     before=asdict(current) if current else None, after=asdict(preview.event()),
+                    action='create' if current is None else 'complete' if name == 'preview_complete' else 'update',
                     before_summary=self._detail(current) if current else None, after_summary=self._detail(preview.event()),
                     dates=[day.isoformat() for day in preview.effective_dates],
                     deadline=preview.deadline.isoformat() if preview.deadline else None,
@@ -236,7 +237,9 @@ class CalendarActionGateway:
                     fail('习惯保存结果待核查，请勿重复操作。', 'execution_uncertain')
                 fail('习惯保存未成功，未应用此操作。', 'execution_failed')
             result = dict(object_type='habit', habit_id=item.id, action='updated' if current else 'created', habit=dict(id=item.id, title=item.title,
-                color=item.color, schedule=preview['schedule'], next_on=preview['next_on']), changed=change is not None)
+                color=item.color, schedule=preview['schedule'], next_on=preview['next_on'],
+                reminder_time=item.reminder_time if item.reminder_enabled else None),
+                changed=change is not None, committed=change is not None, goal_satisfied=True)
             operation.update(status='succeeded', operation_result=result)
             journal.put('operation', operation['operation_id'], owner, operation)
             self.habit_refresh()
@@ -255,20 +258,12 @@ class CalendarActionGateway:
             if outcome.changed:
                 self.refresh(outcome.change)
             return operation['operation_result']
-        operation['status'] = 'executing'
-        journal.put('operation', operation['operation_id'], owner, operation)
-        try:
-            outcome = self.events.delete(preview['event_id'])
-            change = outcome.change
-        except (OSError, ValueError) as error:
-            raise ChatError('execution_failed', '日历保存未成功，未应用此修改。') from error
-        result = dict(event=None, deleted=True, event_id=preview['event_id'], changed=change is not None)
-        operation.update(status='succeeded', operation_result=result)
-        # If this write fails, durable 'executing' remains; recovery NEVER replays it.
-        journal.put('operation', operation['operation_id'], owner, operation)
-        if change is not None:
-            self.refresh(change)
-        return result
+        from desktop_calendar.assistant.operation_engine import execute
+        deletion = self.events.preview_bulk([preview['event_id']], 'delete')
+        outcome = execute(self,journal,'operation',operation,owner,deletion)
+        if outcome and outcome.change is not None:
+            self.refresh(outcome.change)
+        return operation['operation_result']
 
     def recover(self, operation):
         def check():
@@ -278,9 +273,9 @@ class CalendarActionGateway:
             if operation['preview'].get('object_type') == 'habit':
                 item = next((r for r in self.store.routines if r.id == operation['preview']['habit_id']), None)
                 return item is not None and asdict(item) == operation['preview']['after']
-            event = self.store.event_by_id(operation['preview']['event_id'])
             if operation['preview']['after'] is None:
-                return event is None
+                from desktop_calendar.assistant.operation_engine import deletion_outcome
+                return deletion_outcome(self,operation,recovered=True)['status'] == 'succeeded'
             from desktop_calendar.assistant.operation_engine import recovered
             return recovered(self, operation, [operation['preview']['after']])
         return self.dispatch(check)

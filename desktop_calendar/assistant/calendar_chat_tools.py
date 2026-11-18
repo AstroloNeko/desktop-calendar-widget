@@ -113,6 +113,13 @@ SCHEMAS['propose_events'] = obj({
     'distinct_colors': {'type':'boolean'}
 }, ('action',))
 SCHEMAS['revise_event_target'] = obj({'revision':text(100), **SCHEMAS['propose_events']['properties']['target']['properties']}, ('revision',))
+SCHEMAS['clarify']['properties']['create_plan'] = obj({
+    'action': {'type':'string','enum':['create']},
+    'items': SCHEMAS['propose_events']['properties']['items'],
+    'distinct_colors': {'type':'boolean'},
+    'preview_only': {'type':'boolean'},
+}, ('action','items'))
+DESCRIPTIONS['clarify'] += ' 如果已有一份完整的创建方案，只等用户认可，请附上 create_plan，包含全部成员及字段；真正缺少字段时仅提问。'
 DESCRIPTIONS['revise_event_target'] = '引用 awaiting_target.revision，提交用户补充的日期、标题或数量范围；宿主保留原动作和所有未修改字段。'
 DESCRIPTIONS['propose_events'] = ('提交一个完整的同类事项计划。create 每个成员含 fields(title,date,...)；'
     'update 每个成员含 event_id 和 fields(只含修改值)；complete 含 event_id 和 done。'

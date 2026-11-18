@@ -1,11 +1,11 @@
 """Bounded durable Event tasks; no independent storage or command history."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import secrets
 import uuid
 import re
 from datetime import date, timedelta
 
-from desktop_calendar.assistant.operation_engine import execute as execute_plan, recovered
+from desktop_calendar.assistant.operation_engine import event_result, execute as execute_plan, recovered
 from desktop_calendar.assistant.operation_plan import member_count
 from desktop_calendar.assistant.calendar_action_gateway import fingerprint
 from calendar_core import COLORS
@@ -26,7 +26,7 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
         args['distinct_colors']=True
     if not structured and not member_count(message) and not any(word in message for word in ('各','每天','全部','所有','那三个','那一批','这三个','批量','前三个','前面那','三天')):
         fail('请明确是否操作多个独立事项。','clarification_required')
-    if name=='batch_create_events' and '连续' in message and not re.search(r'各|每天.*一次|独立',message):
+    if not structured and name=='batch_create_events' and '连续' in message and not re.search(r'各|每天.*一次|独立',message):
         fail('连续多日与多个独立事项不同，请明确是否每天各建一个。','clarification_required')
     preview_only = preview_only or not service.auto_execute or any(word in message for word in ('先预览','不要执行','先别执行','先确认'))
     if session.get('pending') and service._pending_status(session, owner) in ('pending','ready','executing','uncertain'):
@@ -50,19 +50,15 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
     def prepare():
         if not gateway.writable():
             fail('请先关闭编辑器或等待当前操作完成。','execution_failed')
-        entries = []
+        candidates = []
+        fixed_colors = []
         items = args.get('items') or [{'event_id':i,'changes':{'done':args['done']}} for i in args['event_ids']]
         if name=='batch_create_events' and re.search(r'(往后|未来|往后面)三天',message) and re.search(r'各|每天',message):
             expected=[(date.today()+timedelta(days=i)).isoformat() for i in (1,2,3)]
             if sorted(item['date'] for item in items)!=expected:
                 fail('未来三天应从明天开始，每天各一个，请重新规划日期。','clarification_required')
-        colors = None
-        if args.get('distinct_colors'):
-            if len(items)>len(COLORS):
-                fail('当前调色板不足以提供这么多种不同颜色。','clarification_required')
-            colors = secrets.SystemRandom().sample(list(COLORS.values()),len(items))
         ids = []
-        for index, item in enumerate(items):
+        for item in items:
             creating = name == 'batch_create_events'
             identifier = str(uuid.uuid4()) if creating else item['event_id']
             if not creating and identifier not in known:
@@ -74,22 +70,33 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
             if not structured and name != 'batch_set_completion':
                 values, _, _ = adapt_attributes(values,message,creating,gateway.categories()['categories'],())
             values.pop('category_basis',None)
-            if colors:
-                values.update(color=colors[index],color_mode='override')
             candidate = build_event_candidate(values,current=current,identifier=identifier,context=gateway.store)
-            entries.append(gateway.events.preview_upsert(candidate))
+            candidates.append(candidate)
+            fixed_colors.append(structured and ('color' in values or 'color_mode' in values))
             ids.append(identifier)
         if len(ids)!=len(set(ids)):
             fail('同一批次不能重复修改同一事项。')
+        if args.get('distinct_colors'):
+            reserved = [gateway.store.effective_event_color(c).casefold() for c, fixed in zip(candidates,fixed_colors) if fixed]
+            available = [color for color in COLORS.values() if color.casefold() not in reserved]
+            needed = len(candidates)-len(reserved)
+            if len(set(reserved)) != len(reserved) or needed > len(available):
+                fail('无法同时保留指定颜色并为每项分配不同颜色。','clarification_required')
+            colors = iter(secrets.SystemRandom().sample(available,needed))
+            candidates = [c if fixed else replace(c,color=next(colors),color_mode='override')
+                          for c, fixed in zip(candidates,fixed_colors)]
+        preview = (gateway.events.preview_create_many(candidates) if name=='batch_create_events'
+                   else BatchPreview(tuple(gateway.events.preview_upsert(c) for c in candidates),'AI批量修改事项'))
         task['event_ids'] = ids
         task['before_hashes'] = [fingerprint(gateway._state(i)) for i in ids]
-        task['expected'] = [asdict(e.event()) for e in entries]
-        return gateway.events.preview_create_many([e.event() for e in entries]) if name=='batch_create_events' else BatchPreview(tuple(entries),'AI批量修改事项')
+        task['expected'] = [asdict(entry.event()) for entry in preview.entries]
+        return preview
     def execute():
         preview = prepare()
         if preview_only:
             entries = preview.entries
             batch = dict(object_type='event_batch', creation=name=='batch_create_events', description='批量事项操作', event_id=task['event_ids'][0],
+                         action={'batch_create_events':'create','batch_set_completion':'complete'}.get(name,'update'),
                          event_ids=task['event_ids'], after=task['expected'], before=None,
                          before_hashes=task['before_hashes'],
                          summaries=[gateway._detail(entry.event()) for entry in entries])
@@ -101,6 +108,7 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
             session.pop('active_task',None)
             return op
         journal.put('task',task_id,owner,task)
+        journal.put('session',session['session_id'],owner,session)
         colors = [gateway.store.effective_event_color(entry.event()) for entry in preview.entries]
         return execute_plan(gateway, journal, 'task', task, owner, preview, task['expected'], colors)
     try:
@@ -118,13 +126,14 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
         fail('批量操作结果待核查，请勿重复创建。','execution_uncertain')
     if preview_only:
         return result
-    session['recent_task'] = dict(task_id=task_id,event_ids=task['event_ids'],events=task['result']['events'])
-    session['selected_kind']='event'
-    session['selected']=task['event_ids'][-1]
-    session['candidates']=task['result']['events']
+    if task['status']=='completed':
+        session['recent_task'] = dict(task_id=task_id,event_ids=task['event_ids'],events=task['result']['events'])
+        session['selected_kind']='event'
+        session['selected']=task['event_ids'][-1]
+        session['candidates']=task['result']['events']
     try:
         journal.put('audit',task_id,owner,dict(task_id=task_id,session_id=task['session_id'],request_id=request_id,
-            source=source,action=name,status='completed',event_ids=task['event_ids']))
+            source=source,action=name,status=task['status'],event_ids=task['event_ids']))
     except OSError:
         # Durable intent and completed task receipt already exist. Do not claim
         # the calendar was unchanged or retry a committed batch over audit I/O.
@@ -161,7 +170,8 @@ def recover_task(service, task, owner):
         matches = service.gateway.dispatch(lambda: recovered(service.gateway, task, task['expected']))
         if matches:
             events=service.gateway.dispatch(lambda: [service.gateway.detail(i) for i in task['event_ids']])
-            task.update(status='completed',result=dict(task_id=task['task_id'],event_ids=task['event_ids'],events=events,recovered=True))
+            task.update(status='completed',result=event_result(task,task['event_ids'],changed=True,committed=True,
+                                                               verified=True,details=events,recovered=True))
             service.journal.put('task',task['task_id'],owner,task)
         else:
             task.update(status='uncertain', error_code='execution_uncertain')
