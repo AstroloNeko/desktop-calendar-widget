@@ -1,7 +1,7 @@
 """Resolve explicit Event plan constraints without another model round trip."""
 import re
 from datetime import date, timedelta
-from desktop_calendar.assistant.calendar_chat_tools import fail
+from desktop_calendar.assistant.calendar_chat_protocol import fail
 
 
 def compile_proposal(proposal):

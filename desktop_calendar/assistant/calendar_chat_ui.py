@@ -6,8 +6,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from tk_dispatcher import TkDispatcher
-from desktop_calendar.assistant.calendar_chat_service import envelope
-from desktop_calendar.assistant.calendar_chat_tools import ChatError
+from desktop_calendar.assistant.calendar_chat_protocol import ChatError, envelope
 from desktop_calendar.assistant.llm_provider import AIConfiguration
 from desktop_calendar.reminders.reminder_ui import reminder_button
 from desktop_calendar.ui.themed_controls import themed_check

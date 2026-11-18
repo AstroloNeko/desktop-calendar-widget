@@ -3,8 +3,7 @@ import re
 import secrets
 from datetime import date
 
-from desktop_calendar.assistant.calendar_chat_tools import fail, ChatError
-from desktop_calendar.assistant.calendar_action_gateway import fingerprint
+from desktop_calendar.assistant.calendar_chat_protocol import ChatError, envelope, fail, fingerprint
 from desktop_calendar.assistant.operation_engine import event_result, execute as execute_plan
 
 
@@ -13,6 +12,12 @@ _RANGE = re.compile(r'(?<![\d/-])' + _ENDPOINT + r'\s*(?:到|至|[-~～—])\s*'
 _COMMAND = re.compile(r'(?:全部|全都|都|全)?(?:删除|删掉|删了|移除)(?:掉|了)?[。！!\s]*$')
 _ALL = {'事项','事情','安排','日程','任务','不管是什么事情','不管是什么事项','不管什么事情'}
 _RECENT_DAYS = re.compile(r'^(?:(?:请|帮我|把|将)\s*)*(?:最近|近)\s*(?:[一二两三四五六七八九十\d]+|几)\s*天(?:内|里)?(?:的)?\s*')
+
+
+def clear_delete_intent(session):
+    """Clear deletion-specific conversation state after leaving the flow."""
+    for key in ('batch_delete_intent', 'delete_title', 'delete_range', 'delete_scope', 'delete_intent'):
+        session.pop(key, None)
 
 
 def _interval(match, today):
@@ -38,8 +43,6 @@ def _titles(subject):
 
 
 def handle_message(service, session, message, owner, request_id):
-    from desktop_calendar.assistant.calendar_chat_service import envelope
-
     def reply(text, status='clarification_required'):
         return envelope(session['session_id'], request_id, status=status, assistant_message=text)
 
@@ -190,8 +193,6 @@ def prepare(service, session, ids, owner, request_id):
 
 
 def response(op):
-    from desktop_calendar.assistant.calendar_chat_service import envelope
-
     message='请核对完整清单，先选择“删除这N项”，再进行最终确认。' if op['stage']=='reviewing_batch' else '请再次核对清单，然后点击“最终确认删除”。'
     if op['status']=='succeeded':
         message=''
@@ -240,8 +241,7 @@ def confirm(service, op, owner, revision, automatic):
         op['audit_pending']=True
     if op['status']=='succeeded':
         session=service.get_session(op['session_id'],owner)
-        for key in ('batch_delete_intent','delete_title','delete_range','delete_scope','delete_intent'):
-            session.pop(key,None)
+        clear_delete_intent(session)
         service.journal.put('session',op['session_id'],owner,session)
     if change:
         try:

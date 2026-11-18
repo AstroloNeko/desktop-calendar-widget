@@ -8,8 +8,7 @@ import threading
 import time
 from urllib.parse import urlsplit, parse_qs
 
-from desktop_calendar.assistant.calendar_chat_service import OWNER, envelope
-from desktop_calendar.assistant.calendar_chat_tools import ChatError
+from desktop_calendar.assistant.calendar_chat_protocol import OWNER, ChatError, envelope
 
 
 class LocalChatHTTP:

@@ -7,16 +7,13 @@ from datetime import date, timedelta
 
 from desktop_calendar.assistant.operation_engine import event_result, execute as execute_plan, recovered
 from desktop_calendar.assistant.operation_plan import member_count
-from desktop_calendar.assistant.calendar_action_gateway import fingerprint
 from calendar_core import COLORS
-from desktop_calendar.assistant.calendar_chat_tools import fail, ChatError
+from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fail, fingerprint
+from desktop_calendar.assistant.calendar_chat_tools import TASK_TOOLS as TASK_TOOLS
 from event_input import build_event_candidate
 from event_commands import BatchPreview
 from calendar_event_service import EventOperationError
 from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
-
-
-TASK_TOOLS = {'batch_create_events','batch_update_events','batch_set_completion'}
 
 
 def run_task(service, name, args, session, owner, request_id, source, message, *, structured=False, preview_only=False):

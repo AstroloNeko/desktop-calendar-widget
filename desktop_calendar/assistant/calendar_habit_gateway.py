@@ -6,7 +6,7 @@ import re
 from calendar_core import RoutineItem, COLORS, normalize_reminder_time
 from habit_schedule import validate_schedule_input, schedule_label
 from desktop_calendar.assistant.calendar_chat_tools import fail, iso_day
-from desktop_calendar.assistant.calendar_action_gateway import fingerprint
+from desktop_calendar.assistant.calendar_chat_protocol import fingerprint
 
 
 def habit_intent(message):

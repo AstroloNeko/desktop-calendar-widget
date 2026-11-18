@@ -1,20 +1,17 @@
 """Sole AI calendar boundary. All Store access runs through the supplied dispatcher."""
 from dataclasses import asdict, replace
-from datetime import date, datetime
-import hashlib
-import json
+from datetime import date
 from tk_dispatcher import TkDispatcher  # Compatibility export; implementation is desktop-only.
 
 from calendar_core import Event, COLORS
 from event_input import build_event_candidate, EventInputError
+from event_commands import BatchPreview
 from calendar_event_service import CalendarEventService, OperationContext
-from event_commands import CommandConflictError
 from event_search import EventSearchIndex, capture_search_store
-from desktop_calendar.assistant.calendar_chat_tools import ChatError, iso_day, fail, validate_call
-
-
-def fingerprint(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+from desktop_calendar.assistant.calendar_chat_protocol import fail, fingerprint as fingerprint
+from desktop_calendar.assistant.calendar_chat_tools import iso_day, validate_call
+from desktop_calendar.assistant.calendar_habit_gateway import prepare_habit
+from desktop_calendar.assistant.operation_engine import deletion_outcome, execute as execute_plan, recovered
 
 
 class CalendarActionGateway:
@@ -143,7 +140,6 @@ class CalendarActionGateway:
 
     def _preview(self, name, args, identifier, previous, message=''):
         if name in ('preview_create_habit', 'preview_update_habit'):
-            from desktop_calendar.assistant.calendar_habit_gateway import prepare_habit
             current = next((r for r in self.store.routines if r.id == identifier and r.kind == 'habit'), None)
             if name == 'preview_update_habit' and current is None:
                 fail('习惯不存在或已删除。', 'habit_not_found')
@@ -206,8 +202,6 @@ class CalendarActionGateway:
             fail('请先关闭当前编辑器或等待数据操作结束，再确认。', 'execution_failed')
         preview = operation['preview']
         if preview.get('object_type') == 'event_batch':
-            from desktop_calendar.assistant.operation_engine import execute
-            from event_commands import BatchPreview
             hashes = [fingerprint(self._state(i)) for i in preview['event_ids']]
             if hashes != preview['before_hashes']:
                 fail('批量目标已变化，请重新预览。', 'operation_conflict')
@@ -215,7 +209,7 @@ class CalendarActionGateway:
             summaries = [self._detail(entry.event()) for entry in entries]
             if summaries != preview['summaries']:
                 fail('事项或日期规则已变化，请重新预览。', 'operation_conflict')
-            outcome = execute(self, journal, 'operation', operation, owner,
+            outcome = execute_plan(self, journal, 'operation', operation, owner,
                               BatchPreview(entries, preview['description']), preview['after'],
                               [item['color'] for item in summaries])
             if outcome.changed:
@@ -252,15 +246,13 @@ class CalendarActionGateway:
             command = self.events.preview_upsert(candidate, label='AI确认事项操作')
             if asdict(command.event()) != preview['after'] or [d.isoformat() for d in command.effective_dates] != preview['dates']:
                 fail('分类或工作日日历已变化，请重新预览。', 'operation_conflict')
-            from desktop_calendar.assistant.operation_engine import execute
-            outcome = execute(self, journal, 'operation', operation, owner, command,
+            outcome = execute_plan(self, journal, 'operation', operation, owner, command,
                               [preview['after']], [preview['after_summary']['color']])
             if outcome.changed:
                 self.refresh(outcome.change)
             return operation['operation_result']
-        from desktop_calendar.assistant.operation_engine import execute
         deletion = self.events.preview_bulk([preview['event_id']], 'delete')
-        outcome = execute(self,journal,'operation',operation,owner,deletion)
+        outcome = execute_plan(self,journal,'operation',operation,owner,deletion)
         if outcome and outcome.change is not None:
             self.refresh(outcome.change)
         return operation['operation_result']
@@ -268,14 +260,11 @@ class CalendarActionGateway:
     def recover(self, operation):
         def check():
             if operation['preview'].get('object_type') == 'event_batch':
-                from desktop_calendar.assistant.operation_engine import recovered
                 return recovered(self, operation, operation['preview']['after'])
             if operation['preview'].get('object_type') == 'habit':
                 item = next((r for r in self.store.routines if r.id == operation['preview']['habit_id']), None)
                 return item is not None and asdict(item) == operation['preview']['after']
             if operation['preview']['after'] is None:
-                from desktop_calendar.assistant.operation_engine import deletion_outcome
                 return deletion_outcome(self,operation,recovered=True)['status'] == 'succeeded'
-            from desktop_calendar.assistant.operation_engine import recovered
             return recovered(self, operation, [operation['preview']['after']])
         return self.dispatch(check)

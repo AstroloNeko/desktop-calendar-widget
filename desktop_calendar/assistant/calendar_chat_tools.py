@@ -3,15 +3,7 @@ import re
 from datetime import date, datetime, timedelta
 
 
-class ChatError(ValueError):
-    def __init__(self, code, message, field=None):
-        super().__init__(message)
-        self.code = code
-        self.field = field
-
-
-def fail(message, code="invalid_arguments", field=None):
-    raise ChatError(code, message, field)
+from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fail
 
 
 def text(limit):
@@ -96,6 +88,12 @@ DESCRIPTIONS = {
     "preview_delete": "仅准备删除一个已明确定位事项的确认预览，必须由用户另行确认，不得自动删除。",
     "clarify": "信息不明确时向用户澄清，尤其日期/时间或相对提醒；不能宣称写入成功。",
 }
+TASK_TOOLS = {'batch_create_events','batch_update_events','batch_set_completion'}
+READ_TOOLS = {'list_categories', 'query_events', 'get_event', 'query_habits', 'get_habit'}
+PROPOSAL_TOOLS = {'preview_create', 'preview_update', 'preview_complete', 'preview_delete', 'preview_create_habit', 'preview_update_habit'}
+PROPOSAL_TOOLS |= TASK_TOOLS
+PROPOSAL_TOOLS.update(('delete_events_batch', 'propose_events','revise_event_target'))
+
 EVENT_ADAPTERS = {'preview_create', 'preview_update', 'preview_complete',
                   'batch_create_events', 'batch_update_events', 'batch_set_completion',
                   'preview_delete', 'delete_events_batch'}
