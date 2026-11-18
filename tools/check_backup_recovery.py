@@ -14,9 +14,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app as entry
-from calendar_storage_lifecycle import StorageLifecycle
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle
 from calendar_event_service import CalendarEventService
-from calendar_sqlite_backup import read_container
+from desktop_calendar.storage.calendar_sqlite_backup import read_container
 from tools.check_interactions import pump, cleanup
 
 

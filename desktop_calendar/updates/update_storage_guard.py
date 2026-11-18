@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 import zipfile
-from calendar_storage_lifecycle import StorageLifecycle, LifecycleError
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle, LifecycleError
 
 
 def profile_root():

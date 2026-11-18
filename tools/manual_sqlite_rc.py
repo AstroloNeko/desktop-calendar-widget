@@ -14,8 +14,8 @@ import sqlite3
 from contextlib import closing
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from calendar_storage_lifecycle import StorageLifecycle
-from calendar_sqlite_backup import read_container
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle
+from desktop_calendar.storage.calendar_sqlite_backup import read_container
 from tools.generate_schema8_fixture import generate
 
 ROOT=Path(__file__).resolve().parents[1]

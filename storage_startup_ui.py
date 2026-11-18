@@ -35,9 +35,9 @@ class StartupDialogs:
 
 
 def offline_recovery(options):
-    from calendar_sqlite_backup import read_container
-    from calendar_storage_lifecycle import digest
-    from calendar_disaster_recovery import disaster_restore
+    from desktop_calendar.storage.calendar_sqlite_backup import read_container
+    from desktop_calendar.storage.calendar_storage_lifecycle import digest
+    from desktop_calendar.storage.calendar_disaster_recovery import disaster_restore
     with StartupDialogs() as dialogs:
         path = filedialog.askopenfilename(parent=dialogs.root, title='离线灾难恢复：选择备份',
             filetypes=(('月历备份', '*.dcalbackup'),))

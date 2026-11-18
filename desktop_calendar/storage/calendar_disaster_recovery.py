@@ -3,9 +3,9 @@ import json
 from pathlib import Path
 import uuid
 
-from calendar_storage_lifecycle import LifecycleError, durable_new, digest, inspect_database
-from calendar_sqlite_backup import read_container
-from calendar_migration import dry_run_migration
+from desktop_calendar.storage.calendar_storage_lifecycle import LifecycleError, durable_new, digest, inspect_database
+from desktop_calendar.storage.calendar_sqlite_backup import read_container
+from desktop_calendar.storage.calendar_migration import dry_run_migration
 from calendar_core import Store
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 

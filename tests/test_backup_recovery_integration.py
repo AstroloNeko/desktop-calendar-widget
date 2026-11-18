@@ -7,11 +7,11 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from calendar_storage_lifecycle import StorageLifecycle, LifecycleError, digest
-from calendar_disaster_recovery import disaster_restore
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle, LifecycleError, digest
+from desktop_calendar.storage.calendar_disaster_recovery import disaster_restore
 from desktop_storage_startup import StartupOptions, open_desktop_storage
 from desktop_backup import export_sqlite, automatic_sqlite_backup
-from calendar_sqlite_backup import read_container
+from desktop_calendar.storage.calendar_sqlite_backup import read_container
 from desktop_calendar.updates.update_storage_guard import check_archive, capabilities
 
 FIXTURE = json.loads((Path(__file__).parent/'fixtures/schema8_v0102.json').read_text(encoding='utf8'))['document']
@@ -168,7 +168,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
 
     def test_archive_failure_never_changes_authority(self):
         self.db.write_bytes(b'broken')
-        with patch('calendar_disaster_recovery.durable_new', side_effect=OSError('disk full')):
+        with patch('desktop_calendar.storage.calendar_disaster_recovery.durable_new', side_effect=OSError('disk full')):
             with self.assertRaises(OSError): self.disaster()
         self.assertEqual(self.manager._read()['epoch'], self.state['epoch'])
         self.assertEqual(self.db.read_bytes(), b'broken')
@@ -178,7 +178,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
             with self.subTest(point=point):
                 active = self.manager._read()
                 (self.root/active['database']).write_bytes(b'broken before crash test')
-                script = "from calendar_storage_lifecycle import StorageLifecycle; from calendar_disaster_recovery import disaster_restore; import sys,os; m=StorageLifecycle(sys.argv[1],isolated=True,checkpoint=lambda p:os._exit(74) if p==sys.argv[3] else None); disaster_restore(m,sys.argv[2],authorize_replacement=True,reminder_replay_reviewed=True)"
+                script = "from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle; from desktop_calendar.storage.calendar_disaster_recovery import disaster_restore; import sys,os; m=StorageLifecycle(sys.argv[1],isolated=True,checkpoint=lambda p:os._exit(74) if p==sys.argv[3] else None); disaster_restore(m,sys.argv[2],authorize_replacement=True,reminder_replay_reviewed=True)"
                 result = subprocess.run([sys.executable,'-c',script,str(self.root),str(self.backup),point],capture_output=True)
                 self.assertEqual(result.returncode,74,result.stderr)
                 if point == 'ARCHIVED':
@@ -222,7 +222,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
     def test_updater_gate_copy_and_restart_are_ordered(self):
         import updater
         from types import SimpleNamespace
-        from calendar_storage_lifecycle import DirectoryLease
+        from desktop_calendar.storage.calendar_storage_lifecycle import DirectoryLease
         source = self.root/'payload';source.mkdir()
         before = self.manager.state_path.read_bytes()
         with tempfile.TemporaryDirectory() as install:

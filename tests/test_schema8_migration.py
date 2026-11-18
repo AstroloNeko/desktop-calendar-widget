@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from calendar_migration import validate_source,dry_run_migration
+from desktop_calendar.storage.calendar_migration import validate_source,dry_run_migration
 from calendar_core import Store
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
@@ -135,14 +135,14 @@ class Schema8Tests(unittest.TestCase):
     def test_unknown_settings_retained(self):
         v=self.validate();self.assertEqual(v._document['settings'],self.data['settings'])
     def test_conversion_is_pure(self):
-        from calendar_legacy_migration import convert_schema8
-        from calendar_migration_validation import ValidationResult
+        from desktop_calendar.storage.calendar_legacy_migration import convert_schema8
+        from desktop_calendar.storage.calendar_migration_validation import ValidationResult
         before=deepcopy(self.data);convert_schema8(self.data,ValidationResult());self.assertEqual(before,self.data)
     def test_source_changed(self):
-        from calendar_migration import _compare_candidate
+        from desktop_calendar.storage.calendar_migration import _compare_candidate
         def change(*args):
             r=_compare_candidate(*args);self.source.write_bytes(b'changed by test');return r
-        with patch('calendar_migration._compare_candidate',side_effect=change):r=self.migrate()
+        with patch('desktop_calendar.storage.calendar_migration._compare_candidate',side_effect=change):r=self.migrate()
         self.assertFalse(r['candidate_ready']);self.assertFalse(r['source_unchanged'])
     def test_equivalent_schema9(self):
         canonical=self.validate()._document

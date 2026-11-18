@@ -9,7 +9,7 @@ from pathlib import Path
 import time
 
 from calendar_core import Store, DATA_DIR
-from calendar_migration_validation import validate_source, MigrationIssue, MODELS
+from desktop_calendar.storage.calendar_migration_validation import validate_source, MigrationIssue, MODELS
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository, encoded
 from desktop_calendar.storage.sqlite_calendar_schema import SCHEMA_VERSION
 

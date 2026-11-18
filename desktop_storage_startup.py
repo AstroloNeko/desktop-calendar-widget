@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 
 from calendar_core import DATA_DIR, Store, DataCompatibilityError
-from calendar_storage_lifecycle import StorageLifecycle, LifecycleError, digest
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle, LifecycleError, digest
 
 # Retain ownership if native shutdown fails; never unlock beneath live producers.
 _QUARANTINED_DESKTOPS = []

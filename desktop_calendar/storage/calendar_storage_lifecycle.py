@@ -16,8 +16,8 @@ import uuid
 _QUARANTINED = {}
 
 from calendar_core import DATA_DIR, Store
-from calendar_migration import dry_run_migration
-from calendar_migration_validation import validate_source, ValidationResult, _validate_document
+from desktop_calendar.storage.calendar_migration import dry_run_migration
+from desktop_calendar.storage.calendar_migration_validation import validate_source, ValidationResult, _validate_document
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from desktop_calendar.storage.sqlite_calendar_schema import APPLICATION_ID, SCHEMA_VERSION
 
@@ -136,7 +136,7 @@ class StorageLifecycle:
 
     def _verify_source(self,state):
         if state['operation']=='disaster_restore':
-            from calendar_disaster_recovery import verify_archive
+            from desktop_calendar.storage.calendar_disaster_recovery import verify_archive
             verify_archive(self, state)
         elif state['operation']=='migration':
             if digest(self._path(state['source']))!=state['source_hash']:raise LifecycleError('source_changed')
@@ -214,7 +214,7 @@ class StorageLifecycle:
         return state,path,SqliteCalendarRepository
 
     def backup(self,destination):
-        from calendar_sqlite_backup import create_sqlite_backup
+        from desktop_calendar.storage.calendar_sqlite_backup import create_sqlite_backup
         with self.lease():
             state,path,factory=self._select()
             if factory is None:raise LifecycleError('sqlite_not_active')
@@ -245,7 +245,7 @@ class StorageLifecycle:
             previous,path,factory=self._select()
             if factory is None:raise LifecycleError('sqlite_not_active')
             if not authorize_replacement:raise LifecycleError('restore_requires_explicit_authorization')
-            from calendar_disaster_recovery import candidate_from_backup
+            from desktop_calendar.storage.calendar_disaster_recovery import candidate_from_backup
             token=uuid.uuid4().hex
             candidate,identity=candidate_from_backup(self,backup,token)
             if expected_backup_hash is not None and digest(backup) != expected_backup_hash:

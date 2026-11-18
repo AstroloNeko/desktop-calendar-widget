@@ -6,7 +6,7 @@ import tempfile
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from tools.check_calendar_migration import sample
-from calendar_storage_lifecycle import StorageLifecycle
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle
 
 if __name__=='__main__':
     for count in (100,1000,10000):

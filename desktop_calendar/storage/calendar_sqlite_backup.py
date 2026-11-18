@@ -10,7 +10,7 @@ import tempfile
 import zipfile
 
 from calendar_core import Store
-from calendar_storage_lifecycle import LifecycleError,inspect_database,durable_new
+from desktop_calendar.storage.calendar_storage_lifecycle import LifecycleError,inspect_database,durable_new
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from version import __version__
 

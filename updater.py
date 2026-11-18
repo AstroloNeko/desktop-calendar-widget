@@ -136,9 +136,9 @@ def main() -> int:
             source = payload_root(extracted)
             from desktop_calendar.updates.update_storage_guard import profile_root
             data_file = profile_root() / "calendar_data.json"
-            from calendar_storage_lifecycle import StorageLifecycle
+            from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle
             from desktop_calendar.updates.update_storage_guard import check_directory
-            from calendar_sqlite_backup import create_sqlite_backup
+            from desktop_calendar.storage.calendar_sqlite_backup import create_sqlite_backup
             manager = StorageLifecycle(data_file.parent, existing_only=True)
             install = args.install_dir.resolve()
             if install == manager.root or install in manager.root.parents or manager.root in install.parents:

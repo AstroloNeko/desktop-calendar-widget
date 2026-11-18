@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import os
 import uuid
-from calendar_sqlite_backup import create_sqlite_backup
+from desktop_calendar.storage.calendar_sqlite_backup import create_sqlite_backup
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 
@@ -38,7 +38,7 @@ def automatic_sqlite_backup(store):
     name = 'sqlite-auto-' + datetime.now(timezone.utc).strftime('%Y%m%d') + '.dcalbackup'
     target = folder / name
     if target.exists():
-        from calendar_sqlite_backup import read_container
+        from desktop_calendar.storage.calendar_sqlite_backup import read_container
         if read_container(target)[2] != 'sqlite':
             raise ValueError('自动备份路径存在非 SQLite 容器，请保留并检查。')
     else:

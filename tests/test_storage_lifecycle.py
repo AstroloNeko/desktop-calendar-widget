@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from calendar_storage_lifecycle import StorageLifecycle,LifecycleError,DirectoryLease
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle,LifecycleError,DirectoryLease
 
 FIXTURE=json.loads((Path(__file__).parent/'fixtures'/'schema8_v0102.json').read_text(encoding='utf8'))['document']
 
@@ -53,7 +53,7 @@ class LifecycleTests(unittest.TestCase):
         for point in ('STAGED','ACTIVATING','PLACED','ACTIVE'):
             with self.subTest(point=point),tempfile.TemporaryDirectory() as folder:
                 root=Path(folder);(root/'calendar_data.json').write_text(json.dumps(FIXTURE))
-                script="from calendar_storage_lifecycle import StorageLifecycle; import os,sys; StorageLifecycle(sys.argv[1],isolated=True,checkpoint=lambda p: os._exit(73) if p==sys.argv[2] else None).migrate()"
+                script="from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle; import os,sys; StorageLifecycle(sys.argv[1],isolated=True,checkpoint=lambda p: os._exit(73) if p==sys.argv[2] else None).migrate()"
                 result=subprocess.run([sys.executable,'-c',script,str(root),point],capture_output=True)
                 self.assertEqual(result.returncode,73,result.stderr)
                 manager=StorageLifecycle(root,isolated=True)
@@ -64,11 +64,11 @@ class LifecycleTests(unittest.TestCase):
         self.manager.checkpoint=change
         with self.assertRaisesRegex(LifecycleError,'source_changed'):self.manager.migrate()
     def test_protection_failure_blocks_start(self):
-        from calendar_storage_lifecycle import durable_new
+        from desktop_calendar.storage.calendar_storage_lifecycle import durable_new
         def fail(path,data):
             if path.name.startswith('original-'):raise OSError('disk full')
             return durable_new(path,data)
-        with patch('calendar_storage_lifecycle.durable_new',side_effect=fail):
+        with patch('desktop_calendar.storage.calendar_storage_lifecycle.durable_new',side_effect=fail):
             with self.assertRaises(OSError):self.manager.migrate()
         with self.assertRaisesRegex(LifecycleError,'recovery_required'):self.manager._select()
     def test_runtime_backup_restore_and_epoch(self):
@@ -104,7 +104,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertIn(identifier,[e['id'] for e in runtime.snapshot()['events']])
     def test_backup_tamper(self):
         import zipfile
-        from calendar_sqlite_backup import read_container
+        from desktop_calendar.storage.calendar_sqlite_backup import read_container
         path=self.root/'bad.dcalbackup'
         with zipfile.ZipFile(path,'w') as z:
             z.writestr('../calendar.sqlite3',b'x');z.writestr('manifest.json','{}')
@@ -130,7 +130,7 @@ class LifecycleTests(unittest.TestCase):
                 root=Path(folder);(root/'calendar_data.json').write_text(json.dumps(FIXTURE))
                 manager=StorageLifecycle(root,isolated=True);manager.migrate()
                 backup=root/'backup.dcalbackup';manager.backup(backup)
-                script="from calendar_storage_lifecycle import StorageLifecycle; import os,sys; StorageLifecycle(sys.argv[1],isolated=True,checkpoint=lambda p: os._exit(74) if p==sys.argv[2] else None).restore(sys.argv[3],authorize_replacement=True)"
+                script="from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle; import os,sys; StorageLifecycle(sys.argv[1],isolated=True,checkpoint=lambda p: os._exit(74) if p==sys.argv[2] else None).restore(sys.argv[3],authorize_replacement=True)"
                 process=subprocess.run([sys.executable,'-c',script,str(root),point,str(backup)],capture_output=True)
                 self.assertEqual(process.returncode,74,process.stderr)
                 with manager.lease():self.assertEqual(manager._select()[0]['state'],'ACTIVE')
@@ -148,7 +148,7 @@ class LifecycleTests(unittest.TestCase):
                 manager.checkpoint=lambda point:None
                 with self.assertRaises((LifecycleError,OSError)):manager.migrate()
     def test_preparing_process_crash_blocks(self):
-        script="from calendar_storage_lifecycle import StorageLifecycle; import os,sys; StorageLifecycle(sys.argv[1],isolated=True,checkpoint=lambda p: os._exit(75) if p=='PREPARING' else None).migrate()"
+        script="from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle; import os,sys; StorageLifecycle(sys.argv[1],isolated=True,checkpoint=lambda p: os._exit(75) if p=='PREPARING' else None).migrate()"
         self.assertEqual(subprocess.run([sys.executable,'-c',script,str(self.root)]).returncode,75)
         with self.assertRaisesRegex(LifecycleError,'recovery_required'):self.manager._select()
         self.manager.abandon_preparation()
@@ -165,13 +165,13 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError,'database_missing'):self.manager._select()
         self.assertFalse(db.exists())
     def test_process_lease(self):
-        script="from calendar_storage_lifecycle import StorageLifecycle,LifecycleError; import sys; m=StorageLifecycle(sys.argv[1],isolated=True); m.migrate()"
+        script="from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle,LifecycleError; import sys; m=StorageLifecycle(sys.argv[1],isolated=True); m.migrate()"
         with self.manager.lease():
             result=subprocess.run([sys.executable,'-c',script,str(self.root)],capture_output=True)
             self.assertNotEqual(result.returncode,0);self.assertIn(b'directory_busy',result.stderr)
     def test_injected_migration_failures(self):
-        points=('calendar_storage_lifecycle.dry_run_migration','calendar_storage_lifecycle.inspect_database',
-                'calendar_storage_lifecycle.os.link','desktop_calendar.storage.sqlite_calendar_repository.SqliteCalendarRepository.backup_to')
+        points=('desktop_calendar.storage.calendar_storage_lifecycle.dry_run_migration','desktop_calendar.storage.calendar_storage_lifecycle.inspect_database',
+                'desktop_calendar.storage.calendar_storage_lifecycle.os.link','desktop_calendar.storage.sqlite_calendar_repository.SqliteCalendarRepository.backup_to')
         for point in points:
             with self.subTest(point=point),tempfile.TemporaryDirectory() as folder:
                 root=Path(folder);source=root/'calendar_data.json';source.write_text(json.dumps(FIXTURE));before=source.read_bytes()
@@ -182,7 +182,7 @@ class LifecycleTests(unittest.TestCase):
                 self.assertNotEqual(manager._read()['state'],'ACTIVE')
     def test_new_backup_manifest_and_member_failures(self):
         import zipfile
-        from calendar_sqlite_backup import read_container
+        from desktop_calendar.storage.calendar_sqlite_backup import read_container
         self.manager.migrate();good=self.root/'good';self.manager.backup(good)
         with zipfile.ZipFile(good) as z:manifest=z.read('manifest.json');data=z.read('calendar.sqlite3')
         for mode in ('hash','version','duplicate','symlink','oversized'):
@@ -197,7 +197,7 @@ class LifecycleTests(unittest.TestCase):
                     z.writestr(info,b'bad' if mode=='hash' else data)
                     if mode=='duplicate':z.writestr('calendar.sqlite3',data)
                 if mode=='oversized':
-                    with patch('calendar_sqlite_backup.LIMIT',1):
+                    with patch('desktop_calendar.storage.calendar_sqlite_backup.LIMIT',1):
                         with self.assertRaises(LifecycleError):read_container(bad)
                 else:
                     with self.assertRaises(LifecycleError):read_container(bad)

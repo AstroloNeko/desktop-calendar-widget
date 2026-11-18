@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from desktop_storage_startup import StartupOptions, open_desktop_storage
-from calendar_storage_lifecycle import StorageLifecycle, LifecycleError, DirectoryLease
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle, LifecycleError, DirectoryLease
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures/schema8_v0102.json').read_text(encoding='utf8'))['document']
@@ -124,7 +124,7 @@ class DesktopStartupTests(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError, 'sqlite_not_active'): manager.restore('unused')
 
     def test_real_directory_rejected_for_isolated_mode(self):
-        with patch('calendar_storage_lifecycle.DATA_DIR', self.root):
+        with patch('desktop_calendar.storage.calendar_storage_lifecycle.DATA_DIR', self.root):
             with self.assertRaisesRegex(LifecycleError, 'explicit_isolated'): self.options.manager()
 
     def test_no_implicit_production_migration(self):
@@ -132,7 +132,7 @@ class DesktopStartupTests(unittest.TestCase):
             StartupOptions(offer_migration=True).manager()
 
     def test_explicit_upgrade_gate_production_path_in_isolated_profile(self):
-        with patch('desktop_storage_startup.DATA_DIR', self.root), patch('calendar_migration.DATA_DIR', self.root):
+        with patch('desktop_storage_startup.DATA_DIR', self.root), patch('desktop_calendar.storage.calendar_migration.DATA_DIR', self.root):
             options = StartupOptions(upgrade_storage=True)
             session = open_desktop_storage(options, confirm=lambda: True)
         self.addCleanup(session.close)

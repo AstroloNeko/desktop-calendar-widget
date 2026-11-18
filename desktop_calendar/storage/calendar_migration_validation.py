@@ -260,7 +260,7 @@ def validate_source(source):
             raw=_decode(data,result)
             source_schema=raw.get('version') if isinstance(raw,dict) else None
             if type(source_schema) is int and source_schema==8:
-                from calendar_legacy_migration import convert_schema8
+                from desktop_calendar.storage.calendar_legacy_migration import convert_schema8
                 raw=convert_schema8(raw,result)
             _validate_document(raw,result)
             result.source['json_schema']=source_schema if type(source_schema) is int else None

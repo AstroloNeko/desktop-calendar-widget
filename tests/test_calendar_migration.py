@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from calendar_core import Event,EventCategory,RoutineItem,Store
-from calendar_migration import validate_source,dry_run_migration
+from desktop_calendar.storage.calendar_migration import validate_source,dry_run_migration
 from desktop_calendar.storage.calendar_repository import RepositoryConflictError
 from habit_schedule import SCHEDULE_FIELDS
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
@@ -40,7 +40,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_managed_user_directory_staging_requires_explicit_confined_parent(self):
         stage=self.root/'stage-explicit-test'
-        with patch('calendar_migration.DATA_DIR',self.root):
+        with patch('desktop_calendar.storage.calendar_migration.DATA_DIR',self.root):
             rejected=dry_run_migration(self.source,stage)
             self.assertFalse(rejected['candidate_ready'])
             rejected=dry_run_migration(self.source,stage,managed_directory=self.root.parent)
@@ -228,15 +228,15 @@ class MigrationTests(unittest.TestCase):
         self.assertTrue(result['source_unchanged'])
 
     def test_integrity_failure(self):
-        with patch('calendar_migration._integrity',side_effect=ValueError('injected')):result=self.run_dry()
+        with patch('desktop_calendar.storage.calendar_migration._integrity',side_effect=ValueError('injected')):result=self.run_dry()
         self.assert_failed_clean(result)
         self.assertEqual(result['issues'][0]['code'],'sqlite_integrity_failure')
 
     def test_source_changed_during_dry_run(self):
-        from calendar_migration import _compare_candidate
+        from desktop_calendar.storage.calendar_migration import _compare_candidate
         def change(*args):
             result=_compare_candidate(*args);self.source.write_bytes(b'changed externally');return result
-        with patch('calendar_migration._compare_candidate',side_effect=change):result=self.run_dry()
+        with patch('desktop_calendar.storage.calendar_migration._compare_candidate',side_effect=change):result=self.run_dry()
         self.assert_failed_clean(result)
         self.assertFalse(result['source_unchanged'])
         self.assertEqual(self.source.read_bytes(),b'changed externally')
@@ -246,26 +246,26 @@ class MigrationTests(unittest.TestCase):
         self.assert_failed_clean(result)
 
     def test_reopen_failed(self):
-        with patch('calendar_migration._reopen_target',side_effect=ValueError('injected')):result=self.run_dry()
+        with patch('desktop_calendar.storage.calendar_migration._reopen_target',side_effect=ValueError('injected')):result=self.run_dry()
         self.assert_failed_clean(result)
         self.assertEqual(result['issues'][0]['code'],'target_reopen_failed')
 
     def test_corrupted_candidate(self):
         def corrupt(repo):
             repo.path.write_bytes(b'corrupted');raise sqlite3.DatabaseError('injected')
-        with patch('calendar_migration._integrity',side_effect=corrupt):result=self.run_dry()
+        with patch('desktop_calendar.storage.calendar_migration._integrity',side_effect=corrupt):result=self.run_dry()
         self.assert_failed_clean(result)
 
     def test_comparison_detects_dropped_record(self):
-        from calendar_migration import _reopen_target
+        from desktop_calendar.storage.calendar_migration import _reopen_target
         def drop(path):
             store=_reopen_target(path);store.events.pop();return store
-        with patch('calendar_migration._reopen_target',side_effect=drop):result=self.run_dry()
+        with patch('desktop_calendar.storage.calendar_migration._reopen_target',side_effect=drop):result=self.run_dry()
         self.assert_failed_clean(result)
         self.assertEqual(result['issues'][0]['code'],'inconsistent_snapshot')
 
     def test_user_data_output_forbidden(self):
-        with patch('calendar_migration.DATA_DIR',self.stage):result=self.run_dry()
+        with patch('desktop_calendar.storage.calendar_migration.DATA_DIR',self.stage):result=self.run_dry()
         self.assertFalse(result['candidate_ready']);self.assertFalse(self.stage.exists())
 
     def test_import_rejects_nonempty_repository(self):
@@ -293,14 +293,14 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(validate_source(self.source).valid)
 
     def test_report_write_failure_removes_candidate(self):
-        from calendar_migration import _write_reports
+        from desktop_calendar.storage.calendar_migration import _write_reports
         calls=0
         def fail(stage,report):
             nonlocal calls
             calls+=1
             if calls==2:raise OSError('injected')
             return _write_reports(stage,report)
-        with patch('calendar_migration._write_reports',side_effect=fail):result=self.run_dry()
+        with patch('desktop_calendar.storage.calendar_migration._write_reports',side_effect=fail):result=self.run_dry()
         self.assert_failed_clean(result)
 
     def test_default_store_remains_json(self):

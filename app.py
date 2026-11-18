@@ -7608,7 +7608,7 @@ def main(arguments=None) -> None:
     enable_dpi_awareness()
     sys.excepthook = log_exception
     from desktop_storage_startup import parse_startup_options, create_desktop_app, stop_desktop_storage
-    from calendar_storage_lifecycle import LifecycleError
+    from desktop_calendar.storage.calendar_storage_lifecycle import LifecycleError
     from storage_startup_ui import StartupDialogs
     options = parse_startup_options(arguments or [])
     try:

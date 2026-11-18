@@ -89,8 +89,8 @@ class BackupActionsMixin:
             return
         if self._sqlite_backup_boundary():
             try:
-                from calendar_sqlite_backup import read_container
-                from calendar_storage_lifecycle import digest
+                from desktop_calendar.storage.calendar_sqlite_backup import read_container
+                from desktop_calendar.storage.calendar_storage_lifecycle import digest
                 fingerprint = digest(filename)
                 manifest, _, _ = read_container(Path(filename))
                 if not self._data_message(messagebox.askyesno,

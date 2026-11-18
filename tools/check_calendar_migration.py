@@ -10,7 +10,7 @@ import tracemalloc
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from calendar_core import Event,RoutineItem,EventCategory
-from calendar_migration import dry_run_migration
+from desktop_calendar.storage.calendar_migration import dry_run_migration
 from habit_schedule import SCHEDULE_FIELDS
 
 

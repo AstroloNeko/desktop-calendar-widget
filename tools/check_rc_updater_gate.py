@@ -15,7 +15,7 @@ import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from tools.check_sqlite_rc_exe import windows,U
 from tools.generate_schema8_fixture import generate
-from calendar_storage_lifecycle import StorageLifecycle
+from desktop_calendar.storage.calendar_storage_lifecycle import StorageLifecycle
 
 
 def main():
