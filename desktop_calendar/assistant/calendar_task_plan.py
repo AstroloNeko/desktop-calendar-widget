@@ -5,6 +5,9 @@ import uuid
 import re
 from datetime import date, timedelta
 
+from desktop_calendar.assistant.operation_engine import execute as execute_plan, recovered
+from desktop_calendar.assistant.operation_plan import member_count
+from desktop_calendar.assistant.calendar_action_gateway import fingerprint
 from calendar_core import COLORS
 from desktop_calendar.assistant.calendar_chat_tools import fail, ChatError
 from event_input import build_event_candidate
@@ -21,17 +24,16 @@ def run_task(service, name, args, session, owner, request_id, source, message):
     args=dict(args)
     if re.search(r'不同颜色|三种颜色|各换一种|随机.*颜色',message):
         args['distinct_colors']=True
-    if not any(word in message for word in ('各','每天','全部','所有','那三个','那一批','这三个','批量','前三个','前面那','三天')):
+    if not member_count(message) and not any(word in message for word in ('各','每天','全部','所有','那三个','那一批','这三个','批量','前三个','前面那','三天')):
         fail('请明确是否操作多个独立事项。','clarification_required')
     if name=='batch_create_events' and '连续' in message and not re.search(r'各|每天.*一次|独立',message):
         fail('连续多日与多个独立事项不同，请明确是否每天各建一个。','clarification_required')
-    if not service.auto_execute or any(word in message for word in ('先预览','不要执行','先别执行','先确认')):
-        fail('批量任务暂不支持仅预览，请明确是否现在执行。','clarification_required')
-    if session.get('pending') and service._pending_status(session, owner) == 'pending':
+    preview_only = not service.auto_execute or any(word in message for word in ('先预览','不要执行','先别执行','先确认'))
+    if session.get('pending') and service._pending_status(session, owner) in ('pending','ready','executing','uncertain'):
         fail('请先确认或取消当前操作。','confirmation_required')
     task_id = secrets.token_urlsafe(24)
     task = dict(task_id=task_id, operation_id=task_id, session_id=session['session_id'], request_id=request_id,
-        operation=name, status='ready', source=source, constraints=args, clarified={}, result=None)
+        operation=name, status='ready', expires=service.clock()+900, source=source, constraints=args, clarified={}, result=None)
     if session.get('active_task'):
         previous=journal.get('task',session['active_task'],owner)
         if previous['status']=='needs_clarification' and previous['operation']==name:
@@ -39,7 +41,7 @@ def run_task(service, name, args, session, owner, request_id, source, message):
             args={**previous['constraints'],**args}
             task['constraints']=args
             task_id=task['task_id']
-        elif previous['status']=='executing':
+        elif previous['status'] in ('executing','uncertain'):
             fail('上一批操作结果待核查，请先核对，不能自动再执行。','execution_uncertain')
     session['active_task']=task_id
     known = {e['id'] for e in session.get('candidates', [])} | set(session.get('recent_task',{}).get('event_ids',[]))
@@ -80,32 +82,42 @@ def run_task(service, name, args, session, owner, request_id, source, message):
         if len(ids)!=len(set(ids)):
             fail('同一批次不能重复修改同一事项。')
         task['event_ids'] = ids
+        task['before_hashes'] = [fingerprint(gateway._state(i)) for i in ids]
         task['expected'] = [asdict(e.event()) for e in entries]
         return gateway.events.preview_create_many([e.event() for e in entries]) if name=='batch_create_events' else BatchPreview(tuple(entries),'AI批量修改事项')
     def execute():
         preview = prepare()
+        if preview_only:
+            entries = preview.entries
+            batch = dict(object_type='event_batch', creation=name=='batch_create_events', description='批量事项操作', event_id=task['event_ids'][0],
+                         event_ids=task['event_ids'], after=task['expected'], before=None,
+                         before_hashes=task['before_hashes'],
+                         summaries=[gateway._detail(entry.event()) for entry in entries])
+            op = dict(operation_id=task_id, session_id=session['session_id'], request_id=request_id,
+                      preview=batch, status='pending', requires_confirmation=True, revision=secrets.token_urlsafe(24),
+                      expires=service.clock()+900)
+            journal.put('operation',task_id,owner,op)
+            session['pending']=task_id
+            session.pop('active_task',None)
+            return op
         journal.put('task',task_id,owner,task)
-        task['status']='executing'
-        journal.put('task',task_id,owner,task)
-        journal.put('audit',task_id,owner,dict(task_id=task_id,session_id=task['session_id'],request_id=request_id,
-            source=source,action=name,status='executing',event_ids=task['event_ids']))
-        # Any uncertain exception after this point forbids blind replay.
-        result = gateway.events.commit(preview)
-        actual = [gateway._detail(gateway.store.event_by_id(i)) for i in task['event_ids']]
-        task.update(status='completed',result=dict(task_id=task_id,events=actual,event_ids=task['event_ids'],changed=result.changed))
-        journal.put('task',task_id,owner,task)
-        return result
+        colors = [gateway.store.effective_event_color(entry.event()) for entry in preview.entries]
+        return execute_plan(gateway, journal, 'task', task, owner, preview, task['expected'], colors)
     try:
         result = gateway.dispatch(execute)
     except Exception as error:
         # Keep executing durable intent if commit/result publication is uncertain.
-        if task['status']=='ready' or isinstance(error,EventOperationError):
+        if getattr(error,'code',None) == 'claim_conflict':
+            raise
+        if task['status']=='ready' or isinstance(error,(ChatError,EventOperationError)) and error.code != 'execution_uncertain':
             task.update(status='needs_clarification' if isinstance(error,ChatError) and error.code=='clarification_required' else 'failed',error_code=getattr(error,'code','validation_failed'))
             journal.put('task',task_id,owner,task)
             if isinstance(error,ChatError):
                 raise
             fail('批量操作未保存，请检查输入后重试。','execution_failed')
         fail('批量操作结果待核查，请勿重复创建。','execution_uncertain')
+    if preview_only:
+        return result
     session['recent_task'] = dict(task_id=task_id,event_ids=task['event_ids'],events=task['result']['events'])
     session['selected_kind']='event'
     session['selected']=task['event_ids'][-1]
@@ -127,15 +139,31 @@ def run_task(service, name, args, session, owner, request_id, source, message):
 
 
 def recover_task(service, task, owner):
-    """Observe only. An uncertain task is never resubmitted automatically."""
-    if task['status']=='executing':
-        matches = service.gateway.dispatch(lambda: all(
-            (event := service.gateway.store.event_by_id(item['id'])) is not None and asdict(event)==item
-            for item in task['expected']))
+    """Resume authorized ready plans; reconcile executing plans by observation only."""
+    if task['status']=='ready' and service.clock() > task.get('expires', float('inf')):
+        task.update(status='expired', error_code='operation_expired')
+        service.journal.transition('task', task['task_id'], owner, {'status':'ready'}, task)
+    if task['status']=='ready' and 'before_hashes' in task:
+        def resume():
+            gateway = service.gateway
+            if not gateway.writable():
+                return
+            if [fingerprint(gateway._state(i)) for i in task['event_ids']] != task['before_hashes']:
+                task.update(status='failed', error_code='operation_conflict')
+                service.journal.transition('task', task['task_id'], owner, {'status':'ready'}, task)
+                return
+            from calendar_core import Event
+            entries = tuple(gateway.events.preview_upsert(Event(**snapshot)) for snapshot in task['expected'])
+            execute_plan(gateway, service.journal, 'task', task, owner, BatchPreview(entries,'AI批量事项'),
+                         task['expected'], [gateway.store.effective_event_color(e.event()) for e in entries])
+        service.gateway.dispatch(resume)
+    if task['status'] in ('executing','uncertain'):
+        matches = service.gateway.dispatch(lambda: recovered(service.gateway, task, task['expected']))
         if matches:
             events=service.gateway.dispatch(lambda: [service.gateway.detail(i) for i in task['event_ids']])
             task.update(status='completed',result=dict(task_id=task['task_id'],event_ids=task['event_ids'],events=events,recovered=True))
             service.journal.put('task',task['task_id'],owner,task)
         else:
-            task['error_code']='execution_uncertain'
+            task.update(status='uncertain', error_code='execution_uncertain')
+            service.journal.put('task',task['task_id'],owner,task)
     return task

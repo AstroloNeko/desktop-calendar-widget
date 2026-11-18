@@ -213,6 +213,7 @@ class ChatDialog(tk.Toplevel):
             self.transcript.configure(state='disabled')
             for item in response['messages']:
                 self.append(('你：' if item['role'] == 'user' else '助理：')+item['content'])
+        self.selection_revision = response.get('selection_revision')
         self.candidates = response.get('habit_candidates') or response.get('candidates', [])
         self.candidate.configure(values=[f"{i+1}. {item['title']} · {item.get('schedule') or item.get('date', '')}" for i, item in enumerate(self.candidates)])
         self.candidate.set('')
@@ -241,10 +242,16 @@ class ChatDialog(tk.Toplevel):
             event = response['operation_result'].get('event')
             self.append('✓ 已'+('更新' if response['operation_result'].get('action') == 'updated' else '创建')+'习惯「'+habit['title']+'」· '+habit['schedule'] if habit else
                         '系统：已删除事项。' if response['operation_result'].get('deleted') else
-                        '系统：已实际保存“'+event['title']+'”，日期 '+event['date']+'。' if event else '系统：已核对已执行操作，不重复写入。')
+                        ('系统：已核实修改' if response['operation_result'].get('changed') else '系统：已核实当前状态')+
+                        f"「{event['title']}」 · {event['date']} · 有效颜色 {event['color']}。" if event else '系统：已核对已执行操作，不重复写入。')
         self.input.focus_set()
 
     def render_operation(self, operation):
+        if operation['preview'].get('object_type') == 'event_batch':
+            self.append('待确认批量事项\n' + '\n'.join(
+                f"{item['date']} · {item['title']} · {item['color']} · " +
+                ('已完成' if item['done'] else '未完成') for item in operation['preview']['summaries']))
+            return
         if operation['preview'].get('object_type')=='batch_delete':
             rows=operation['preview']['before']
             self.append('待删除完整清单 · '+str(len(rows))+'项\n'+'\n'.join(
@@ -292,7 +299,8 @@ class ChatDialog(tk.Toplevel):
         index = self.candidate.current()
         if index >= 0 and not self.busy:
             identifier, sid = self.candidates[index]['id'], self.session_id
-            self.request(lambda: self.runtime.service.select_candidate(sid, identifier))
+            revision = self.selection_revision
+            self.request(lambda: self.runtime.service.select_candidate(sid, identifier, revision=revision))
 
     def confirm(self):
         if self.operation and not self.busy:

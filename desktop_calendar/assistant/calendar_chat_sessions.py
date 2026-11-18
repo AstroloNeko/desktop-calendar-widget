@@ -53,6 +53,21 @@ class ChatJournal:
             db.execute('INSERT INTO records VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET payload=excluded.payload WHERE owner=excluded.owner',
                        (kind, identifier, owner, encrypted))
 
+    def transition(self, kind, identifier, owner, before, after):
+        """Compare state and preview revision inside a single SQLite write transaction."""
+        with self.lock, self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT payload FROM records WHERE kind=? AND id=? AND owner=?',
+                             (kind, identifier, owner)).fetchone()
+            current = json.loads(self.protector.decrypt(row[0])) if row else {}
+            if not row or any(current.get(key) != value for key, value in before.items()):
+                raise ChatError('operation_conflict', '操作已更新，请查看当前结果。')
+            raw = json.dumps(after, ensure_ascii=False, allow_nan=False).encode()
+            if len(raw) > 512_000:
+                raise ChatError('capacity_exceeded', '操作记录过长。')
+            db.execute('UPDATE records SET payload=? WHERE kind=? AND id=? AND owner=?',
+                       (self.protector.encrypt(raw), kind, identifier, owner))
+
     def all(self, kind, owner):
         with self.lock, self.connect() as db:
             rows = db.execute('SELECT id FROM records WHERE kind=? AND owner=?', (kind, owner)).fetchall()

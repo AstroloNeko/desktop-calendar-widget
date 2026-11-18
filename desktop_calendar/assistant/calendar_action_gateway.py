@@ -200,6 +200,22 @@ class CalendarActionGateway:
         if not self.writable():
             fail('请先关闭当前编辑器或等待数据操作结束，再确认。', 'execution_failed')
         preview = operation['preview']
+        if preview.get('object_type') == 'event_batch':
+            from desktop_calendar.assistant.operation_engine import execute
+            from event_commands import BatchPreview
+            hashes = [fingerprint(self._state(i)) for i in preview['event_ids']]
+            if hashes != preview['before_hashes']:
+                fail('批量目标已变化，请重新预览。', 'operation_conflict')
+            entries = tuple(self.events.preview_upsert(Event(**item)) for item in preview['after'])
+            summaries = [self._detail(entry.event()) for entry in entries]
+            if summaries != preview['summaries']:
+                fail('事项或日期规则已变化，请重新预览。', 'operation_conflict')
+            outcome = execute(self, journal, 'operation', operation, owner,
+                              BatchPreview(entries, preview['description']), preview['after'],
+                              [item['color'] for item in summaries])
+            if outcome.changed:
+                self.refresh(outcome.change)
+            return operation['operation_result']
         if preview.get('object_type') == 'habit':
             from calendar_core import RoutineItem
             current = next((r for r in self.store.routines if r.id == preview['habit_id']), None)
@@ -229,15 +245,20 @@ class CalendarActionGateway:
             command = self.events.preview_upsert(candidate, label='AI确认事项操作')
             if asdict(command.event()) != preview['after'] or [d.isoformat() for d in command.effective_dates] != preview['dates']:
                 fail('分类或工作日日历已变化，请重新预览。', 'operation_conflict')
+            from desktop_calendar.assistant.operation_engine import execute
+            outcome = execute(self, journal, 'operation', operation, owner, command,
+                              [preview['after']], [preview['after_summary']['color']])
+            if outcome.changed:
+                self.refresh(outcome.change)
+            return operation['operation_result']
         operation['status'] = 'executing'
         journal.put('operation', operation['operation_id'], owner, operation)
         try:
-            outcome = self.events.delete(preview['event_id']) if deleting else self.events.commit(command)
+            outcome = self.events.delete(preview['event_id'])
             change = outcome.change
         except (OSError, ValueError) as error:
             raise ChatError('execution_failed', '日历保存未成功，未应用此修改。') from error
-        result = dict(event=None if deleting else self._detail(self.store.event_by_id(preview['event_id'])),
-                      deleted=deleting, event_id=preview['event_id'], changed=change is not None)
+        result = dict(event=None, deleted=True, event_id=preview['event_id'], changed=change is not None)
         operation.update(status='succeeded', operation_result=result)
         # If this write fails, durable 'executing' remains; recovery NEVER replays it.
         journal.put('operation', operation['operation_id'], owner, operation)
@@ -247,11 +268,15 @@ class CalendarActionGateway:
 
     def recover(self, operation):
         def check():
+            if operation['preview'].get('object_type') == 'event_batch':
+                from desktop_calendar.assistant.operation_engine import recovered
+                return recovered(self, operation, operation['preview']['after'])
             if operation['preview'].get('object_type') == 'habit':
                 item = next((r for r in self.store.routines if r.id == operation['preview']['habit_id']), None)
                 return item is not None and asdict(item) == operation['preview']['after']
             event = self.store.event_by_id(operation['preview']['event_id'])
             if operation['preview']['after'] is None:
                 return event is None
-            return event is not None and asdict(event) == operation['preview']['after']
+            from desktop_calendar.assistant.operation_engine import recovered
+            return recovered(self, operation, [operation['preview']['after']])
         return self.dispatch(check)

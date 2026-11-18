@@ -523,11 +523,12 @@ class Store:
         *,
         index: Optional[int],
         notification_keys: Collection[str],
+        operation_id=None,
     ) -> None:
         """Replace one task using the same transaction as grouped commands."""
-        self.persist_event_states([(event_id, event, index, notification_keys)])
+        self.persist_event_states([(event_id, event, index, notification_keys)], operation_id=operation_id)
 
-    def persist_event_states(self, states: Collection[tuple[str, Optional[Event], Optional[int], Collection[str]]]) -> None:
+    def persist_event_states(self, states: Collection[tuple[str, Optional[Event], Optional[int], Collection[str]]], *, operation_id=None) -> None:
         """Publish an entire prevalidated event command with exactly one save."""
         states = list(states)
         if not states:
@@ -547,7 +548,7 @@ class Store:
         prefixes = tuple(identifier + ":" for identifier in ids)
         notifications = {key for key in self.notified if not key.startswith(prefixes)}
         notifications.update(key for _id, _event, _index, keys in states for key in keys)
-        self._commit_fields(events=replacement, notified=notifications)
+        self._commit_fields(events=replacement, notified=notifications, operation_id=operation_id)
 
     def duration_for_range(self, start: date, end: date, *, skip_non_working_days: bool = False) -> int:
         """Convert a resize endpoint into the same effective-day count used by Event."""
@@ -655,8 +656,10 @@ class Store:
                 old.__dict__.update(candidate.__dict__)
         self.events = originals
 
-    def _commit_fields(self, **candidates) -> bool:
+    def _commit_fields(self, *, operation_id=None, **candidates) -> bool:
         """Legacy algorithm bridge to the single repository transaction boundary."""
+        if operation_id and callable(getattr(self.repository, "receipt", None)):
+            return self.repository.apply_changes(candidates, operation_id=operation_id).changed
         return self.repository.apply_changes(candidates).changed
 
     def effective_event_color(self, event: Event) -> str:

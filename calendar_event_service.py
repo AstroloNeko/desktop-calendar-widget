@@ -108,12 +108,13 @@ class CalendarEventService:
             raise EventOperationError('operation_conflict', '新建事项ID已存在。')
         return BatchPreview(tuple(self.preview_upsert(e) for e in events), '批量新建事项')
 
-    def commit(self, preview):
+    def commit(self, preview, *, operation_id=None):
         if not isinstance(preview, (EventPreview, BatchPreview)):
             raise EventOperationError('invalid_preview', '事项预览无效。')
         batch = isinstance(preview, BatchPreview)
         ids = tuple(e.event_id for e in preview.entries) if batch else (preview.event_id,)
-        change = self._call(lambda: self.history.commit_bulk(preview) if batch else self.history.commit(preview))
+        commit = self.history.commit_bulk if batch else self.history.commit
+        change = self._call(lambda: commit(preview, operation_id=operation_id))
         return self._result('batch' if batch else 'commit', change, ids)
 
     def upsert(self, event, **options):

@@ -96,8 +96,19 @@ DESCRIPTIONS = {
     "preview_delete": "仅准备删除一个已明确定位事项的确认预览，必须由用户另行确认，不得自动删除。",
     "clarify": "信息不明确时向用户澄清，尤其日期/时间或相对提醒；不能宣称写入成功。",
 }
+EVENT_ADAPTERS = {'preview_create', 'preview_update', 'preview_complete',
+                  'batch_create_events', 'batch_update_events', 'batch_set_completion'}
+PLAN_ITEM = obj({'event_id': text(100), 'fields': obj(FIELDS), 'done': {'type':'boolean'}})
+SCHEMAS['propose_events'] = obj({
+    'action': {'type':'string', 'enum':['create','update','complete']},
+    'items': {'type':'array', 'minItems':1, 'maxItems':10, 'items':PLAN_ITEM},
+    'distinct_colors': {'type':'boolean'}
+}, ('action','items'))
+DESCRIPTIONS['propose_events'] = ('提交一个完整的同类事项计划。create 每个成员含 fields(title,date,...)；'
+    'update 每个成员含 event_id 和 fields(只含修改值)；complete 含 event_id 和 done。'
+    '多个独立事项必须列全。歧义时先查找或澄清，宿主管理确认和执行。')
 TOOLS = [{"type": "function", "function": {"name": name, "description": DESCRIPTIONS[name], "parameters": schema}}
-         for name, schema in SCHEMAS.items()]
+         for name, schema in SCHEMAS.items() if name not in EVENT_ADAPTERS]
 
 
 def validate(value, schema, path='arguments'):

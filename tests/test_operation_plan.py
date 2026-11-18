@@ -1,0 +1,117 @@
+"""Exercise plan lifetimes through the same service used by desktop and HTTP."""
+from datetime import date, timedelta
+from unittest import TestCase
+from unittest.mock import patch
+
+import test_calendar_chat as fixture
+from calendar_core import Store
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.assistant.calendar_action_gateway import CalendarActionGateway
+from desktop_calendar.assistant.calendar_chat_service import CalendarChatService
+from desktop_calendar.assistant.calendar_chat_tools import ChatError
+from event_commands import EventCommandHistory
+
+
+def propose(action, *members):
+    return fixture.tool('propose_events', dict(action=action, items=list(members)))
+
+
+class EventPlanTests(TestCase):
+    setUp = fixture.ChatTests.setUp
+    send = fixture.ChatTests.send
+
+    def batch(self):
+        return propose('create', *[dict(fields=dict(title='WB实验', date=day)) for day in
+                                   ('2026-11-18','2026-11-19')])
+
+    def test_transcript_batch_then_color_then_observe(self):
+        self.service.auto_execute = True
+        self.send([fixture.tool('clarify', {'question':'跨日还是两个独立事项？'})],
+                  '明天后天加WB实验','clarify-dates')
+        dates = [(date.today()+timedelta(days=n)).isoformat() for n in (1,2)]
+        proposal = propose('create', *[dict(fields=dict(title='WB实验', date=d)) for d in dates])
+        created = self.send([proposal], '两个独立实验', 'create-independent')
+        first, second = created['operation_result']['events']
+        change = propose('update',dict(event_id=second['id'], fields={'color':second['color']}))
+        reply = self.send([fixture.tool('query_events', {'keyword':'WB实验'}),change],
+                          f"{second['date']} 的WB实验换个颜色，随便换啥都行",'change-random-color')
+        self.assertNotEqual(reply['operation_result']['event']['color'], second['color'])
+        check = self.send([], '那你看看换颜色了吗','check-result')
+        self.assertIn(reply['operation_result']['event']['color'], check['assistant_message'])
+        stale = self.send([], '确认','stale-confirm')
+        self.assertIsNone(stale['operation_result'])
+        self.assertEqual(self.gateway.detail(first['id'])['color'],first['color'])
+
+    def test_one_member_cannot_discharge_two(self):
+        result = self.send([propose('create', dict(fields=dict(title='WB实验',date='2026-11-19')))],
+                           '建两个独立实验','truncated-plan')
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(self.commands.undo_count,0)
+        self.assertIsNone(result['pending_operation'])
+
+    def test_restart_and_displayed_candidate_preserve_patch(self):
+        response = self.send([fixture.tool('query_events',dict(keyword='组会')),
+                              propose('update', dict(event_id='event-one',fields=dict(color='#52B788', reminder=30)))],
+                             '组会换成薄荷绿，提前30分钟提醒','prepare-choice')
+        self.assertEqual(response['status'],'clarification_required')
+        self.service = CalendarChatService(self.gateway,self.journal,self.provider, clock=lambda:self.clock)
+        result = self.send([], '2. 项目组会','select-visible-row')
+        event = result['operation_result']['event']
+        self.assertEqual((event['id'],event['color'],event['reminder']),('event-two','#52B788',30))
+
+    def test_batch_preview_revision_and_confirm(self):
+        prepared = self.send([self.batch()], '先预览两个独立实验','preview-batch')
+        op = prepared['pending_operation']
+        self.assertEqual(self.commands.undo_count,0)
+        with self.assertRaises(ChatError):
+            self.service.confirm_operation(self.sid,op['operation_id'],revision='old')
+        result = self.service.confirm_operation(self.sid,op['operation_id'],revision=op['revision'])
+        self.assertEqual(len(result['operation_result']['events']),2)
+        self.assertEqual(self.commands.undo_count,1)
+
+    def test_cancel_ready_before_claim_never_writes(self):
+        prepared = self.send([propose('create',dict(fields=dict(title='WB',date='2026-11-19')))],
+                             '先预览 WB','ready-cancel')
+        op = prepared['pending_operation']
+        op['status'] = 'ready'
+        self.journal.put('operation',op['operation_id'],fixture.OWNER,op)
+        self.assertEqual(self.service.get_operation_result(self.sid,op['operation_id'])['status'],'ready')
+        self.assertEqual(self.service.cancel_operation(self.sid,op['operation_id'])['status'],'cancelled')
+        self.assertEqual(self.commands.undo_count,0)
+
+    def test_wrong_member_dates_rejected_before_writing(self):
+        self.service.auto_execute = True
+        self.send([fixture.tool('clarify', {'question':'每天各一条吗？'})],'明天后天加WB实验','ask-members')
+        wrong = dict(fields=dict(title='WB实验',date='2001-01-01'))
+        result = self.send([propose('create',wrong,wrong)],'两个独立实验','wrong-day')
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(self.commands.undo_count,0)
+
+    def test_expired_choice_cannot_execute(self):
+        response = self.send([fixture.tool('query_events',dict(keyword='组会')),
+                              propose('update',dict(event_id='event-one',fields=dict(color='#52B788')))],
+                             '组会换成薄荷绿','await-expiry')
+        self.clock += 901
+        result = self.service.select_candidate(self.sid,'event-two',revision=response['selection_revision'])
+        self.assertEqual(result['status'],'expired')
+        self.assertEqual(self.commands.undo_count,0)
+
+    def test_sqlite_receipt_after_lost_publication(self):
+        store = Store(self.root/'events.sqlite3',repository_factory=SqliteCalendarRepository)
+        self.addCleanup(store.repository.close)
+        history = EventCommandHistory(store)
+        gateway = CalendarActionGateway(store,history)
+        self.service = CalendarChatService(gateway,self.journal,self.provider,clock=lambda:self.clock)
+        original = self.journal.put
+        def lost(kind, identifier, owner, record):
+            if kind == 'task' and record['status']=='completed':
+                raise OSError('receipt publication interrupted')
+            return original(kind,identifier,owner,record)
+        with patch.object(self.journal,'put',side_effect=lost):
+            result = self.send([self.batch()],'创建两个独立实验','lost-receipt')
+        task_id = result['task']['task_id']
+        self.assertIsNotNone(store.repository.receipt(task_id))
+        self.service = CalendarChatService(gateway,self.journal,self.provider)
+        self.assertEqual(self.service.get_task(self.sid, task_id)['status'],'completed')
+        self.assertEqual(len(store.events),2)
+        self.assertEqual(history.undo_count,1)

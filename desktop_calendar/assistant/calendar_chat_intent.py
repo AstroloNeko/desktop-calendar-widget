@@ -5,6 +5,7 @@ silently becoming a patch: optional fields need explicit user intent signals.
 Unknown phrasing is clarified rather than applied to unrelated fields.
 """
 import re
+from calendar_core import COLORS
 
 
 def requested_fields(message, creating=False):
@@ -19,8 +20,8 @@ def requested_fields(message, creating=False):
         # words as extra instructions in a rename. Explicit time/type values
         # after generic 改为/改成 remain ordinary field changes.
         generic_value = re.fullmatch(r'[红黄绿蓝紫橙]色|跟随分类颜色|持续\d+天|紧急|一般|普通|ddl|urgent|general|(?:上午|下午|晚上)?[\d一二三四五六七八九十两]+点(?:半)?|\d{1,2}:\d{2}|明天|后天|今天|\d{1,2}[./-]\d{1,2}|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}[日号]?', first.strip())
-        generic_change = bool(generic_value)
-        if rename.group() not in ('改成', '改为') or not generic_value:
+        generic_change = bool(generic_value) or first.strip() in COLORS
+        if rename.group() not in ('改成', '改为') or not generic_change:
             fields.add('title')
             text = rest[0] if rest else ''
     signals = {
@@ -36,6 +37,8 @@ def requested_fields(message, creating=False):
         'color_mode': r'跟随.{0,4}(?:分类|颜色)|颜色跟.{0,12}分类|继承.{0,4}颜色|独立颜色|单独颜色|颜色来源|color.mode',
         'notes': r'备注|补充说明|附注|notes?',
     }
+    if any(name in text for name in COLORS):
+        fields.add("color")
     for key, pattern in signals.items():
         if re.search(pattern, text):
             fields.add(key)
