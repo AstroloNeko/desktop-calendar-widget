@@ -15,7 +15,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from calendar_core import Store, Event, EventCategory, COLORS
 from event_commands import EventCommandHistory
-from calendar_action_gateway import CalendarActionGateway
+from desktop_calendar.assistant.calendar_action_gateway import CalendarActionGateway
 from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
 from desktop_calendar.assistant.calendar_chat_service import CalendarChatService
 from desktop_calendar.assistant.calendar_chat_tools import ChatError

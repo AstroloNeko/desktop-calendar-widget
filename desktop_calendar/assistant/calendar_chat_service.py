@@ -8,10 +8,10 @@ import threading
 import time
 import uuid
 
-from calendar_action_gateway import fingerprint
+from desktop_calendar.assistant.calendar_action_gateway import fingerprint
 from desktop_calendar.assistant.calendar_chat_tools import ChatError, TOOLS, SCHEMAS, validate_call, request_context, fail
 from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
-from calendar_task_plan import TASK_TOOLS, run_task, recover_task
+from desktop_calendar.assistant.calendar_task_plan import TASK_TOOLS, run_task, recover_task
 
 OWNER = 'local-owner'  # Derived from the adapter's authentication, never client sender_id.
 READ_TOOLS = {'list_categories', 'query_events', 'get_event', 'query_habits', 'get_habit'}
@@ -126,7 +126,7 @@ class CalendarChatService:
             if op['status'] != 'pending':
                 return self.get_operation_result(session_id, operation_id, owner)
             if op['preview'].get('object_type')=='batch_delete':
-                from calendar_batch_delete import confirm
+                from desktop_calendar.assistant.calendar_batch_delete import confirm
                 return confirm(self,op,owner,revision,automatic)
             if revision is not None and revision != op['revision']:
                 fail('预览已经更新，请查看最新卡片后再确认。', 'operation_conflict')
@@ -187,12 +187,12 @@ class CalendarChatService:
         validate_call(name, args)
         args = deepcopy(args)
         if name=='delete_events_batch':
-            from calendar_batch_delete import prepare
+            from desktop_calendar.assistant.calendar_batch_delete import prepare
             if not session.get('delete_intent'):
                 fail('请先明确批量删除范围。','clarification_required')
             return prepare(self,session,args['event_ids'],owner,request_id)
         if name=='preview_delete' and session.get('batch_delete_intent') and session.get('delete_scope'):
-            from calendar_batch_delete import prepare
+            from desktop_calendar.assistant.calendar_batch_delete import prepare
             return prepare(self,session,session['delete_scope']['ids'],owner,request_id)
         if name in TASK_TOOLS:
             task = run_task(self,name,args,session,owner,request_id,source,message)
@@ -219,7 +219,7 @@ class CalendarChatService:
             session['habit_intent'] = message
             return envelope(session['session_id'], request_id, status='clarification_required',
                 habit_candidates=session.get('habit_candidates', []), assistant_message='请明确选择要修改的习惯。')
-        from calendar_habit_gateway import habit_intent
+        from desktop_calendar.assistant.calendar_habit_gateway import habit_intent
         ordinary = bool(re.search(r'普通(?:事项|日程)|一次性|不.*习惯', message))
         if session.get('selected_kind') == 'habit' and name in ('get_event', 'preview_update', 'preview_complete', 'preview_delete') and args.get('event_id') == session['selected']:
             fail('这是Habit ID，不能用于Event工具；请在习惯清单中修改。', 'clarification_required')
@@ -449,7 +449,7 @@ class CalendarChatService:
             scope=session.get('delete_scope')
             if not scope:
                 return envelope(session['session_id'],request_id,status='clarification_required',assistant_message='没有有效删除清单，请指定标题和起止日期；不会选择整个日历。')
-            from calendar_batch_delete import prepare
+            from desktop_calendar.assistant.calendar_batch_delete import prepare
             return prepare(self,session,scope['ids'],owner,request_id)
         if session.get('batch_delete_intent') and session.get('delete_title') and (re.search(r'删|移除',message) or len(re.findall(r'\d{4}-\d{2}-\d{2}',message))==2):
             dates=re.findall(r'\d{4}-\d{2}-\d{2}',message)
@@ -466,7 +466,7 @@ class CalendarChatService:
                 session,owner,request_id,source,message=message,diagnostic=diagnostic)
             if not result['total']:
                 return envelope(session['session_id'],request_id,status='ok',assistant_message='该日期范围内没有精确匹配标题的事项，未删除任何内容。')
-            from calendar_batch_delete import prepare
+            from desktop_calendar.assistant.calendar_batch_delete import prepare
             return prepare(self,session,session['delete_scope']['ids'],owner,request_id)
         recent = session.get('recent_task')
         if recent and (not session.get('active_task') or self.journal.get('task',session['active_task'],owner)['status']=='completed') and message.strip() in ('继续','继续添加'):

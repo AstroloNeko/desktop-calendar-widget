@@ -46,7 +46,7 @@ class HabitChatTests(unittest.TestCase):
         self.assertEqual(self.store.routines[0].color, COLORS['鸢尾紫'])
 
     def test_next_monday_from_friday(self):
-        with patch('calendar_habit_gateway.date') as clock:
+        with patch('desktop_calendar.assistant.calendar_habit_gateway.date') as clock:
             clock.today.return_value = date(2026, 11, 13)
             clock.side_effect = date
             result = self.habit('每周一开组会', 'weekly', weekdays=[0])
@@ -70,7 +70,7 @@ class HabitChatTests(unittest.TestCase):
         for phrase in ('每个月15号交月报', '每月15号交月报'):
             result = self.habit(phrase, 'monthly', month_day=15)
             self.assertEqual(result['status'], 'succeeded')
-        with patch('calendar_habit_gateway.date') as clock:
+        with patch('desktop_calendar.assistant.calendar_habit_gateway.date') as clock:
             clock.today.return_value = date(2026, 11, 13)
             clock.side_effect = date
             for phrase, expected in [('明天开始', '2026-11-14'), ('下周开始', '2026-11-16'), ('下个月开始', '2026-12-01')]:

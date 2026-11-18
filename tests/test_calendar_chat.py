@@ -14,7 +14,7 @@ import urllib.request
 
 from calendar_core import Event, EventCategory, Store
 from event_commands import EventCommandHistory
-from calendar_action_gateway import CalendarActionGateway, fingerprint, TkDispatcher
+from desktop_calendar.assistant.calendar_action_gateway import CalendarActionGateway, fingerprint, TkDispatcher
 from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
 from desktop_calendar.assistant.calendar_chat_service import CalendarChatService, OWNER
 from desktop_calendar.assistant.calendar_chat_tools import ChatError, SCHEMAS, request_context, validate_call

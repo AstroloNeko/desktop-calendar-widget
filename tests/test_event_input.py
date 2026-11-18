@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from app import EventEditor, parse_event_due
 from calendar_core import Event, EventCategory, Store, COLORS
-from calendar_action_gateway import CalendarActionGateway
+from desktop_calendar.assistant.calendar_action_gateway import CalendarActionGateway
 from desktop_calendar.assistant.calendar_chat_tools import ChatError
 from event_commands import EventCommandHistory
 from event_input import build_event_candidate, EventInputError

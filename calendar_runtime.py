@@ -12,7 +12,7 @@ from calendar_core import Store
 from event_commands import EventCommandHistory
 from calendar_event_service import CalendarEventService
 from calendar_mutation_service import CalendarMutationService
-from calendar_action_gateway import CalendarActionGateway
+from desktop_calendar.assistant.calendar_action_gateway import CalendarActionGateway
 from desktop_calendar.assistant.calendar_chat_service import CalendarChatService
 from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
 from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP

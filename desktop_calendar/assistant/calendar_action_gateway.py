@@ -139,7 +139,7 @@ class CalendarActionGateway:
 
     def _preview(self, name, args, identifier, previous, message=''):
         if name in ('preview_create_habit', 'preview_update_habit'):
-            from calendar_habit_gateway import prepare_habit
+            from desktop_calendar.assistant.calendar_habit_gateway import prepare_habit
             current = next((r for r in self.store.routines if r.id == identifier and r.kind == 'habit'), None)
             if name == 'preview_update_habit' and current is None:
                 fail('习惯不存在或已删除。', 'habit_not_found')

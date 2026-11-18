@@ -14,7 +14,7 @@ class TaskPlanTests(TestCase):
     def create(self, request='batch-create-request'):
         self.service.auto_execute=True
         items=[dict(title='WB实验',date=f'2026-11-{day}') for day in (15,16,17)]
-        with patch('calendar_task_plan.date') as today:
+        with patch('desktop_calendar.assistant.calendar_task_plan.date') as today:
             today.today.return_value=date(2026,11,14)
             return self.send([fixture.tool('batch_create_events',dict(items=items,distinct_colors=True))],
                 '给往后三天各加一个WB实验，随机用三种颜色',request)

@@ -11,7 +11,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from calendar_core import Store, Event, EventCategory, RoutineItem
-from calendar_action_gateway import CalendarActionGateway
+from desktop_calendar.assistant.calendar_action_gateway import CalendarActionGateway
 from calendar_event_service import CalendarEventService
 from calendar_mutation_service import CalendarMutationService
 from event_commands import EventCommandHistory

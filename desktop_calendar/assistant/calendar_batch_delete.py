@@ -2,7 +2,7 @@
 import secrets
 
 from desktop_calendar.assistant.calendar_chat_tools import fail, ChatError
-from calendar_action_gateway import fingerprint
+from desktop_calendar.assistant.calendar_action_gateway import fingerprint
 from calendar_event_service import EventOperationError
 
 
