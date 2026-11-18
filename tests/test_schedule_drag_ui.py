@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app import CalendarApp
-from global_drag_ui import GlobalDragMixin
+from desktop_calendar.global_view.global_drag_ui import GlobalDragMixin
 
 
 class ScheduleDragUITests(unittest.TestCase):

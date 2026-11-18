@@ -691,7 +691,7 @@ class WindowBehaviorTests(unittest.TestCase):
     def test_global_toolbar_names_compact_return_explicitly(self) -> None:
         source = inspect.getsource(CalendarApp._build_global_ui)
         self.assertIn("self.global_header = GlobalHeader(", source)
-        from global_header import GlobalHeader
+        from desktop_calendar.global_view.global_header import GlobalHeader
         header_source = inspect.getsource(GlobalHeader)
         self.assertIn('("compact", "", app.return_to_compact_view, "返回紧凑视图")', header_source)
 
@@ -1025,7 +1025,7 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn("交付前复核", str(fake.global_detail_notes.values["text"]))
 
     def test_global_workspace_wires_complete_toolbar_and_quick_add(self) -> None:
-        from global_header import GlobalHeader
+        from desktop_calendar.global_view.global_header import GlobalHeader
         source = inspect.getsource(CalendarApp._build_global_ui) + inspect.getsource(GlobalHeader)
         for command in (
             "open_new_event",
@@ -1263,6 +1263,7 @@ class WindowBehaviorTests(unittest.TestCase):
             {
                 "agenda_open": True,
                 "winfo_screenheight": lambda self: 2000,
+                "storage_banner_visible": lambda self: False,
                 "_ddl_canvas_height": CalendarApp._ddl_canvas_height,
                 "_ddl_region_height": CalendarApp._ddl_region_height,
             },

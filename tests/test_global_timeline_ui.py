@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from global_timeline_ui import (
+from desktop_calendar.global_view.global_timeline_ui import (
     GLOBAL_TIMELINE_LAYOUT,
     canvas_day_at,
     detail_state_text,

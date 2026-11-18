@@ -21,7 +21,7 @@ from app import CalendarApp
 from bulk_ui import BulkDateDialog
 from calendar_core import Event, EventCategory, RoutineItem, Store
 from dpi_utils import dpi_for_window
-from global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
+from desktop_calendar.global_view.global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
 from tools.check_interactions import cleanup, pump, position_hit
 from tools.check_habit_schedules import capture_own_window
 

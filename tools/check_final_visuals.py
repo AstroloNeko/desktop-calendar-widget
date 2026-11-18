@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Event, EventCategory, Store
 from dpi_utils import scaled_geometry
-from global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
+from desktop_calendar.global_view.global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
 from tools.check_frameless_global import assert_header
 from tools.check_interactions import cleanup, position_hit, pump
 from tools.check_window_drag import native_signatures, save_png

@@ -181,7 +181,7 @@ class ScheduleDragTests(unittest.TestCase):
     def test_canvas_date_mapping_with_scroll_offsets_at_all_dpis(self):
         from calendar_flow_layout import build_calendar_flow_layout, flow_day_at
         from dpi_utils import scale_px
-        from global_timeline_ui import canvas_day_at
+        from desktop_calendar.global_view.global_timeline_ui import canvas_day_at
         from timeline_model import build_month_timeline
         model = build_month_timeline(self.store, 2026, 8)
         layout = build_calendar_flow_layout(model)

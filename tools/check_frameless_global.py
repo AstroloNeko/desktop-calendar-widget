@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp, messagebox
 from calendar_core import Store
 from dpi_utils import dpi_for_window, scaled_geometry
-from global_header import header_layout
+from desktop_calendar.global_view.global_header import header_layout
 from tools.check_interactions import cleanup, pump
 from win_integration import is_window_topmost, window_handle
 

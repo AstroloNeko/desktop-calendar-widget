@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 from app import CalendarApp
 from event_search import SearchResult
-from global_search_ui import GlobalSearchMixin, SearchDialog
+from desktop_calendar.global_view.global_search_ui import GlobalSearchMixin, SearchDialog
 
 
 class GlobalSearchUITests(unittest.TestCase):

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from app import CalendarApp, ThemeButton, Tooltip
-from global_header import GlobalHeader, HEADER_HEIGHT, header_layout
+from desktop_calendar.global_view.global_header import GlobalHeader, HEADER_HEIGHT, header_layout
 from ui_draw import draw_compact_view_icon
 import win_integration as native
 from tools.check_frameless_global import native_click, require_editor, wait_until

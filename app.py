@@ -46,7 +46,7 @@ from calendar_flow_layout import (
     normalize_flow_drag_range,
     normalize_global_display_mode,
 )
-from global_timeline_ui import (
+from desktop_calendar.global_view.global_timeline_ui import (
     GLOBAL_TIMELINE_LAYOUT,
     canvas_day_at,
     detail_state_text,
@@ -87,9 +87,9 @@ from calendar_mutation_service import mutation_service
 from event_selection import EventSelection
 from bulk_ui import BulkActionsMixin
 from schedule_drag import ScheduleHit
-from global_drag_ui import GlobalDragMixin
-from global_header import GlobalHeader
-from global_search_ui import GlobalSearchMixin
+from desktop_calendar.global_view.global_drag_ui import GlobalDragMixin
+from desktop_calendar.global_view.global_header import GlobalHeader
+from desktop_calendar.global_view.global_search_ui import GlobalSearchMixin
 from interaction_visuals import CanvasLayer, InteractionFeedbackMixin, elide, visible_rows
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
 from update_manager import (
