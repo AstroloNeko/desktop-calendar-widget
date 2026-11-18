@@ -3,7 +3,7 @@ import tkinter as tk
 
 from global_hotkey import DEFAULT_HOTKEY, saved_shortcut, save_shortcut
 from desktop_calendar.reminders.reminder_ui import reminder_button
-from update_dialog import dialog_geometry
+from desktop_calendar.updates.update_dialog import dialog_geometry
 
 
 def open_hotkey_settings(app):

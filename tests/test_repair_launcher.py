@@ -12,7 +12,7 @@ class RepairLauncherTests(unittest.TestCase):
     def setUp(self):
         profile = tempfile.TemporaryDirectory()
         self.addCleanup(profile.cleanup)
-        guard = patch('update_storage_guard.profile_root', return_value=Path(profile.name))
+        guard = patch('desktop_calendar.updates.update_storage_guard.profile_root', return_value=Path(profile.name))
         guard.start()
         self.addCleanup(guard.stop)
 

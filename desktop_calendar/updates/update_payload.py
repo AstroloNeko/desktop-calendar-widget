@@ -10,7 +10,7 @@ class PayloadError(RuntimeError):
 
 
 def stage_verified_updater(archive: Path) -> Path:
-    from update_storage_guard import check_archive
+    from desktop_calendar.updates.update_storage_guard import check_archive
     try:
         check_archive(archive)
     except RuntimeError as exc:

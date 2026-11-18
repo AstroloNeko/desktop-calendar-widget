@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from update_manager import (
+from desktop_calendar.updates.update_manager import (
     CHECKSUM_ASSET_NAME,
     RELEASE_ASSET_NAME,
     UpdateError,

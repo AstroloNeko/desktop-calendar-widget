@@ -17,8 +17,8 @@ from dpi_utils import dpi_for_window, enable_dpi_awareness
 from repair_launcher import RepairWindow, RepairNotesDialog
 from tools.check_interactions import cleanup, pump
 from tools.check_update_dialog import visible
-from update_dialog import ReleaseHistoryDialog
-from update_manager import UpdateInfo
+from desktop_calendar.updates.update_dialog import ReleaseHistoryDialog
+from desktop_calendar.updates.update_manager import UpdateInfo
 from version import __version__
 from win_integration import is_window_topmost
 

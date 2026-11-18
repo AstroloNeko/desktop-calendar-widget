@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from version import __version__
-from update_payload import PayloadError, stage_verified_updater
+from desktop_calendar.updates.update_payload import PayloadError, stage_verified_updater
 
 
 GITHUB_REPOSITORY = "AstroloNeko/desktop-calendar-widget"

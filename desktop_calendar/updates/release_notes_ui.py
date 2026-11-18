@@ -2,7 +2,7 @@
 import tkinter as tk
 from tkinter import ttk
 
-from release_notes import inline_text, release_note_blocks
+from desktop_calendar.updates.release_notes import inline_text, release_note_blocks
 
 
 class NotesDocument(tk.Frame):

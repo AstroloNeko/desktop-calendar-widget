@@ -4,8 +4,8 @@ from unittest.mock import Mock, patch
 
 from app import CalendarApp
 from dpi_utils import WorkArea
-from update_dialog import UpdateAvailableDialog, dialog_geometry, release_note_blocks
-from update_manager import UpdateInfo, parse_release, RELEASE_ASSET_NAME, CHECKSUM_ASSET_NAME
+from desktop_calendar.updates.update_dialog import UpdateAvailableDialog, dialog_geometry, release_note_blocks
+from desktop_calendar.updates.update_manager import UpdateInfo, parse_release, RELEASE_ASSET_NAME, CHECKSUM_ASSET_NAME
 
 
 def update_info(notes="说明"):

@@ -11,7 +11,7 @@ from desktop_calendar.assistant.calendar_chat_tools import ChatError
 from desktop_calendar.assistant.llm_provider import AIConfiguration
 from desktop_calendar.reminders.reminder_ui import reminder_button
 from themed_controls import themed_check
-from update_dialog import dialog_geometry
+from desktop_calendar.updates.update_dialog import dialog_geometry
 from calendar_runtime import CalendarRuntime
 
 

@@ -92,7 +92,7 @@ from desktop_calendar.global_view.global_header import GlobalHeader
 from desktop_calendar.global_view.global_search_ui import GlobalSearchMixin
 from interaction_visuals import CanvasLayer, InteractionFeedbackMixin, elide, visible_rows
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
-from update_manager import (
+from desktop_calendar.updates.update_manager import (
     UpdateError,
     UpdateInfo,
     check_for_update,
@@ -105,8 +105,8 @@ from version import __version__
 from backup_ui import BackupActionsMixin
 from data_backup import automatic_backup
 from data_compat import DataCompatibilityError
-from update_state import update_in_progress
-from update_dialog import UpdateAvailableDialog, ReleaseHistoryDialog
+from desktop_calendar.updates.update_state import update_in_progress
+from desktop_calendar.updates.update_dialog import UpdateAvailableDialog, ReleaseHistoryDialog
 from habit_schedule import schedule_label
 from habit_ui import HabitScheduleForm
 from ui_draw import (

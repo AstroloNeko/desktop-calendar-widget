@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
 
-from update_dialog import dialog_geometry
+from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.reminders.reminder_ui import reminder_button
 
 

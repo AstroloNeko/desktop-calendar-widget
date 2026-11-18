@@ -17,12 +17,12 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
-from update_manager import GITHUB_REPOSITORY, UpdateInfo, check_for_update, download_update, version_tuple
+from desktop_calendar.updates.update_manager import GITHUB_REPOSITORY, UpdateInfo, check_for_update, download_update, version_tuple
 from version import __version__
-from update_payload import PayloadError, stage_verified_updater as _stage_verified_updater
+from desktop_calendar.updates.update_payload import PayloadError, stage_verified_updater as _stage_verified_updater
 from dpi_utils import dpi_for_window, work_area_for_window
-from release_notes_ui import NotesDocument
-from update_dialog import dialog_geometry
+from desktop_calendar.updates.release_notes_ui import NotesDocument
+from desktop_calendar.updates.update_dialog import dialog_geometry
 from ui_theme import get_theme
 
 

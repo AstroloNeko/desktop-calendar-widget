@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 
 from data_backup import automatic_backup
-from update_state import reserve_installation
+from desktop_calendar.updates.update_state import reserve_installation
 
 
 def show_error(message: str) -> None:
@@ -134,10 +134,10 @@ def main() -> int:
         with reserve_installation():
             safe_extract(args.archive, extracted)
             source = payload_root(extracted)
-            from update_storage_guard import profile_root
+            from desktop_calendar.updates.update_storage_guard import profile_root
             data_file = profile_root() / "calendar_data.json"
             from calendar_storage_lifecycle import StorageLifecycle
-            from update_storage_guard import check_directory
+            from desktop_calendar.updates.update_storage_guard import check_directory
             from calendar_sqlite_backup import create_sqlite_backup
             manager = StorageLifecycle(data_file.parent, existing_only=True)
             install = args.install_dir.resolve()

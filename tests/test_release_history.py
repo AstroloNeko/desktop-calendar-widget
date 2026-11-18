@@ -7,10 +7,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 from app import CalendarApp
-import release_notes
+from desktop_calendar.updates import release_notes
 import repair_launcher as repair
-from update_dialog import ReleaseHistoryDialog
-from update_manager import UpdateInfo
+from desktop_calendar.updates.update_dialog import ReleaseHistoryDialog
+from desktop_calendar.updates.update_manager import UpdateInfo
 from version import __version__
 
 
@@ -66,7 +66,7 @@ class HistoryTests(unittest.TestCase):
     def test_parser_has_no_tk_app_store_or_network_dependency(self):
         tree = ast.parse(Path(release_notes.__file__).read_text(encoding="utf-8"))
         imports = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-        self.assertFalse(imports & {"app", "tkinter", "calendar_core", "update_manager"})
+        self.assertFalse(imports & {"app", "tkinter", "calendar_core", "desktop_calendar.updates.update_manager"})
 
     def test_app_opens_offline_history(self):
         owner = object()

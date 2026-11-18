@@ -6,9 +6,9 @@ from tkinter import ttk
 from pathlib import Path
 
 from dpi_utils import WorkArea
-from update_manager import UpdateInfo
-from release_notes import NoteBlock, inline_text as _inline_text, release_note_blocks, load_history
-from release_notes_ui import NotesDocument
+from desktop_calendar.updates.update_manager import UpdateInfo
+from desktop_calendar.updates.release_notes import NoteBlock, inline_text as _inline_text, release_note_blocks, load_history
+from desktop_calendar.updates.release_notes_ui import NotesDocument
 
 
 def dialog_geometry(area: WorkArea, dpi: int, parent_rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:

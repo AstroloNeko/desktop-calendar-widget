@@ -19,10 +19,10 @@ from calendar_core import DATA_SCHEMA_VERSION, Event, EventCategory, RoutineItem
 from data_backup import BackupError, create_backup, read_backup, restore_store, validate_data
 from data_compat import DataCompatibilityError, DataVersionTooNew, decode_calendar_data
 from event_commands import EventCommandHistory
-from update_manager import UpdateError, launch_updater
-from update_payload import stage_verified_updater
+from desktop_calendar.updates.update_manager import UpdateError, launch_updater
+from desktop_calendar.updates.update_payload import stage_verified_updater
 import updater
-import update_state
+from desktop_calendar.updates import update_state
 
 
 class DataCompatibilityTests(unittest.TestCase):
@@ -157,7 +157,7 @@ class HandoffTests(unittest.TestCase):
     def setUp(self):
         profile = tempfile.TemporaryDirectory()
         self.addCleanup(profile.cleanup)
-        guard = patch('update_storage_guard.profile_root', return_value=Path(profile.name))
+        guard = patch('desktop_calendar.updates.update_storage_guard.profile_root', return_value=Path(profile.name))
         guard.start()
         self.addCleanup(guard.stop)
 
@@ -218,10 +218,10 @@ class HandoffTests(unittest.TestCase):
             (old / "DesktopCalendarUpdater.exe").write_bytes(b"MZold-schema7")
             staged = new / "DesktopCalendarUpdater.exe"
             staged.write_bytes(b"MZnew-schema8")
-            with patch("update_manager.running_as_packaged_app", return_value=True), \
-                 patch("update_manager.sys.executable", str(old / "DesktopCalendar.exe")), \
-                 patch("update_manager.stage_verified_updater", return_value=staged), \
-                 patch("update_manager.subprocess.Popen") as popen:
+            with patch("desktop_calendar.updates.update_manager.running_as_packaged_app", return_value=True), \
+                 patch("desktop_calendar.updates.update_manager.sys.executable", str(old / "DesktopCalendar.exe")), \
+                 patch("desktop_calendar.updates.update_manager.stage_verified_updater", return_value=staged), \
+                 patch("desktop_calendar.updates.update_manager.subprocess.Popen") as popen:
                 launch_updater(root / "verified.zip")
             args = popen.call_args.args[0]
             self.assertEqual(args[0], str(staged))
@@ -229,8 +229,8 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual((old / "DesktopCalendarUpdater.exe").read_bytes(), b"MZold-schema7")
 
     def test_bad_payload_never_launches_old_fallback(self):
-        with patch("update_manager.running_as_packaged_app", return_value=True), \
-             patch("update_manager.subprocess.Popen") as popen, self.assertRaises(UpdateError):
+        with patch("desktop_calendar.updates.update_manager.running_as_packaged_app", return_value=True), \
+             patch("desktop_calendar.updates.update_manager.subprocess.Popen") as popen, self.assertRaises(UpdateError):
             launch_updater(Path("missing-verified.zip"))
         popen.assert_not_called()
 

@@ -128,7 +128,7 @@ class BackupUiTests(unittest.TestCase):
              patch("updater.parse_args", return_value=SimpleNamespace(pid=1, archive=Path(folder)/"archive.zip", install_dir=Path(folder)/'install', executable="a.exe")), \
              patch("updater.wait_for_process"), patch("updater.ensure_no_calendar_instance"), patch("updater.reserve_installation"), patch("updater.safe_extract"), \
              patch("updater.payload_root", return_value=Path(folder)), \
-             patch("update_storage_guard.profile_root", return_value=Path(folder)/'isolated-profile'), \
+             patch("desktop_calendar.updates.update_storage_guard.profile_root", return_value=Path(folder)/'isolated-profile'), \
              patch("updater.automatic_backup", side_effect=lambda *a, **k: calls.append("backup")), \
              patch("updater.copy_payload", side_effect=lambda *a: calls.append("copy")), \
              patch("updater.subprocess.Popen"), patch("updater.show_error"):
@@ -141,7 +141,7 @@ class BackupUiTests(unittest.TestCase):
              patch("updater.parse_args", return_value=SimpleNamespace(pid=1, archive=Path(folder)/"archive.zip", install_dir=Path(folder)/'install', executable="a.exe")), \
              patch("updater.wait_for_process"), patch("updater.ensure_no_calendar_instance"), patch("updater.reserve_installation"), patch("updater.safe_extract"), \
              patch("updater.payload_root", return_value=Path(folder)), \
-             patch("update_storage_guard.profile_root", return_value=Path(folder)/'isolated-profile'), \
+             patch("desktop_calendar.updates.update_storage_guard.profile_root", return_value=Path(folder)/'isolated-profile'), \
              patch("updater.automatic_backup", side_effect=OSError("backup failed")), \
              patch("updater.copy_payload") as copy, patch("updater.show_error"):
             self.assertEqual(updater.main(), 1)

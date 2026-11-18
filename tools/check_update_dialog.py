@@ -19,8 +19,8 @@ from calendar_core import Store
 from dpi_utils import WorkArea, dpi_for_window
 from tools.check_interactions import cleanup, pump
 from tools.check_frameless_global import capture
-from update_dialog import UpdateAvailableDialog
-from update_manager import UpdateInfo
+from desktop_calendar.updates.update_dialog import UpdateAvailableDialog
+from desktop_calendar.updates.update_manager import UpdateInfo
 from version import __version__
 from win_integration import is_window_topmost
 

@@ -12,7 +12,7 @@ from calendar_disaster_recovery import disaster_restore
 from desktop_storage_startup import StartupOptions, open_desktop_storage
 from desktop_backup import export_sqlite, automatic_sqlite_backup
 from calendar_sqlite_backup import read_container
-from update_storage_guard import check_archive, capabilities
+from desktop_calendar.updates.update_storage_guard import check_archive, capabilities
 
 FIXTURE = json.loads((Path(__file__).parent/'fixtures/schema8_v0102.json').read_text(encoding='utf8'))['document']
 
@@ -210,12 +210,12 @@ class RecoveryIntegrationTests(unittest.TestCase):
         check_archive(archive,self.root)
 
     def test_old_payload_never_stages_updater(self):
-        from update_payload import stage_verified_updater, PayloadError
+        from desktop_calendar.updates.update_payload import stage_verified_updater, PayloadError
         archive = self.root/'old.zip'
         with zipfile.ZipFile(archive,'w') as package:
             package.writestr('DesktopCalendar/DesktopCalendarUpdater.exe', b'MZold')
-        with patch('update_storage_guard.profile_root', return_value=self.root), \
-                patch('update_payload.tempfile.mkdtemp') as stage:
+        with patch('desktop_calendar.updates.update_storage_guard.profile_root', return_value=self.root), \
+                patch('desktop_calendar.updates.update_payload.tempfile.mkdtemp') as stage:
             with self.assertRaises(PayloadError): stage_verified_updater(archive)
             stage.assert_not_called()
 
@@ -241,7 +241,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
                         patch('updater.wait_for_process',side_effect=lambda pid:calls.append('wait')), \
                         patch('updater.ensure_no_calendar_instance',side_effect=lambda:calls.append('instances')), \
                         patch('updater.safe_extract'), patch('updater.payload_root',return_value=source), \
-                        patch('update_storage_guard.profile_root',return_value=self.root), \
+                        patch('desktop_calendar.updates.update_storage_guard.profile_root',return_value=self.root), \
                         patch('updater.copy_payload',side_effect=copy), patch('updater.show_error'), \
                         patch('updater.subprocess.Popen',side_effect=lambda *a,**k:calls.append('restart')):
                     result=updater.main()

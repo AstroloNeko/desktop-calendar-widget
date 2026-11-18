@@ -31,8 +31,8 @@ from data_compat import DataCompatibilityError
 from dpi_utils import dpi_for_window
 from tools.check_interactions import cleanup, pump
 from updater import safe_extract
-from update_manager import launch_updater
-from update_state import reserve_installation
+from desktop_calendar.updates.update_manager import launch_updater
+from desktop_calendar.updates.update_state import reserve_installation
 
 
 def fixture(path, schema=8):
@@ -269,9 +269,9 @@ def frozen_checks(root, published_zip, qa_dir, legacy_dir=None):
             child = popen(*args, **kwargs)
             starts.append(child)
             return child
-        with patch("update_manager.running_as_packaged_app", return_value=True), \
-             patch("update_manager.sys.executable", str(parent_executable)), patch("update_manager.os.getpid", return_value=parent.pid), \
-             patch("update_manager.subprocess.Popen", side_effect=start):
+        with patch("desktop_calendar.updates.update_manager.running_as_packaged_app", return_value=True), \
+             patch("desktop_calendar.updates.update_manager.sys.executable", str(parent_executable)), patch("desktop_calendar.updates.update_manager.os.getpid", return_value=parent.pid), \
+             patch("desktop_calendar.updates.update_manager.subprocess.Popen", side_effect=start):
             launch_updater(archive)
         worker = starts[0]
         staged = Path(worker.args[0])

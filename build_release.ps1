@@ -91,7 +91,7 @@ Copy-Item (Join-Path $projectDir "LICENSE") $appDir -Force
 $versionOutput = @(& $pythonExe -c "from version import __version__; print(__version__)")
 if ($LASTEXITCODE -ne 0) { throw "Unable to read build version" }
 $versionOutput[-1].Trim() | Set-Content -LiteralPath (Join-Path $appDir "app-version.txt") -Encoding ascii
-$storageOutput = @(& $pythonExe -c "import json; from version import __version__; from update_storage_guard import capabilities; print(json.dumps(capabilities(__version__)))")
+$storageOutput = @(& $pythonExe -c "import json; from version import __version__; from desktop_calendar.updates.update_storage_guard import capabilities; print(json.dumps(capabilities(__version__)))")
 if ($LASTEXITCODE -ne 0) { throw "Unable to read storage capabilities" }
 $storageOutput[-1] | Set-Content -LiteralPath (Join-Path $appDir "storage-capabilities.json") -Encoding ascii
 
