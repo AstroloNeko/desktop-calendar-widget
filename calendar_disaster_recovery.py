@@ -7,7 +7,7 @@ from calendar_storage_lifecycle import LifecycleError, durable_new, digest, insp
 from calendar_sqlite_backup import read_container
 from calendar_migration import dry_run_migration
 from calendar_core import Store
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 
 def candidate_from_backup(manager, backup, token):

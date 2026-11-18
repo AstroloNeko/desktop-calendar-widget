@@ -3086,7 +3086,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.destroy()
             raise DataCompatibilityError(self.store.load_error)
         self.backup_warning = None
-        from sqlite_calendar_repository import SqliteCalendarRepository
+        from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
         if isinstance(self.store.repository, SqliteCalendarRepository):
             try:
                 from desktop_backup import automatic_sqlite_backup

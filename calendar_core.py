@@ -417,7 +417,7 @@ class Store:
         self.load_error: Optional[str] = None
         self._migration_backup_pending = False
         if repository_factory is None:
-            from json_calendar_repository import JsonCalendarRepository
+            from desktop_calendar.storage.json_calendar_repository import JsonCalendarRepository
             repository_factory = JsonCalendarRepository
         self.repository = repository_factory(self)
         self.load()

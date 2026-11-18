@@ -7,7 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from calendar_core import Store, Event, RoutineItem, EventCategory
-from calendar_repository import RepositoryConflictError
+from desktop_calendar.storage.calendar_repository import RepositoryConflictError
 from calendar_event_service import CalendarEventService
 from calendar_mutation_service import CalendarMutationService
 from event_commands import EventCommandHistory

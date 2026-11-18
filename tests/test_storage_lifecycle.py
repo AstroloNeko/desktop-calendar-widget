@@ -111,7 +111,7 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(LifecycleError):read_container(path)
     def test_backup_credentials_refused(self):
         from calendar_core import Store
-        from sqlite_calendar_repository import SqliteCalendarRepository
+        from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
         self.manager.migrate();state,path,factory=self.manager._select()
         store=Store(path,repository_factory=factory)
         store.settings['api_key']='synthetic-secret';store.save();store.repository.close()
@@ -171,7 +171,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertNotEqual(result.returncode,0);self.assertIn(b'directory_busy',result.stderr)
     def test_injected_migration_failures(self):
         points=('calendar_storage_lifecycle.dry_run_migration','calendar_storage_lifecycle.inspect_database',
-                'calendar_storage_lifecycle.os.link','sqlite_calendar_repository.SqliteCalendarRepository.backup_to')
+                'calendar_storage_lifecycle.os.link','desktop_calendar.storage.sqlite_calendar_repository.SqliteCalendarRepository.backup_to')
         for point in points:
             with self.subTest(point=point),tempfile.TemporaryDirectory() as folder:
                 root=Path(folder);source=root/'calendar_data.json';source.write_text(json.dumps(FIXTURE));before=source.read_bytes()

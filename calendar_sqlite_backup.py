@@ -11,7 +11,7 @@ import zipfile
 
 from calendar_core import Store
 from calendar_storage_lifecycle import LifecycleError,inspect_database,durable_new
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from version import __version__
 
 LIMIT=64*1024*1024

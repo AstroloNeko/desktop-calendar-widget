@@ -13,7 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from desktop_storage_startup import StartupOptions, create_desktop_app
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from tools.check_interactions import pump, cleanup
 
 

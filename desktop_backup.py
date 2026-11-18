@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 import uuid
 from calendar_sqlite_backup import create_sqlite_backup
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 
 def sqlite_store(store):

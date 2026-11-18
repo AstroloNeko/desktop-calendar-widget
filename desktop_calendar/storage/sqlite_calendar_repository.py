@@ -13,10 +13,10 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from calendar_repository import RepositoryCommit, RepositoryConflictError, SnapshotToken
+from desktop_calendar.storage.calendar_repository import RepositoryCommit, RepositoryConflictError, SnapshotToken
 from data_compat import DataCompatibilityError
-from json_calendar_repository import JsonCalendarRepository
-from sqlite_calendar_schema import SCHEMA_VERSION, APPLICATION_ID, COLUMNS, statements, preference_scope
+from desktop_calendar.storage.json_calendar_repository import JsonCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_schema import SCHEMA_VERSION, APPLICATION_ID, COLUMNS, statements, preference_scope
 
 
 def encoded(value):

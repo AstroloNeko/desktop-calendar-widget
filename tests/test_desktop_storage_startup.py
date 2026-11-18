@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from desktop_storage_startup import StartupOptions, open_desktop_storage
 from calendar_storage_lifecycle import StorageLifecycle, LifecycleError, DirectoryLease
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures/schema8_v0102.json').read_text(encoding='utf8'))['document']
 

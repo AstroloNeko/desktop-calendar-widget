@@ -18,8 +18,8 @@ _QUARANTINED = {}
 from calendar_core import DATA_DIR, Store
 from calendar_migration import dry_run_migration
 from calendar_migration_validation import validate_source, ValidationResult, _validate_document
-from sqlite_calendar_repository import SqliteCalendarRepository
-from sqlite_calendar_schema import APPLICATION_ID, SCHEMA_VERSION
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_schema import APPLICATION_ID, SCHEMA_VERSION
 
 
 class LifecycleError(RuntimeError):

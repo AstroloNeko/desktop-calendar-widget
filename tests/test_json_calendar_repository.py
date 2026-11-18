@@ -6,7 +6,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from calendar_core import Store, Event, MutationUncertainError
-from json_calendar_repository import JsonCalendarRepository
+from desktop_calendar.storage.json_calendar_repository import JsonCalendarRepository
 from calendar_runtime import HeadlessRuntime
 from calendar_event_service import CalendarEventService, EventOperationError
 from event_commands import EventCommandHistory

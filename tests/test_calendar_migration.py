@@ -11,9 +11,9 @@ from unittest.mock import patch
 
 from calendar_core import Event,EventCategory,RoutineItem,Store
 from calendar_migration import validate_source,dry_run_migration
-from calendar_repository import RepositoryConflictError
+from desktop_calendar.storage.calendar_repository import RepositoryConflictError
 from habit_schedule import SCHEDULE_FIELDS
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 
 def fixture(count=2):
@@ -304,7 +304,7 @@ class MigrationTests(unittest.TestCase):
         self.assert_failed_clean(result)
 
     def test_default_store_remains_json(self):
-        from json_calendar_repository import JsonCalendarRepository
+        from desktop_calendar.storage.json_calendar_repository import JsonCalendarRepository
         self.assertIs(type(Store(self.source).repository),JsonCalendarRepository)
 
 

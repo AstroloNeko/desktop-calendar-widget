@@ -5,7 +5,7 @@ from typing import Optional
 from data_compat import DataCompatibilityError
 from event_commands import EventPreview, BatchPreview, EventChange, BatchChange, CommandConflictError
 from event_input import build_event_candidate
-from calendar_repository import RepositoryConflictError
+from desktop_calendar.storage.calendar_repository import RepositoryConflictError
 from calendar_core import MutationUncertainError
 
 

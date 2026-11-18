@@ -10,8 +10,8 @@ import time
 
 from calendar_core import Store, DATA_DIR
 from calendar_migration_validation import validate_source, MigrationIssue, MODELS
-from sqlite_calendar_repository import SqliteCalendarRepository, encoded
-from sqlite_calendar_schema import SCHEMA_VERSION
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository, encoded
+from desktop_calendar.storage.sqlite_calendar_schema import SCHEMA_VERSION
 
 
 def _digest(path):

@@ -15,7 +15,7 @@ import time
 
 from calendar_core import Event, RoutineItem, EventCategory
 from habit_schedule import SCHEDULE_FIELDS, validate_schedule_input
-from sqlite_calendar_schema import preference_scope
+from desktop_calendar.storage.sqlite_calendar_schema import preference_scope
 
 MAX_SOURCE_BYTES = 32 * 1024 * 1024
 MODELS = {'events':Event, 'routines':RoutineItem, 'categories':EventCategory}

@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 
-from calendar_repository import SnapshotToken, RepositoryCommit, RepositoryConflictError
+from desktop_calendar.storage.calendar_repository import SnapshotToken, RepositoryCommit, RepositoryConflictError
 from data_compat import DataCompatibilityError, decode_calendar_data
 
 

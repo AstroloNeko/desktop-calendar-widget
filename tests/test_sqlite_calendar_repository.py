@@ -10,13 +10,13 @@ from unittest.mock import patch
 import test_calendar_repository_contract as contract
 import test_calendar_runtime as runtime_cases
 from calendar_core import Store, Event, RoutineItem, EventCategory, MutationUncertainError
-from calendar_repository import RepositoryConflictError
+from desktop_calendar.storage.calendar_repository import RepositoryConflictError
 from calendar_event_service import CalendarEventService, EventOperationError
 from calendar_mutation_service import CalendarMutationService
 from calendar_runtime import HeadlessRuntime
 from data_compat import DataCompatibilityError
 from event_commands import EventCommandHistory
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 
 class SqliteContractTests(contract.RepositoryContractTests):
@@ -242,7 +242,7 @@ class SqliteSpecificTests(TestCase):
 
     def test_schema_init_failure_atomic(self):
         path=self.path.with_name('init.db')
-        with patch('sqlite_calendar_repository.statements',return_value=iter(['CREATE TABLE partial(x)','INVALID SQL'])):
+        with patch('desktop_calendar.storage.sqlite_calendar_repository.statements',return_value=iter(['CREATE TABLE partial(x)','INVALID SQL'])):
             with self.assertRaises(DataCompatibilityError): self.open(path)
         with closing(sqlite3.connect(path)) as db:
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],0)

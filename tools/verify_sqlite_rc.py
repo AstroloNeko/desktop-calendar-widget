@@ -20,8 +20,10 @@ def main():
         assert capabilities['application_version']=='0.11.0' and capabilities['sqlite_schemas']==[1]
     from PyInstaller.archive.readers import CArchiveReader
     frozen=CArchiveReader(str(app/'DesktopCalendar.exe')).open_embedded_archive('PYZ.pyz')
-    required=['calendar_storage_lifecycle','sqlite_calendar_repository','sqlite_calendar_schema','calendar_migration','calendar_migration_validation','calendar_legacy_migration','calendar_sqlite_backup','calendar_disaster_recovery','desktop_storage_startup']
-    assert all(n in frozen.toc for n in required),[n for n in required if n not in frozen.toc]
+    required=['calendar_storage_lifecycle','desktop_calendar.storage.sqlite_calendar_repository','desktop_calendar.storage.sqlite_calendar_schema','calendar_migration','calendar_migration_validation','calendar_legacy_migration','calendar_sqlite_backup','calendar_disaster_recovery','desktop_storage_startup']
+    # Historical v0.11.0 RCs used top-level repository module names.
+    missing = [n for n in required if n not in frozen.toc and n.removeprefix('desktop_calendar.storage.') not in frozen.toc]
+    assert not missing, missing
     repository=Path(__file__).resolve().parents[1]
     compared=[]
     for staged in src.glob('*.py'):

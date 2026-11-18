@@ -44,7 +44,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
 
     def test_live_backup_uses_backup_api_and_excludes_ai(self):
         session = self.session()
-        from sqlite_calendar_repository import SqliteCalendarRepository
+        from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
         original = SqliteCalendarRepository.backup_to
         called = []
         def tracked(repo, destination):

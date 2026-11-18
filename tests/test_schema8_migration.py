@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from calendar_migration import validate_source,dry_run_migration
 from calendar_core import Store
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 FIXTURE=json.loads((Path(__file__).parent/'fixtures'/'schema8_v0102.json').read_text(encoding='utf8'))
 

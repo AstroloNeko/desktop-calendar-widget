@@ -15,7 +15,7 @@ from calendar_action_gateway import CalendarActionGateway
 from calendar_event_service import CalendarEventService
 from calendar_mutation_service import CalendarMutationService
 from event_commands import EventCommandHistory
-from sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
 
 def measure(function, repeats):
