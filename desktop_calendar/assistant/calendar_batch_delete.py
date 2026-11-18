@@ -12,6 +12,7 @@ _ENDPOINT = r'(?:(?:(\d{4})[-年/])?(\d{1,2})[-月/])?(\d{1,2})(?:日|号)?'
 _RANGE = re.compile(r'(?<![\d/-])' + _ENDPOINT + r'\s*(?:到|至|[-~～—])\s*' + _ENDPOINT + r'(?![\d/-])')
 _COMMAND = re.compile(r'(?:全部|全都|都|全)?(?:删除|删掉|删了|移除)(?:掉|了)?[。！!\s]*$')
 _ALL = {'事项','事情','安排','日程','任务','不管是什么事情','不管是什么事项','不管什么事情'}
+_RECENT_DAYS = re.compile(r'^(?:(?:请|帮我|把|将)\s*)*(?:最近|近)\s*(?:[一二两三四五六七八九十\d]+|几)\s*天(?:内|里)?(?:的)?\s*')
 
 
 def _interval(match, today):
@@ -99,9 +100,16 @@ def handle_message(service, session, message, owner, request_id):
             return reply('请列出要删除的标题，或取消当前操作。')
         subject = re.sub(r'^(?:不要精确匹配标题|拜托|算了)[，,]\s*', '', subject.strip())
         subject = subject.removeprefix('我的意思是').strip()
+        relative = _RECENT_DAYS.match(subject)
+        if relative:
+            subject = subject[relative.end():]
+            if not interval:
+                bounds = {}
+                session.pop('delete_range',None)
+                session.pop('clarified_query',None)
         # A conversational aside before a named, dated subject is outside the title.
         subject = re.sub(r'^[^，,]{1,6}[吧把][，,]\s*(?=这几天[^，,]*实验)', '', subject)
-        if subject.strip(' ，,') or not active:
+        if subject.strip(' ，,') or relative or not active:
             session['delete_title'] = _titles(subject)
     titles = session.get('delete_title')
     if isinstance(titles,str):  # Existing sessions stored a single title.

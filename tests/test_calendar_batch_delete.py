@@ -82,6 +82,24 @@ class BatchDeleteTests(TestCase):
         self.assertEqual(response['candidates'],[])
         self.assertNotIn('选择',response['assistant_message'])
 
+    def test_recent_days_answer_only_fills_dates(self):
+        self.store.events = [Event(i,title,'2026-11-'+day+'T12:00') for i,title,day in (
+            ('outside','WB实验','17'),('wb','WB实验','18'),('cell','细胞实验','20'))]
+        self.store.save()
+        for message, expected in [('最近三天事项全删了',['wb','cell']),
+                                  ('把近3天的WB实验都删除',['wb'])]:
+            with self.subTest(message=message):
+                self.bounds()  # Old search dates must not supply the new interval.
+                first = self.say(message)
+                self.assertEqual(first['status'],'clarification_required')
+                self.assertIsNone(first['pending_operation'])
+                with patch('desktop_calendar.assistant.calendar_batch_delete.date',wraps=date) as clock:
+                    clock.today.return_value=date(2026,11,18)
+                    preview = self.say('11-18到11-20')['pending_operation']
+                self.assertEqual(preview['preview']['event_ids'],expected)
+                self.service.cancel_operation(self.sid,preview['operation_id'])
+        self.assertEqual(self.commands.undo_count,0)
+
     def test_range_and_title_corrections_replace_reviewed_scope(self):
         self.store.events = [Event(i,title,'2026-11-'+day+'T12:00') for i,title,day in (
             ('outside','WB实验','17'),('wb','WB实验','18'),('cell','细胞实验','19'),
