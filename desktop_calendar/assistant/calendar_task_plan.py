@@ -19,16 +19,16 @@ from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
 TASK_TOOLS = {'batch_create_events','batch_update_events','batch_set_completion'}
 
 
-def run_task(service, name, args, session, owner, request_id, source, message):
+def run_task(service, name, args, session, owner, request_id, source, message, *, structured=False, preview_only=False):
     gateway, journal = service.gateway, service.journal
     args=dict(args)
     if re.search(r'不同颜色|三种颜色|各换一种|随机.*颜色',message):
         args['distinct_colors']=True
-    if not member_count(message) and not any(word in message for word in ('各','每天','全部','所有','那三个','那一批','这三个','批量','前三个','前面那','三天')):
+    if not structured and not member_count(message) and not any(word in message for word in ('各','每天','全部','所有','那三个','那一批','这三个','批量','前三个','前面那','三天')):
         fail('请明确是否操作多个独立事项。','clarification_required')
     if name=='batch_create_events' and '连续' in message and not re.search(r'各|每天.*一次|独立',message):
         fail('连续多日与多个独立事项不同，请明确是否每天各建一个。','clarification_required')
-    preview_only = not service.auto_execute or any(word in message for word in ('先预览','不要执行','先别执行','先确认'))
+    preview_only = preview_only or not service.auto_execute or any(word in message for word in ('先预览','不要执行','先别执行','先确认'))
     if session.get('pending') and service._pending_status(session, owner) in ('pending','ready','executing','uncertain'):
         fail('请先确认或取消当前操作。','confirmation_required')
     task_id = secrets.token_urlsafe(24)
@@ -36,7 +36,7 @@ def run_task(service, name, args, session, owner, request_id, source, message):
         operation=name, status='ready', expires=service.clock()+900, source=source, constraints=args, clarified={}, result=None)
     if session.get('active_task'):
         previous=journal.get('task',session['active_task'],owner)
-        if previous['status']=='needs_clarification' and previous['operation']==name:
+        if not structured and previous['status']=='needs_clarification' and previous['operation']==name:
             task={**previous,'status':'ready','clarified':args,'attempt_request_id':request_id}
             args={**previous['constraints'],**args}
             task['constraints']=args
@@ -71,7 +71,7 @@ def run_task(service, name, args, session, owner, request_id, source, message):
             if not creating and current is None:
                 fail('批量目标已不存在。','event_not_found')
             values = dict(item if creating else item['changes'])
-            if name != 'batch_set_completion':
+            if not structured and name != 'batch_set_completion':
                 values, _, _ = adapt_attributes(values,message,creating,gateway.categories()['categories'],())
             values.pop('category_basis',None)
             if colors:

@@ -5,6 +5,8 @@ from desktop_calendar.assistant.calendar_chat_tools import fail
 
 
 def compile_proposal(proposal):
+    if 'items' not in proposal or set(proposal) - {'action','items','distinct_colors'} or proposal['action']=='delete':
+        fail('成员计划需要提供合法的动作和 items；按条件定位事项请使用 target。')
     action, items = proposal['action'], proposal['items']
     keys = {'create': {'fields'}, 'update': {'fields','event_id'}, 'complete': {'event_id','done'}}
     if any(set(item) != keys[action] for item in items):
@@ -27,6 +29,22 @@ def compile_proposal(proposal):
     if len(items) == 1:
         return single, members[0]
     return batch, dict(items=members, distinct_colors=distinct)
+
+
+def validate_target_plan(plan):
+    action = plan['action']
+    allowed = {'update':{'fields','color_policy'}, 'complete':{'done'}, 'delete':set()}
+    if action not in allowed or set(plan) - ({'action','target','preview_only'} | allowed[action]):
+        fail('目标计划的动作与参数不匹配。')
+    if action == 'update' and not (plan.get('fields') or plan.get('color_policy')):
+        fail('修改计划缺少修改值。')
+    if plan.get('color_policy') and {'color','color_mode'} & plan.get('fields',{}).keys():
+        fail('请只指定一种颜色策略。')
+    if action == 'complete' and 'done' not in plan:
+        fail('完成计划缺少 done。')
+    target = plan['target']
+    if ('start' in target) != ('end' in target) or any(not title.strip() for title in target['titles']):
+        fail('请提供完整日期区间及有效标题。')
 
 
 def member_count(message):

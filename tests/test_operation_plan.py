@@ -49,6 +49,61 @@ class EventPlanTests(TestCase):
         self.assertEqual(self.commands.undo_count,0)
         self.assertIsNone(result['pending_operation'])
 
+    def test_structured_delete_date_answer_keeps_all_titles(self):
+        plan = dict(action='delete',target=dict(titles=[],quantity='all_matches'))
+        reply = self.send([fixture.tool('propose_events',plan)],'最近三天事项全删了','target-draft')
+        self.assertEqual(reply['status'],'clarification_required')
+        revision = self.service.get_session(self.sid)['awaiting_target']['revision']
+        dates = dict(start='2026-11-16',end='2026-11-18',revision=revision)
+        reply = self.send([fixture.tool('revise_event_target',dates)],'11-16到11-18','target-dates')
+        op = reply['pending_operation']
+        self.assertEqual(set(op['preview']['event_ids']),{'event-one','event-two'})
+        self.assertEqual(self.commands.undo_count,0)
+        first = self.service.confirm_operation(self.sid,op['operation_id'],revision=op['revision'])
+        self.assertEqual(self.commands.undo_count,0)
+        self.service.confirm_operation(self.sid,op['operation_id'],revision=first['pending_operation']['revision'])
+        self.assertEqual(len(self.store.events),0)
+
+    def test_structured_choice_resumes_without_model_and_keeps_fields(self):
+        self.service.auto_execute = True
+        target = dict(start='2026-11-16',end='2026-11-16',titles=[],quantity='one')
+        plan = dict(action='update',target=target,fields=dict(reminder=25),color_policy='different_from_current')
+        first = self.send([fixture.tool('propose_events',plan)],'给其中一场换配色和提醒','target-choice')
+        self.assertEqual(len(first['candidates']),2)
+        row = first['candidates'][1]
+        reply = self.send([], '2. '+row['title'],'target-answer')
+        actual = reply['operation_result']['event']
+        self.assertEqual((actual['id'],actual['reminder']),(row['id'],25))
+        self.assertNotEqual(actual['color'],row['color'])
+        self.assertEqual(len(self.provider.messages),1)
+
+    def test_structured_group_update_respects_preview(self):
+        self.service.auto_execute = True
+        target = dict(start='2026-11-16',end='2026-11-16',titles=[],quantity='all_matches')
+        plan = dict(action='complete',done=True,target=target,preview_only=True)
+        reply = self.send([fixture.tool('propose_events',plan)],'先看看这次调整','preview-group')
+        op = reply['pending_operation']
+        self.assertEqual(self.commands.undo_count,0)
+        self.service.confirm_operation(self.sid,op['operation_id'],revision=op['revision'])
+        self.assertTrue(all(e.done for e in self.store.events))
+        self.assertEqual(self.commands.undo_count,1)
+
+    def test_missing_title_keeps_patch_for_revision_without_partial_write(self):
+        self.service.auto_execute = True
+        target = dict(start='2026-11-16',end='2026-11-16',titles=['实验室组会','不存在'],quantity='all_matches')
+        plan = dict(action='update',target=target,fields={'reminder':25})
+        reply = self.send([fixture.tool('propose_events',plan)],'修改这两场会议的提醒','target-missing')
+        self.assertEqual(reply['status'],'clarification_required')
+        self.assertEqual(self.commands.undo_count,0)
+        revision = self.service.get_session(self.sid)['awaiting_target']['revision']
+        patch = dict(revision=revision,titles=['实验室组会'])
+        result = self.send([fixture.tool('revise_event_target',patch)],'只改实验室组会','target-narrow')
+        self.assertEqual(result['operation_result']['event']['reminder'],25)
+        self.assertEqual(self.commands.undo_count,1)
+        stale = self.send([fixture.tool('revise_event_target',patch)],'重复','target-stale')
+        self.assertEqual(stale['error_code'],'operation_conflict')
+        self.assertEqual(self.commands.undo_count,1)
+
     def test_restart_and_displayed_candidate_preserve_patch(self):
         response = self.send([fixture.tool('query_events',dict(keyword='组会')),
                               propose('update', dict(event_id='event-one',fields=dict(color='#52B788', reminder=30)))],

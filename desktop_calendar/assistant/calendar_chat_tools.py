@@ -97,16 +97,28 @@ DESCRIPTIONS = {
     "clarify": "信息不明确时向用户澄清，尤其日期/时间或相对提醒；不能宣称写入成功。",
 }
 EVENT_ADAPTERS = {'preview_create', 'preview_update', 'preview_complete',
-                  'batch_create_events', 'batch_update_events', 'batch_set_completion'}
+                  'batch_create_events', 'batch_update_events', 'batch_set_completion',
+                  'preview_delete', 'delete_events_batch'}
 PLAN_ITEM = obj({'event_id': text(100), 'fields': obj(FIELDS), 'done': {'type':'boolean'}})
 SCHEMAS['propose_events'] = obj({
-    'action': {'type':'string', 'enum':['create','update','complete']},
+    'action': {'type':'string', 'enum':['create','update','complete','delete']},
+    'target': obj({'start':text(10),'end':text(10),
+                   'titles':{'type':'array','maxItems':10,'items':{**text(300),'minLength':1}},
+                   'quantity':{'type':'string','enum':['one','all_matches']}},
+                  ('titles','quantity')),
+    'fields':obj(FIELDS), 'done':{'type':'boolean'},
+    'color_policy':{'type':'string','enum':['different_from_current']},
+    'preview_only':{'type':'boolean'},
     'items': {'type':'array', 'minItems':1, 'maxItems':10, 'items':PLAN_ITEM},
     'distinct_colors': {'type':'boolean'}
-}, ('action','items'))
+}, ('action',))
+SCHEMAS['revise_event_target'] = obj({'revision':text(100), **SCHEMAS['propose_events']['properties']['target']['properties']}, ('revision',))
+DESCRIPTIONS['revise_event_target'] = '引用 awaiting_target.revision，提交用户补充的日期、标题或数量范围；宿主保留原动作和所有未修改字段。'
 DESCRIPTIONS['propose_events'] = ('提交一个完整的同类事项计划。create 每个成员含 fields(title,date,...)；'
     'update 每个成员含 event_id 和 fields(只含修改值)；complete 含 event_id 和 done。'
-    '多个独立事项必须列全。歧义时先查找或澄清，宿主管理确认和执行。')
+    '创建使用items。修改、完成、删除优先用target替代items，无需先查ID。target用start/end含端点、titles精确标题数组'
+    '（全部事项为[]）、quantity=one或all_matches；日期不明确时省略start/end。修改值用顶层fields或color_policy，'
+    '完成值用顶层done。用户要求先预览时preview_only=true。宿主查询、选择、确认和执行。')
 TOOLS = [{"type": "function", "function": {"name": name, "description": DESCRIPTIONS[name], "parameters": schema}}
          for name, schema in SCHEMAS.items() if name not in EVENT_ADAPTERS]
 

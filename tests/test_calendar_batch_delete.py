@@ -40,7 +40,7 @@ class BatchDeleteTests(TestCase):
         for message in ('全部','把这几天的WB实验全删了','全部'):
             response=self.say(message)
             self.assertEqual(response['pending_operation']['operation_id'],op['operation_id'])
-        self.assertEqual(self.provider.messages,[])
+        self.assertTrue(self.provider.messages)  # The planner gets the first opportunity.
         with patch.object(self.store,'save',wraps=self.store.save) as save:
             first=self.confirm(op)['pending_operation']
             save.assert_not_called()
@@ -128,7 +128,7 @@ class BatchDeleteTests(TestCase):
         self.assertEqual([e.id for e in self.store.events],['outside','meeting','similar','later'])
         self.commands.undo()
         self.assertEqual(len(self.store.events),6)
-        self.assertEqual(self.provider.messages,[])
+        self.assertTrue(self.provider.messages)  # The planner gets the first opportunity.
 
     def test_invalid_or_empty_revised_scope_retires_old_confirmation(self):
         op=self.preview()
