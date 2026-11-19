@@ -15,7 +15,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Store
-from global_hotkey import DEFAULT_HOTKEY, save_shortcut
+from global_hotkey import ASSISTANT_KEY, SETTING_KEY, saved_global_shortcuts
+from keyboard_shortcuts import saved_local_shortcuts, save_shortcuts
 from global_hotkey_ui import HotkeyDialog
 from dpi_utils import dpi_for_window
 from tools.check_interactions import cleanup, pump
@@ -34,6 +35,8 @@ def main():
     cases, errors = [], []
     with tempfile.TemporaryDirectory(prefix='calendar-hotkey-qa-') as folder:
         store = Store(Path(folder) / 'data.json')
+        qa_global = 'Ctrl+Alt+F22'
+        store.settings.update({SETTING_KEY: qa_global, ASSISTANT_KEY: 'Ctrl+Alt+F21'})
         with patch.object(CalendarApp, 'check_reminders'):
             app = CalendarApp(store)
             app.report_callback_exception = lambda *parts: errors.append(str(parts))
@@ -41,14 +44,18 @@ def main():
                 wait(app, lambda: app.tray_icon and app.tray_icon.is_available, 'tray ready')
                 tray = app.tray_icon
                 assert not tray.hotkey_error, tray.hotkey_error
-                def trigger():
-                    binding = tray._hotkey_binding.active
+                def configure(**changes):
+                    save_shortcuts(app, {**saved_global_shortcuts(store.settings), **changes},
+                                   saved_local_shortcuts(store.settings))
+
+                def trigger(action='global'):
+                    binding = tray._hotkey_binding.active[action]
                     assert binding
                     spec = binding[1]
                     assert user.PostMessageW(tray._hwnd, tray.WM_HOTKEY, binding[0], (spec.key << 16) | spec.modifiers)
                     pump(app, .35)
                 # Verify actual OS ownership/conflict, without replacing any existing registration.
-                competitor = TrayIcon('Isolated conflict QA', Path('missing.ico'), lambda _: None, hotkey=DEFAULT_HOTKEY)
+                competitor = TrayIcon('Isolated conflict QA', Path('missing.ico'), lambda _: None, hotkey=qa_global)
                 try:
                     assert competitor.start() and competitor.hotkey_error
                     assert competitor.is_available
@@ -80,13 +87,15 @@ def main():
                         trigger()
                         assert app.grab_current() is window  # Do not steal modal ownership.
                         assert window.winfo_viewable()
-                        window.value.set('Alt+F23')
+                        window.global_values['global'].set('Alt+F23')
+                        window.local_values['search'].set('Ctrl+Shift+K')
                         window.save()
                         pump(app, .1)
                         assert not window.winfo_exists() and app.grab_current() is None
-                        assert tray._hotkey_binding.active[1].text == 'Alt+F23'
+                        assert tray._hotkey_binding.active['global'][1].text == 'Alt+F23'
+                        assert saved_local_shortcuts(store.settings)['search'] == 'Ctrl+Shift+K'
                         trigger()
-                        save_shortcut(app, DEFAULT_HOTKEY)
+                        configure(**{'global': qa_global})
                         app.return_to_compact_view()
                         app.open_editor()
                         pump(app, .1)
@@ -94,15 +103,35 @@ def main():
                         trigger()
                         assert app.editor_window is editor and editor.winfo_viewable()
                         assert app.grab_current() is editor and app.view_mode == 'compact'
+                        chat_runtime = getattr(app, 'chat_runtime', None)
+                        trigger('assistant')
+                        assert app.grab_current() is editor and getattr(app, 'chat_runtime', None) is chat_runtime
+                        assert chat_runtime is None or chat_runtime.window is None
                         editor.close()
                         pump(app, .1)
                         assert app.grab_current() is None
+                        if not cases:
+                            assert app.hide_to_tray()
+                            trigger('assistant')
+                            chat = app.chat_runtime.window
+                            assert chat.winfo_viewable() and app.view_mode == 'compact'
+                            trigger('assistant')
+                            assert app.chat_runtime.window is chat and app.grab_current() is chat
+                            chat.close()
+                            pump(app, .1)
+                            assert not app.bind('<Control-KeyPress-k>')
+                            assert app.bind('<Control-Shift-KeyPress-K>')
+                            app.focus_force()
+                            app.event_generate('<Control-Shift-KeyPress-K>')
+                            pump(app, .1)
+                            assert app.search_window and app.search_window.winfo_viewable()
+                            app.search_window.close()
                         cases.append((theme, pinned))
                 if args.keyboard:
                     # Route through the real Windows hotkey registration, not WM_HOTKEY injection.
                     app.return_to_compact_view()
                     assert app.hide_to_tray()
-                    keys = (0x11, 0x12, 0x44)  # Ctrl, Alt, D.
+                    keys = (0x11, 0x12, 0x85)  # Ctrl, Alt, F22.
                     try:
                         for key in keys:
                             user.keybd_event(key, 0, 0, 0)
@@ -110,9 +139,9 @@ def main():
                         for key in reversed(keys):
                             user.keybd_event(key, 0, 2, 0)
                     wait(app, lambda: not app.lifecycle.hidden and app.view_mode == 'global', 'real keyboard hotkey', timeout=5)
-                save_shortcut(app, '')
-                assert tray._hotkey_binding.active is None
-                save_shortcut(app, DEFAULT_HOTKEY)
+                configure(**{'global': '', 'assistant': ''})
+                assert not tray._hotkey_binding.active
+                configure(**{'global': qa_global})
                 assert not errors, errors
                 result = dict(actual_dpi=dpi_for_window(app), theme_pinned_cases=len(cases),
                               real_registration_conflict=True, keyboard_injection=args.keyboard,
@@ -124,7 +153,7 @@ def main():
                     modal.close()
                 cleanup(app)
             # Exit freed the chord: a second service can claim it without a process restart.
-            probe = TrayIcon('Exit cleanup QA', Path('missing.ico'), lambda _: None, hotkey=DEFAULT_HOTKEY)
+            probe = TrayIcon('Exit cleanup QA', Path('missing.ico'), lambda _: None, hotkey=qa_global)
             try:
                 assert probe.start() and not probe.hotkey_error
             finally:

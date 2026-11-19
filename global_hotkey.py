@@ -3,6 +3,10 @@ from dataclasses import dataclass
 
 DEFAULT_HOTKEY = "Ctrl+Alt+D"
 SETTING_KEY = "global_view_hotkey"
+ASSISTANT_KEY = "assistant_hotkey"
+GLOBAL_DEFAULTS = {"global": DEFAULT_HOTKEY, "assistant": "Ctrl+Alt+J"}
+GLOBAL_SETTING_KEYS = {"global": SETTING_KEY, "assistant": ASSISTANT_KEY}
+GLOBAL_LABELS = {"global": "打开全局视图", "assistant": "唤起 AI 助理"}
 MODIFIERS = {"Ctrl": 2, "Alt": 1, "Shift": 4}
 KEYS = {**{chr(key): key for key in range(65, 91)},
         **{str(key): 48 + key for key in range(10)},
@@ -45,6 +49,18 @@ def saved_shortcut(settings):
     return shortcut.text if shortcut else ""
 
 
+def saved_global_shortcuts(settings):
+    result = {"global": saved_shortcut(settings)}
+    try:
+        shortcut = parse_shortcut(settings.get(ASSISTANT_KEY, GLOBAL_DEFAULTS["assistant"]))
+        result["assistant"] = shortcut.text if shortcut else ""
+    except ValueError:
+        result["assistant"] = GLOBAL_DEFAULTS["assistant"]
+    if result["assistant"] == result["global"]:
+        result["assistant"] = ""  # Legacy custom global binding takes precedence.
+    return result
+
+
 class HotkeyBinding:
     """Used only by the HWND's thread. Keep old registration until disk save succeeds."""
     IDS = (0x2C01, 0x2C02)
@@ -79,11 +95,92 @@ class HotkeyBinding:
                     and (packed & 0xFFFF) == self.active[1].modifiers
                     and ((packed >> 16) & 0xFFFF) == self.active[1].key)
 
+    def action(self, identifier, packed):
+        return "global" if self.matches(identifier, packed) else None
+
     def close(self):
         self.rollback()
         if self.active:
             self.user.UnregisterHotKey(self.hwnd, self.active[0])
             self.active = None
+
+
+class GlobalHotkeys:
+    """HWND-thread transaction; keep existing reservations through persistence.
+
+    A reservation belongs to the physical combo, so swapping two actions does
+    not have to unregister either combo or temporarily lose it to another app.
+    """
+    IDS = range(0x2C01, 0x2C05)
+
+    def __init__(self, user, hwnd):
+        self.user, self.hwnd = user, hwnd
+        self.active = {}
+        self.pending = None
+
+    def prepare(self, values):
+        self.rollback()
+        if isinstance(values, str):
+            values = {**{action: shortcut.text for action, (_, shortcut) in self.active.items()}, "global": values}
+        choices = {name: parse_shortcut(values.get(name, "")) for name in GLOBAL_DEFAULTS}
+        assigned = [shortcut for shortcut in choices.values() if shortcut is not None]
+        if len(set(assigned)) != len(assigned):
+            raise ValueError("两个系统全局快捷键不能相同。")
+        known = {shortcut: identifier for identifier, shortcut in self.active.values()}
+        used = set(known.values())
+        self.pending = {}
+        try:
+            for name, shortcut in choices.items():
+                if shortcut is None:
+                    continue
+                identifier = known.get(shortcut)
+                if identifier is None:
+                    identifier = next(key for key in self.IDS if key not in used)
+                    if not self.user.RegisterHotKey(self.hwnd, identifier, shortcut.modifiers | 0x4000, shortcut.key):
+                        raise ValueError(f"{GLOBAL_LABELS[name]}：{shortcut.text} 已被占用或 Windows 拒绝注册。")
+                    used.add(identifier)
+                self.pending[name] = (identifier, shortcut)
+        except (ValueError, OSError):
+            self.rollback()
+            raise
+
+    def _release_removed(self, old, new):
+        keep = {identifier for identifier, _ in new.values()}
+        for identifier, _ in old.values():
+            if identifier not in keep:
+                self.user.UnregisterHotKey(self.hwnd, identifier)
+
+    def commit(self):
+        if self.pending is not None:
+            self._release_removed(self.active, self.pending)
+            self.active, self.pending = self.pending, None
+
+    def rollback(self):
+        if self.pending is not None:
+            self._release_removed(self.pending, self.active)
+            self.pending = None
+
+    def start(self, values):
+        errors = []
+        # A startup conflict must not disable the other, unrelated action.
+        for name, value in values.items():
+            configured = {action: shortcut.text for action, (_, shortcut) in self.active.items()}
+            try:
+                self.prepare({**configured, name: value})
+                self.commit()
+            except (ValueError, OSError) as error:
+                errors.append(str(error))
+        return "\n".join(errors) or None
+
+    def action(self, identifier, packed):
+        return next((name for name, (key_id, shortcut) in self.active.items()
+                     if identifier == key_id and (packed & 0xFFFF) == shortcut.modifiers
+                     and ((packed >> 16) & 0xFFFF) == shortcut.key), None)
+
+    def close(self):
+        self.rollback()
+        self._release_removed(self.active, {})
+        self.active.clear()
 
 
 def save_shortcut(app, value):

@@ -11,7 +11,7 @@ import queue
 from pathlib import Path
 import threading
 import uuid
-from global_hotkey import HotkeyBinding
+from global_hotkey import GlobalHotkeys
 
 IS_WINDOWS = os.name == "nt"
 WPARAM_T, LPARAM_T = ctypes.c_size_t, ctypes.c_ssize_t
@@ -234,8 +234,9 @@ class TrayIcon:
             self._configure_hotkey_requests()
             return 0
         if message == self.WM_HOTKEY:
-            if self._hotkey_binding and self._hotkey_binding.matches(int(wparam), int(lparam)):
-                self._emit("global")
+            action = self._hotkey_binding and self._hotkey_binding.action(int(wparam), int(lparam))
+            if action:
+                self._emit(action)
             return 0
         if message == self._taskbar_created and self._taskbar_created:
             self._register_icon()
@@ -306,12 +307,10 @@ class TrayIcon:
             self._nid.szTip = self.tooltip
             if not self._register_icon():
                 return
-            self._hotkey_binding = HotkeyBinding(user, self._hwnd)
-            try:
-                self._hotkey_binding.prepare(self._hotkey_value)
-                self._hotkey_binding.commit()
-            except (ValueError, OSError) as exc:
-                self.hotkey_error = str(exc)  # Do not take down a usable tray/window.
+            self._hotkey_binding = GlobalHotkeys(user, self._hwnd)
+            values = self._hotkey_value
+            self.hotkey_error = self._hotkey_binding.start(
+                {"global": values} if isinstance(values, str) else values)
             self._ready.set()
             message = w.MSG()
             while not self._stopping.is_set():

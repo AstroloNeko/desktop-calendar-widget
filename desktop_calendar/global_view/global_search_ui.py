@@ -7,6 +7,7 @@ from event_search import EventSearchService
 from dpi_utils import LogicalCanvas
 from search_palette_ui import PaletteList
 from desktop_calendar.ui.ui_draw import draw_control_icon
+from keyboard_shortcuts import parse_local, saved_local_shortcuts
 
 
 class GlobalSearchMixin:
@@ -148,9 +149,8 @@ class SearchDialog(tk.Toplevel):
         for widget in (self.entry, self.tree):
             widget.bind("<Up>", lambda _event: self.move(-1))
             widget.bind("<Down>", lambda _event: self.move(1))
-        self.bind("<Control-k>", lambda _event: self.present() or "break")
-        for sequence in ("<Control-z>", "<Control-y>", "<Control-Shift-Z>"):
-            self.bind(sequence, lambda _event: "break")
+        for sequence in parse_local(saved_local_shortcuts(app.store.settings)["search"]).values():
+            self.bind(sequence, lambda _event: self.present() or "break")
         self._query_trace = self.query.trace_add("write", self._changed)
         area = app.dpi.work_area()
         center(self, app, min(600, app.dpi.logical(area.width) - 32), min(428, app.dpi.logical(area.height) - 48), y_offset=32)

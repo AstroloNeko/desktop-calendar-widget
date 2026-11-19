@@ -12,7 +12,7 @@ class GlobalSidebar(tk.Frame):
     MIN_WIDTH = GLOBAL_TIMELINE_LAYOUT.detail_min_width
     MAX_WIDTH = 540
 
-    def __init__(self, parent, app, *, button_factory, font_family, snapshot=None):
+    def __init__(self, parent, app, *, button_factory, font_family, snapshot=None, drawer_button=None):
         self.app = app
         theme, dp = app.theme, app.dpi.px
         bg = theme.workspace_detail
@@ -27,21 +27,30 @@ class GlobalSidebar(tk.Frame):
         self.day = None
         self.workspace_width = 0
         self._drawer = None
+        self.drawer_button = drawer_button
 
         grip = tk.Frame(self, width=dp(4), bg=theme.workspace_grid, cursor="sb_h_double_arrow")
         grip.pack(side="left", fill="y")
         grip.bind("<B1-Motion>", self._resize_from_left)
+        grip.bind("<Enter>", lambda _e: grip.configure(bg=theme.input_focus))
+        grip.bind("<Leave>", lambda _e: grip.configure(bg=theme.workspace_grid))
         body = tk.Frame(self, bg=bg)
         body.pack(side="left", fill="both", expand=True)
 
-        surface = theme.control_background if theme.rounded_widget_shells else bg
+        surface = bg
         tabs = tk.Frame(body, bg=bg)
         tabs.pack(fill="x", padx=dp(12), pady=(dp(8), dp(5)))
         tabs.columnconfigure((0, 1), weight=1, uniform="right-tabs")
         self.tabs = {}
         for column, (name, text) in enumerate((("day", "当日详情"), ("assistant", "AI 助理"))):
             button = button_factory(tabs, app, text, lambda mode=name: self.switch(mode, focus=True),
-                                    width=82, height=23, font_size=8, surface_background=surface, outlined=True)
+                                    width=82, height=26, font_size=8, surface_background=surface, outlined=True)
+            # The grid stretches these canvases; redraw against the allocated size.
+            button.bind("<Configure>", lambda _e, tab=button: tab.draw(), add="+")
+            if theme.rounded_widget_shells:
+                button.show_focus_ring = True
+                button.bind("<FocusIn>", lambda _e, tab=button: tab.draw(), add="+")
+                button.bind("<FocusOut>", lambda _e, tab=button: tab.draw(), add="+")
             button.grid(row=0, column=column, sticky="ew", padx=(0, dp(4)) if column == 0 else 0)
             self.tabs[name] = button
 
@@ -51,19 +60,25 @@ class GlobalSidebar(tk.Frame):
         self.pages.columnconfigure(0, weight=1)
         self.day_page = tk.Frame(self.pages, bg=bg)
         self.day_page.grid(row=0, column=0, sticky="nsew")
-        app._build_global_quick_add(self.day_page)
+        app._build_global_quick_add(self.day_page, sidebar=True)
         agenda = tk.Frame(self.day_page, bg=bg, padx=dp(12))
         agenda.pack(fill="both", expand=True)
         self.date_label = tk.Label(agenda, bg=bg, fg=theme.text_primary,
                                    font=(font_family, 10, "bold"), anchor="w")
-        self.date_label.pack(fill="x", pady=(dp(5), dp(6)))
+        self.date_label.pack(fill="x", pady=(dp(7), dp(7)))
         scroll = ttk.Scrollbar(agenda, orient="vertical", style="Global.Vertical.TScrollbar")
-        scroll.pack(side="right", fill="y")
-        canvas = tk.Canvas(agenda, width=1, height=1, bg=bg, highlightthickness=0,
-                           yscrollcommand=scroll.set)
+        canvas = tk.Canvas(agenda, width=1, height=1, bg=bg, highlightthickness=0)
         self.canvas = canvas
         scroll.configure(command=canvas.yview)
         canvas.pack(fill="both", expand=True)
+        def scroll_if_needed(first, last):
+            scroll.set(first, last)
+            if float(first) == 0 and float(last) == 1:
+                if scroll.winfo_manager():
+                    scroll.pack_forget()
+            elif not scroll.winfo_manager():
+                scroll.pack(side="right", fill="y", before=canvas)
+        canvas.configure(yscrollcommand=scroll_if_needed)
         self.rows = tk.Frame(canvas, bg=bg)
         inner = canvas.create_window(0, 0, window=self.rows, anchor="nw")
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(inner, width=e.width))
@@ -91,6 +106,8 @@ class GlobalSidebar(tk.Frame):
             active = name == mode
             if theme.rounded_widget_shells:
                 button.segment_active = active
+                button.corner_radius = 8
+                button.segment_fill = theme.accent_soft
                 button.accented = button.outlined = False
                 button.foreground = theme.text_primary if active else theme.text_secondary
             else:
@@ -169,6 +186,10 @@ class GlobalSidebar(tk.Frame):
             self.lift()
         else:
             self.place_forget()
+        if self.drawer_button is not None:
+            label = "收起右栏" if drawer and self.drawer_open else "打开右栏" if drawer else "当日详情"
+            if self.drawer_button.text != label:
+                self.drawer_button.set_text(label)
 
     def _resize_from_left(self, event):
         width = self.winfo_rootx() + self.winfo_width() - event.x_root

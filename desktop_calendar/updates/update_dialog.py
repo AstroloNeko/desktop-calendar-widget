@@ -11,13 +11,14 @@ from desktop_calendar.updates.release_notes import NoteBlock, inline_text as _in
 from desktop_calendar.updates.release_notes_ui import NotesDocument
 
 
-def dialog_geometry(area: WorkArea, dpi: int, parent_rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+def dialog_geometry(area: WorkArea, dpi: int, parent_rect: tuple[int, int, int, int], *,
+                    preferred: tuple[int, int] = (540, 520)) -> tuple[int, int, int, int]:
     """Bound device-pixel size and position to the owner's monitor work area."""
     scale = max(96, dpi) / 96
     # Reserve room for native frame/caption chrome too, on small monitors.
     margin = min(round(24 * scale), max(0, (min(area.width, area.height) - 1) // 2))
-    width = min(round(540 * scale), max(1, area.width - 2 * margin))
-    height = min(round(520 * scale), max(1, area.height - 2 * margin))
+    width = min(round(preferred[0] * scale), max(1, area.width - 2 * margin))
+    height = min(round(preferred[1] * scale), max(1, area.height - 2 * margin))
     px, py, pw, ph = parent_rect
     x = min(max(px + (pw - width) // 2, area.left + margin), area.right - width - margin)
     y = min(max(py + (ph - height) // 2, area.top + margin), area.bottom - height - margin)

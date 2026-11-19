@@ -56,7 +56,9 @@ from desktop_calendar.global_view.global_timeline_ui import (
     wheel_units,
 )
 from tray_icon import TrayIcon
-from global_hotkey import saved_shortcut
+from global_hotkey import saved_global_shortcuts
+from keyboard_shortcuts import (EDITORS, TEXT_WIDGETS, bind_editor_shortcuts, bind_history_shortcuts,
+                                parse_local, saved_local_shortcuts)
 from global_hotkey_ui import open_hotkey_settings
 from desktop_calendar.assistant.calendar_chat_ui import open_chat, start_chat_if_enabled
 from app_lifecycle import ApplicationLifecycleMixin
@@ -127,7 +129,7 @@ from desktop_calendar.ui.ui_draw import (
     vertical_multi_gradient,
 )
 from desktop_calendar.ui.ui_theme import THEMES, Theme, get_theme, normalize_theme_name
-from desktop_calendar.ui.themed_controls import RoundedCardShell, configure_scrollbars, themed_check
+from desktop_calendar.ui.themed_controls import RoundedCardShell, configure_scrollbars, themed_check, themed_popup_menu
 
 
 WINDOW_WIDTH = 372
@@ -561,7 +563,9 @@ class ThemeButton(LogicalCanvas):
             else:
                 background = theme.control_hover if self.state == "hover" else theme.control_pressed if self.state == "pressed" else theme.control_background
             if getattr(self, "segment_active", False):
-                background = theme.schedule_card_background if self.state == "normal" else theme.control_hover
+                background = (getattr(self, "segment_fill", theme.schedule_card_background)
+                              if self.state == "normal" else theme.control_hover)
+            focused = getattr(self, "show_focus_ring", False) and self.focus_get() == self
             self.configure(bg=self.surface_background or theme.header_background)
             rounded_rectangle(
                 self,
@@ -569,9 +573,9 @@ class ThemeButton(LogicalCanvas):
                 1,
                 width - 2,
                 height - 2,
-                theme.metrics.control_radius,
+                getattr(self, "corner_radius", theme.metrics.control_radius),
                 fill=background,
-                outline=theme.control_border if self.outlined and not theme.quiet_button_edges else "",
+                outline=theme.input_focus if focused else theme.control_border if self.outlined and not theme.quiet_button_edges else "",
                 width=1,
             )
         y_offset = 1 if self.state == "pressed" and theme.style != "frutiger" else 0
@@ -1284,8 +1288,7 @@ class EventEditor(tk.Toplevel):
         cancel.pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _event: self.close())
-        self.bind("<Control-Return>", lambda _event: self.save())
-        self.bind("<Control-s>", lambda _event: self.save())
+        bind_editor_shortcuts(self, master, event=True)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
         self._center_near_master()
@@ -1738,7 +1741,7 @@ class RoutineEditor(tk.Toplevel):
         tk.Button(actions, text="取消", command=self.close, bg=CONTROL_BACKGROUND, fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2").pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _event: self.close())
-        self.bind("<Control-Return>", lambda _event: self.save())
+        bind_editor_shortcuts(self, master)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
         area = master.dpi.work_area()
@@ -2022,7 +2025,7 @@ class CategoryEditor(tk.Toplevel):
         ThemeButton(actions, master, "取消", self.close, width=58, height=31, font_size=9, surface_background=CARD, outlined=True).pack(side="right", padx=(0, 7))
 
         self.bind("<Escape>", lambda _event: self.close())
-        self.bind("<Control-Return>", lambda _event: self.save())
+        bind_editor_shortcuts(self, master)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
         center_toplevel(self, master, self.WIDTH, self.HEIGHT, y_offset=36)
@@ -2243,6 +2246,7 @@ class DayDetailDialog(tk.Toplevel):
 
     def __init__(self, master: "CalendarApp", day: date) -> None:
         super().__init__(master)
+        bind_history_shortcuts(self, master)
         self.master_app = master
         self.day = day
         self.title("单日事项详情")
@@ -2558,6 +2562,7 @@ class DDLListDialog(tk.Toplevel):
 
     def __init__(self, master: "CalendarApp") -> None:
         super().__init__(master)
+        bind_history_shortcuts(self, master)
         self.master_app = master
         self.completed_open = False
         self.logical_height = self.HEIGHT
@@ -3388,7 +3393,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             control.place(x=dp(x), y=dp(control_y), width=dp(control_width), height=dp(control_height))
             x += control_width + 2
         Tooltip(previous, "上个月（滚轮向上 / PgUp）")
-        Tooltip(today, "回到今天（Ctrl+T）")
+        Tooltip(today, "回到今天")
         Tooltip(following, "下个月（滚轮向下 / PgDn）")
         Tooltip(self.mode_button, "桌面模式空闲时不遮挡应用；点击月历会临时前置")
         Tooltip(global_view, "打开全局视图")
@@ -3499,7 +3504,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.global_summary_label.pack(side="left")
         day_detail_button = ThemeButton(info_bar, self, "右侧面板", lambda: self.global_detail_frame.toggle_drawer(), width=66, height=23, font_size=8, surface_background=theme.panel_secondary, outlined=True)
         day_detail_button.pack(side="right", padx=(dp(8), 0))
-        ThemeButton(info_bar, self, "搜索 Ctrl+K", self.open_search, width=90, height=23,
+        ThemeButton(info_bar, self, "搜索", self.open_search, width=90, height=23,
                     font_size=8, surface_background=theme.panel_secondary, outlined=True).pack(side="right", padx=(dp(8), 0))
         segment_surface = theme.control_background if theme.rounded_widget_shells else theme.panel_secondary
         mode_switch = tk.Frame(
@@ -3653,6 +3658,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.global_detail_frame = GlobalSidebar(
             self.global_workspace, self, button_factory=ThemeButton, font_family=FONT,
             snapshot=getattr(self, "_global_sidebar_snapshot", None),
+            drawer_button=day_detail_button,
         )
 
         self.global_status_label = tk.Label(
@@ -4375,26 +4381,46 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.after(80, self.apply_window_mode)
 
     def _bind_shortcuts(self) -> None:
-        self.bind_all("<Control-k>", lambda _event: self.open_search(), add="+")
-        self.bind_all("<Control-z>", lambda event: self._history_shortcut(event, redo=False), add="+")
-        self.bind_all("<Control-y>", lambda event: self._history_shortcut(event, redo=True), add="+")
-        self.bind_all("<Control-Shift-Z>", lambda event: self._history_shortcut(event, redo=True), add="+")
-        self.bind("<Control-n>", lambda _event: self._open_primary_action())
-        self.bind("<Control-t>", lambda _event: self.go_today())
-        self.bind("<Control-g>", lambda _event: self.toggle_global_view())
-        self.bind("<Home>", lambda event: self._keyboard_command(event, self.go_today))
-        self.bind("<Key-t>", lambda event: self._keyboard_command(event, self.go_today))
-        self.bind("<Key-n>", lambda event: self._keyboard_command(event, self._open_primary_action))
-        self.bind("<Return>", lambda event: self._keyboard_command(event, self._open_primary_action))
-        self.bind("<Prior>", lambda _event: self._schedule_page_month(-1))
-        self.bind("<Next>", lambda _event: self._schedule_page_month(1))
-        self.bind("<Left>", lambda event: self._move_selection(event, -1))
-        self.bind("<Right>", lambda event: self._move_selection(event, 1))
-        self.bind("<Up>", lambda event: self._move_selection(event, -7))
-        self.bind("<Down>", lambda event: self._move_selection(event, 7))
+        self._apply_calendar_shortcuts()
         self.bind("<FocusOut>", self._on_focus_out)
         self.bind("<ButtonPress>", self._activate_desktop_session, add="+")
         self.bind("<Escape>", self._handle_escape)
+
+    def _apply_calendar_shortcuts(self) -> None:
+        for sequence, callback in getattr(self, "_calendar_shortcut_sequences", ()):
+            self.unbind(sequence, callback)
+        self._calendar_shortcut_sequences = []
+        self._calendar_shortcut_values = saved_local_shortcuts(self.store.settings)
+        commands = {
+            "search": self.open_search, "primary": self._open_primary_action,
+            "today": self.go_today, "toggle_view": self.toggle_global_view,
+            "previous_month": lambda: self._schedule_page_month(-1),
+            "next_month": lambda: self._schedule_page_month(1),
+        }
+        day_offsets = {"left_day": -1, "right_day": 1, "up_week": -7, "down_week": 7}
+
+        def run(event, name, combo):
+            # Unmodified navigation and text editing always belong to the input.
+            editing = event.widget.winfo_class() in TEXT_WIDGETS
+            if name in ("undo", "redo"):
+                return self._history_shortcut(event, redo=name == "redo")
+            if editing and (name in day_offsets or "+" not in combo or
+                            combo in {"Ctrl+" + key for key in "ACVXYZ"}):
+                return None
+            if name in day_offsets:
+                return self._move_selection(event, day_offsets[name])
+            commands[name]()
+            return "break"
+
+        for name, value in self._calendar_shortcut_values.items():
+            if name in EDITORS:
+                continue
+            for combo, sequence in parse_local(value).items():
+                callback = self.bind(sequence, lambda event, n=name, c=combo: run(event, n, c))
+                self._calendar_shortcut_sequences.append((sequence, callback))
+
+    def _open_assistant(self) -> None:
+        open_chat(self)
 
     def _open_primary_action(self) -> None:
         if primary_action_for_view(self.view_mode) == "create":
@@ -5341,7 +5367,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         item = self.select_timeline_item(item_id)
         source = self.store.event_by_id(item.id) if item else None
         if source:
-            menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
+            menu = themed_popup_menu(self, self.theme, (FONT, 9))
             menu.add_command(
                 label="编辑",
                 command=lambda: self._queue_context_menu_action(menu, lambda: self.open_editor(source)),
@@ -5418,13 +5444,13 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
     def _show_flow_range_menu(self, selected_range: tuple[date, date, int], x: int, y: int) -> None:
         start_date, end_date, duration_days = selected_range
-        menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
+        menu = themed_popup_menu(self, self.theme, (FONT, 9))
         menu.add_command(
             label="新增事项",
             command=lambda: self._open_flow_range_editor(start_date, end_date, duration_days),
         )
         menu.add_command(label="新增习惯", command=self.open_routine_editor)
-        status_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        status_menu = themed_popup_menu(menu, self.theme, (FONT, 9))
         for status, label in DATE_STATUS_LABELS.items():
             status_menu.add_command(
                 label=label,
@@ -5571,12 +5597,15 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if sidebar is not None and sidebar.winfo_exists():
             sidebar.refresh_day()
 
-    def _build_global_quick_add(self, parent) -> None:
+    def _build_global_quick_add(self, parent, *, sidebar=False) -> None:
         theme, dp = self.theme, self.dpi.px
         quick_surface = blend(theme.schedule_background, theme.environment_haze, 0.18) if theme.style == "frutiger" else theme.schedule_background
-        quick_frame = tk.Frame(parent, bg=quick_surface, padx=dp(14), pady=dp(8))
+        if sidebar:
+            quick_surface = theme.workspace_detail
+        quick_frame = tk.Frame(parent, bg=quick_surface, padx=dp(12 if sidebar else 14), pady=dp(8))
         quick_frame.pack(side="bottom", fill="x")
-        tk.Label(quick_frame, text="快速添加", bg=quick_surface, fg=theme.text_secondary, font=(FONT, 8, "bold")).pack(side="left", padx=(0, dp(9)))
+        tk.Label(quick_frame, text="快速添加", bg=quick_surface, fg=theme.text_secondary, font=(FONT, 8, "bold")).pack(
+            **({"anchor": "w", "pady": (0, dp(4))} if sidebar else {"side": "left", "padx": (0, dp(9))}))
         self._quick_entry_hovered = False
         self.quick_var = tk.StringVar(value="")
         self.quick_entry = tk.Entry(
@@ -5590,6 +5619,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             highlightbackground=theme.input_border,
             highlightcolor=theme.input_focus,
             font=(FONT, 9),
+            **({"width": 1} if sidebar else {}),
         )
         self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
         self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
@@ -5607,6 +5637,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             surface_background=quick_surface,
             outlined=True,
         )
+        if sidebar and theme.rounded_widget_shells:
+            self.quick_options_button.corner_radius = 8
         self.quick_options_button.pack(side="right", padx=(dp(6), 0))
         self._place_quick_entry(quick_frame)
         self._refresh_quick_options_button()
@@ -5805,7 +5837,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                             highlightbackground=theme.schedule_card_border, cursor="hand2")
             card.pack(fill="x", pady=(0, 5), padx=1)
             return card
-        shell = RoundedCardShell(parent, theme, dp, background)
+        shell = RoundedCardShell(parent, theme, dp, background, surface=parent.cget("bg"))
         shell.pack(fill="x", padx=dp(1), pady=(0, dp(6)))
         card = tk.Frame(shell, bg=background, cursor="hand2")
         card.pack(fill="both", expand=True, padx=dp(6), pady=dp(3))
@@ -5985,13 +6017,6 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if event.widget.winfo_class() in ("Entry", "Text", "TEntry", "TCombobox"):
             return None
         self.select_day(self.selected + timedelta(days=days))
-        return "break"
-
-    @staticmethod
-    def _keyboard_command(event: tk.Event, command: Callable[[], None]) -> Optional[str]:
-        if event.widget.winfo_class() in ("Entry", "Text", "TEntry", "TCombobox"):
-            return None
-        command()
         return "break"
 
     def _calendar_wheel(self, event: tk.Event) -> str:
@@ -6516,8 +6541,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 self._render_global_timeline(refresh_sidebar=False)
             elif self.selected in change.affected_dates:
                 # Calendar Flow also allows selecting spillover days from another month.
-                self.global_detail_frame.day_dirty = True
-                self._update_global_detail()
+                sidebar = getattr(self, "global_detail_frame", None)
+                if sidebar is not None and sidebar.winfo_exists():
+                    sidebar.day_dirty = True
+                    self._update_global_detail()
         elif month_changed:
             self.render()
             return
@@ -6673,8 +6700,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         )
 
     def show_quick_options(self) -> None:
-        menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
-        color_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        menu = themed_popup_menu(self, self.theme, (FONT, 9))
+        color_menu = themed_popup_menu(menu, self.theme, (FONT, 9))
         self.quick_color_var = tk.StringVar(value=self.quick_color)
         for color_name, color_value in COLORS.items():
             color_menu.add_radiobutton(
@@ -6685,7 +6712,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             )
         menu.add_cascade(label="颜色", menu=color_menu)
 
-        event_type_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        event_type_menu = themed_popup_menu(menu, self.theme, (FONT, 9))
         self.quick_event_type_var = tk.StringVar(value=self.quick_event_type)
         for event_type, label in EVENT_TYPE_OPTIONS:
             event_type_menu.add_radiobutton(
@@ -6731,7 +6758,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if not self.quick_placeholder_active and self.quick_var.get().strip():
             return
         self.quick_placeholder_active = True
-        self.quick_var.set(f"快速添加到 {self.selected.month}月{self.selected.day}日，回车保存")
+        self.quick_var.set("输入后回车" if self.view_mode == "global" else
+                           f"快速添加到 {self.selected.month}月{self.selected.day}日，回车保存")
         self.quick_entry.configure(fg=self.theme.text_muted)
 
     def _quick_entry_hover(self, hovered: bool) -> None:
@@ -6976,7 +7004,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.store.save()
 
     def show_day_menu(self, day: date, x: int, y: int) -> None:
-        menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
+        menu = themed_popup_menu(self, self.theme, (FONT, 9))
         menu.add_command(label="查看当天详情", command=lambda: self.open_day_detail(day))
         menu.add_command(label="新建日程", command=lambda: self.open_editor(selected=day))
         menu.add_command(label="快速输入", command=self._focus_quick_entry)
@@ -6985,7 +7013,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         menu.tk_popup(x, y)
 
     def show_event_menu(self, event: Event, x: int, y: int) -> None:
-        menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
+        menu = themed_popup_menu(self, self.theme, (FONT, 9))
         menu.add_command(label="编辑", command=lambda: self.open_editor(event))
         menu.add_command(label="标记为未完成" if event.done else "标记为已完成", command=lambda: self.toggle_done(event))
         if not event.done:
@@ -7037,12 +7065,13 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.open_ddl_list()
 
     def show_main_menu(self) -> None:
-        menu = tk.Menu(self, tearoff=False, font=(FONT, 9))
-        menu.add_command(label="搜索事项 / 快捷命令\tCtrl+K",
+        menu = themed_popup_menu(self, self.theme, (FONT, 9))
+        shortcuts = saved_local_shortcuts(self.store.settings)
+        menu.add_command(label="搜索事项 / 快捷命令", accelerator=shortcuts["search"],
                          command=lambda: self._queue_context_menu_action(menu, self.open_search))
-        menu.add_command(label=f"撤销 {self.event_commands.undo_label}\tCtrl+Z", command=self.undo_event,
+        menu.add_command(label=f"撤销 {self.event_commands.undo_label}", accelerator=shortcuts["undo"], command=self.undo_event,
                          state="normal" if self.event_commands.can_undo else "disabled")
-        menu.add_command(label=f"重做 {self.event_commands.redo_label}\tCtrl+Y", command=self.redo_event,
+        menu.add_command(label=f"重做 {self.event_commands.redo_label}", accelerator=shortcuts["redo"], command=self.redo_event,
                          state="normal" if self.event_commands.can_redo else "disabled")
         menu.add_separator()
         menu.add_command(
@@ -7058,7 +7087,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         menu.add_command(label="管理习惯清单…", command=self.open_routine_manager)
         menu.add_command(label="查看全部 DDL…", command=self.open_ddl_list)
         menu.add_separator()
-        theme_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        theme_menu = themed_popup_menu(menu, self.theme, (FONT, 9))
         self.theme_var = tk.StringVar(value=self.theme_name)
         for theme_name, theme in THEMES.items():
             theme_menu.add_radiobutton(
@@ -7068,7 +7097,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 command=lambda name=theme_name: self.set_theme(name),
             )
         menu.add_cascade(label=f"主题 · {self.theme.display_name}", menu=theme_menu)
-        opacity_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        opacity_menu = themed_popup_menu(menu, self.theme, (FONT, 9))
         current_opacity = round(float(self.attributes("-alpha")), 2)
         self.opacity_var = tk.DoubleVar(value=current_opacity)
         for label, value in (("清晰（100%，推荐）", 1.0), ("轻透（97%）", 0.97), ("柔和（92%）", 0.92)):
@@ -7082,14 +7111,14 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                          command=lambda: self._queue_context_menu_action(menu, self.open_release_history))
         menu.add_command(label="后台与提醒…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_settings))
-        menu.add_command(label="全局唤起快捷键…",
+        menu.add_command(label="快捷键设置…",
                          command=lambda: self._queue_context_menu_action(menu, lambda: open_hotkey_settings(self)))
-        menu.add_command(label="AI 私人助理…",
-                         command=lambda: self._queue_context_menu_action(menu, lambda: open_chat(self)))
+        menu.add_command(label="AI 私人助理…", accelerator=saved_global_shortcuts(self.store.settings)["assistant"],
+                         command=lambda: self._queue_context_menu_action(menu, self._open_assistant))
         menu.add_command(label="提醒计划…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_plans))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
-        data_menu = tk.Menu(menu, tearoff=False, font=(FONT, 9))
+        data_menu = themed_popup_menu(menu, self.theme, (FONT, 9))
         data_menu.add_command(label='当前存储：SQLite 已启用' if self._sqlite_backup_boundary() else '当前存储：JSON', state='disabled')
         data_menu.add_command(label='SQLite 已启用' if self._sqlite_backup_boundary() else '升级到 SQLite…',
             state='disabled' if self._sqlite_backup_boundary() else 'normal',
@@ -7150,7 +7179,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             f"{APP_NAME} v{__version__}",
             resource_path("assets/calendar.ico"),
             self.tray_actions.put,
-            hotkey=saved_shortcut(self.store.settings),
+            hotkey=saved_global_shortcuts(self.store.settings),
         )
         if not self.tray_icon.start() and self.tray_icon.error:
             log_exception(
@@ -7160,7 +7189,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             )
 
         if self.tray_icon.hotkey_error:
-            self._show_feedback("全局快捷键不可用，请在“更多 → 全局唤起快捷键”中更换组合。")
+            self._show_feedback("部分系统全局快捷键不可用，请在“更多 → 快捷键设置”中查看。")
 
     def toggle_autostart(self, enabled: bool) -> None:
         try:
@@ -7185,10 +7214,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             "习惯清单：习惯按周期独立打卡，待办完成一次即结束\n"
             "滚轮 / PgUp / PgDn：切换月份\n"
             "方向键：移动所选日期\n"
-            "Ctrl+N：打开当天事项详情\n"
-            "Ctrl+T：回到今天\n"
-            "Ctrl+G：打开 / 关闭全局视图\n"
-            "Ctrl+Z：撤销事项操作；Ctrl+Y / Ctrl+Shift+Z：重做\n"
+            "搜索、新建、视图切换、撤销重做及系统全局唤起：见“更多 → 快捷键设置”\n"
             "文本输入时优先使用文本编辑自身的撤销\n"
             "拖动顶部：移动挂件位置\n\n"
             "紧凑视图横线 / Alt+F4：保持原有隐藏到通知区域行为\n"

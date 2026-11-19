@@ -86,10 +86,14 @@ class EventCommandUITests(unittest.TestCase):
         self.ui.undo_event.assert_called_once()
 
     def test_shortcuts_are_registered_for_root_and_detail_windows(self):
-        ui = Mock()
-        CalendarApp._bind_shortcuts(ui)
-        sequences = {call.args[0] for call in ui.bind_all.call_args_list}
-        self.assertTrue({"<Control-z>", "<Control-y>", "<Control-Shift-Z>"} <= sequences)
+        from keyboard_shortcuts import bind_history_shortcuts
+        ui = Mock(store=self.store, _calendar_shortcut_sequences=[])
+        detail = Mock()
+        CalendarApp._apply_calendar_shortcuts(ui)
+        bind_history_shortcuts(detail, ui)
+        expected = {"<Control-KeyPress-z>", "<Control-KeyPress-y>", "<Control-Shift-KeyPress-Z>"}
+        for window in (ui, detail):
+            self.assertTrue(expected <= {call.args[0] for call in window.bind.call_args_list})
 
     def test_failed_save_uses_modal_owner_without_refresh_or_history(self):
         event = self.seed()
@@ -158,6 +162,11 @@ class EventCommandUITests(unittest.TestCase):
         self.ui.shown_month = 9
         CalendarApp._refresh_event_change(self.ui, change)
         self.ui._render_global_timeline.assert_not_called()
+        self.ui.global_detail_frame = SimpleNamespace(winfo_exists=lambda: True, day_dirty=False)
+        self.ui._update_global_detail = Mock()
+        CalendarApp._refresh_event_change(self.ui, change)
+        self.assertTrue(self.ui.global_detail_frame.day_dirty)
+        self.ui._update_global_detail.assert_called_once()
 
     def test_category_catalog_edit_clears_history_but_does_not_save_twice(self):
         self.history.upsert(Event("task", "事项", "2026-08-07T18:00"))

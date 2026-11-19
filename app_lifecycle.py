@@ -177,6 +177,11 @@ class ApplicationLifecycleMixin:
             self.hide_to_tray()
         elif action in ("show", "global"):
             self.restore_from_tray(global_view=action == "global")
+        elif action == "assistant":
+            # Restore the current view, not necessarily Global. Existing modals keep
+            # their grab and are brought forward by restore_from_tray instead.
+            if self.restore_from_tray():
+                self._open_assistant()
         elif action == "tray_unavailable" and self.lifecycle.hidden:
             self.restore_from_tray()
 

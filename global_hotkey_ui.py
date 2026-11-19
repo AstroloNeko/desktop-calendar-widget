@@ -1,8 +1,9 @@
-"""Small themed modal for the shared Global workspace accelerator."""
+"""Unified shortcut settings for the desktop calendar."""
 import tkinter as tk
 
-from global_hotkey import DEFAULT_HOTKEY, saved_shortcut, save_shortcut
-from desktop_calendar.reminders.reminder_ui import reminder_button
+from global_hotkey import GLOBAL_DEFAULTS, GLOBAL_LABELS, saved_global_shortcuts
+from keyboard_shortcuts import LOCAL_COMMANDS, saved_local_shortcuts, save_shortcuts
+from desktop_calendar.ui.themed_controls import SettingsScroll, form_button, form_entry
 from desktop_calendar.updates.update_dialog import dialog_geometry
 
 
@@ -20,48 +21,88 @@ class HotkeyDialog(tk.Toplevel):
         self.withdraw()
         self.app, self._closing = app, False
         theme, dp, font = app.theme, app.dpi.px, app.search_font
-        self.title("全局唤起快捷键")
+        self.title("快捷键设置")
         self.configure(bg=theme.panel_background)
         width, height, x, y = dialog_geometry(app.dpi.work_area(), app.dpi.dpi,
             (app.winfo_rootx(), app.winfo_rooty(), app.winfo_width(), app.winfo_height()))
         self.geometry(f"{width}x{height}{x:+d}{y:+d}")
-        self.value = tk.StringVar(value=saved_shortcut(app.store.settings))
-        self.status = tk.StringVar(value=getattr(app.tray_icon, 'hotkey_error', None) or
-                                  "输入组合键名称后保存；留空可关闭全局快捷键。")
+        self.minsize(min(width, dp(320)), min(height, dp(260)))
+        self.global_values = {name: tk.StringVar(self, value=value)
+                              for name, value in saved_global_shortcuts(app.store.settings).items()}
+        self.local_values = {name: tk.StringVar(self, value=value)
+                             for name, value in saved_local_shortcuts(app.store.settings).items()}
+        self.status = tk.StringVar(self, value=getattr(app.tray_icon, 'hotkey_error', None) or "")
         self.actions = tk.Frame(self, bg=theme.panel_background)
         self.actions.pack(side='bottom', fill='x', padx=dp(16), pady=dp(12))
-        reminder_button(self.actions, app, "取消", self.close).pack(side='right')
-        self.save_button = reminder_button(self.actions, app, "保存", self.save, primary=True)
-        self.save_button.pack(side='right', padx=dp(6))
-        reminder_button(self.actions, app, "恢复默认", lambda: self.value.set(DEFAULT_HOTKEY)).pack(side='left')
-        content = tk.Frame(self, bg=theme.panel_background)
-        content.pack(fill='both', expand=True, padx=dp(16), pady=dp(12))
-        def label(text=None, **options):
-            widget = tk.Label(content, text=text, bg=theme.panel_background, fg=theme.text_primary,
-                              font=(font, 10), anchor='w', justify='left', wraplength=width-dp(40), **options)
-            widget.pack(fill='x', pady=dp(7))
-            return widget
-        label("一键打开全局视图")
-        label("默认 Ctrl+Alt+D；可自定义为 Ctrl+Shift+D、Alt+F8 等。\n支持字母、数字和 F1–F24，至少包含 Ctrl 或 Alt。")
-        self.entry = tk.Entry(content, textvariable=self.value, font=(font, 11),
-            bg=theme.input_background, fg=theme.text_primary, insertbackground=theme.text_primary,
-            relief='flat', highlightthickness=dp(1), highlightbackground=theme.input_border,
-            highlightcolor=theme.input_focus)
-        self.entry.pack(fill='x', pady=dp(10), ipady=dp(5))
-        label("程序需要在后台运行。唤起后直接进入全局视图；有未关闭的编辑弹窗时先显示弹窗，保留未保存内容。")
-        label(textvariable=self.status)
+        self.save_button, save = form_button(self.actions, app, "保存", self.save, primary=True)
+        _, cancel = form_button(self.actions, app, "取消", self.close, quiet=True)
+        _, reset = form_button(self.actions, app, "恢复默认", self.reset)
+        save.pack(side='right')
+        cancel.pack(side='right', padx=(0, dp(6)))
+        reset.pack(side='left')
+        tk.Label(self, textvariable=self.status, bg=theme.panel_background, fg=theme.text_primary,
+                 font=(font, 9), justify='left', wraplength=max(dp(120), width-dp(36))).pack(
+                     side='bottom', fill='x', padx=dp(16))
+
+        tk.Frame(self, height=dp(1), bg=theme.divider).pack(side='bottom', fill='x')
+        body = SettingsScroll(self, app)
+        body.pack(fill='both', expand=True, padx=dp(16), pady=(dp(12), 0))
+        content = body.content
+        content.columnconfigure(1, weight=1)
+        wrapped = []
+
+        def label(text, row, *, heading=False, note=False):
+            widget = tk.Label(content, text=text, bg=theme.panel_background,
+                              fg=theme.text_secondary if note else theme.text_primary,
+                              wraplength=max(dp(100), width-dp(75)) if note else dp(125),
+                              font=(font, 8 if note else 10 if heading else 9, 'bold' if heading else 'normal'),
+                              anchor='w', justify='left')
+            widget.grid(row=row, column=0, columnspan=2 if heading or note else 1, sticky='ew',
+                        pady=(dp(8) if heading else dp(3), dp(3)), padx=(0, dp(6)))
+            if heading or note:
+                wrapped.append(widget)
+
+        first = None
+        def field(text, value, row):
+            nonlocal first
+            label(text, row)
+            entry, control = form_entry(content, app, value, width=16)
+            control.grid(row=row, column=1, sticky='ew', pady=dp(3),
+                         ipady=0 if theme.rounded_widget_shells else dp(4), padx=(0, dp(6)))
+            entry.bind('<FocusIn>', lambda _e: body.reveal(entry), add='+')
+            if first is None:
+                first = entry
+
+        label("系统全局 · 月历在后台运行时也有效", 0, heading=True)
+        for row, (name, text) in enumerate(GLOBAL_LABELS.items(), 1):
+            field(text, self.global_values[name], row)
+        label("全局组合需含 Ctrl 或 Alt，末键为字母、数字或 F1–F24。留空可停用。", 3, note=True)
+        label("月历内快捷键", 4, heading=True)
+        label("支持 Enter、Home、PgUp/PgDn 和方向键。多个组合用英文逗号隔开；留空可停用。", 5, note=True)
+        for row, (name, (text, _default)) in enumerate(LOCAL_COMMANDS.items(), 6):
+            field(text, self.local_values[name], row)
+        def wrap(event):
+            for widget in wrapped:
+                widget.configure(wraplength=max(dp(100), event.width-dp(12)))
+        body.canvas.bind('<Configure>', wrap, add='+')
         self.bind('<Escape>', lambda _e: self.close())
         self.protocol('WM_DELETE_WINDOW', self.close)
         app.present_modal(self, app)
         self.grab_set()
-        self.entry.focus_set()
+        first.focus_set()
+
+    def reset(self):
+        for name, value in GLOBAL_DEFAULTS.items():
+            self.global_values[name].set(value)
+        for name, (_, value) in LOCAL_COMMANDS.items():
+            self.local_values[name].set(value)
 
     def save(self):
         try:
-            save_shortcut(self.app, self.value.get())
+            save_shortcuts(self.app, {name: value.get() for name, value in self.global_values.items()},
+                           {name: value.get() for name, value in self.local_values.items()})
         except (OSError, ValueError) as error:
             self.status.set(f"快捷键设置未完成：{error}")
-            self.entry.focus_set()
             return
         self.close()
 

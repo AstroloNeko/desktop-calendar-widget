@@ -13,7 +13,7 @@ from notification_backend import WindowsNotificationBackend
 from desktop_calendar.reminders.reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
 from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.ui.ui_draw import blend
-from desktop_calendar.ui.themed_controls import themed_check
+from desktop_calendar.ui.themed_controls import form_button, form_entry, themed_check
 
 
 def reminder_button(parent, app, text, command, *, primary=False):
@@ -261,10 +261,12 @@ class ReminderSettingsDialog(tk.Toplevel):
         actions.pack(side="bottom", fill="x", padx=dp(14), pady=dp(10))
         def button(parent, text, command, **options):
             return reminder_button(parent, app, text, command, **options)
-        button(actions, "关闭", self.close).pack(side="right")
-        self.save_button = button(actions, "保存设置", self.save, primary=True)
-        self.save_button.pack(side="right", padx=dp(6))
-        button(actions, "保存并查看计划", self.show_plans).pack(side="left")
+        _, close = form_button(actions, app, "关闭", self.close, quiet=True)
+        self.save_button, save = form_button(actions, app, "保存设置", self.save, primary=True)
+        _, plans = form_button(actions, app, "保存并查看计划", self.show_plans)
+        close.pack(side="right")
+        save.pack(side="right", padx=(0, dp(6)))
+        plans.pack(side="left")
         tk.Label(self, textvariable=self.status, bg=theme.panel_background, fg=theme.text_secondary,
                  wraplength=width - dp(30), anchor="w", justify="left", font=(font, 8)).pack(side="bottom", fill="x", padx=dp(14))
         tk.Frame(self, bg=theme.divider, height=dp(1)).pack(side="bottom", fill="x")
@@ -320,11 +322,6 @@ class ReminderSettingsDialog(tk.Toplevel):
                            font=(font, 9), cursor="hand2", anchor="w", wraplength=width-dp(90))
             widget.pack(fill="x", pady=dp(4))
             wrapped.append(widget)
-        def entry(parent, variable):
-            return tk.Entry(parent, textvariable=variable, bg=theme.input_background, fg=theme.text_primary,
-                            insertbackground=theme.text_primary, font=(font, 9), relief="flat", bd=0,
-                            highlightthickness=dp(1), highlightbackground=theme.input_border,
-                            highlightcolor=theme.input_focus)
         def field(text, variable, values=None, *, wide=False):
             row = tk.Frame(body, bg=theme.workspace_detail)
             row.pack(fill="x", pady=dp(4))
@@ -334,11 +331,11 @@ class ReminderSettingsDialog(tk.Toplevel):
             if not wide:
                 field_labels.append(caption)
             if values is not None:
-                widget = ttk.Combobox(row, textvariable=variable, values=values, state="readonly", font=(font, 9), width=13)
+                widget = control = ttk.Combobox(row, textvariable=variable, values=values, state="readonly", font=(font, 9), width=13)
             else:
-                widget = entry(row, variable)
-                widget.configure(width=15)
-            widget.pack(side="top" if wide else "right", fill="x" if wide else "none")
+                widget, control = form_entry(row, app, variable, width=13)
+            control.pack(side="top" if wide else "right", fill="x" if wide else "none",
+                         ipady=dp(4) if values is None and not theme.rounded_widget_shells else 0)
             return widget
         label("关闭窗口 → " + ("隐藏到系统托盘" if app.lifecycle.close_hides else "彻底退出")
               + "\n双击托盘图标恢复；右键托盘菜单可彻底退出。")
@@ -374,7 +371,8 @@ class ReminderSettingsDialog(tk.Toplevel):
                      font=(font, 8), anchor="w").grid(row=0, column=column, sticky="w", pady=(dp(4), dp(3)))
         ttk.Combobox(self.custom, textvariable=self.rule_days, values=tuple(map(str, LEADS)), width=8,
                      state="readonly", font=(font, 9)).grid(row=1, column=0, sticky="ew", padx=(0, dp(6)))
-        entry(self.custom, self.rule_clock).grid(row=1, column=1, sticky="ew")
+        _, clock = form_entry(self.custom, app, self.rule_clock, width=8)
+        clock.grid(row=1, column=1, sticky="ew", ipady=0 if theme.rounded_widget_shells else dp(4))
         self.cancel_button = button(body, "取消该事项的稍后提醒", self.cancel_snooze)
         self.cancel_button.pack(anchor="w", pady=dp(10))
         def rewrap(event):

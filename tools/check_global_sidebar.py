@@ -1,4 +1,4 @@
-"""Modern-only Windows smoke for the right workspace against a synthetic Store."""
+"""Windows smoke for the right workspace against a synthetic Store."""
 import argparse
 import ctypes
 from ctypes import wintypes as w
@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import CalendarApp
+from app import CalendarApp, GLOBAL_MIN_WIDTH, GLOBAL_MIN_HEIGHT
 from calendar_core import Event, Store
 from desktop_calendar.global_view.global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
 from tools.check_calendar_chat import wait
@@ -54,6 +54,7 @@ def clickable(button):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--screenshots', type=Path)
+    parser.add_argument('--theme', choices=('modern', 'slate', 'aero', 'paper', 'frutiger'), default='modern')
     args = parser.parse_args()
     if args.screenshots:
         from tools.check_habit_schedules import capture_own_window
@@ -65,7 +66,7 @@ def main():
         first, second = today.replace(day=2), today.replace(day=3)
         store.events = [Event(f'day-{i}', f'当日样例 {i}', f'{first.isoformat()}T09:00:00') for i in range(28)]
         store.events += [Event('delete-me', '隔离删除样例', f'{second.isoformat()}T12:00:00')]
-        store.settings.update(theme='modern', global_view_hotkey='Ctrl+Alt+F20', assistant_hotkey='Ctrl+Alt+F19')
+        store.settings.update(theme=args.theme, global_view_hotkey='Ctrl+Alt+F20', assistant_hotkey='Ctrl+Alt+F19')
         store.save()
         with patch.object(CalendarApp, 'check_reminders'):
             app = CalendarApp(store)
@@ -83,6 +84,9 @@ def main():
                 side = app.global_detail_frame
                 side.show()
                 pump(app, .15)
+                full_geometry = app.geometry()
+                narrow_geometry = (f'{app.dpi.px(GLOBAL_MIN_WIDTH)}x{app.dpi.px(GLOBAL_MIN_HEIGHT)}'
+                                   f'{area.left:+d}{area.top:+d}')
                 logical_width = app.dpi.logical(app.global_workspace.winfo_width())
                 assert side.winfo_width() == app.dpi.px(GLOBAL_TIMELINE_LAYOUT.detail_panel_width(logical_width))
                 if app.dpi.logical(app.global_workspace.winfo_width()) >= side.DOCK_BELOW:
@@ -92,8 +96,11 @@ def main():
                     pump(app)
                     assert side.winfo_width() > old_width
                 wait(app, lambda: '当日样例 27' in set(label_texts(side.rows)), 'daily sidebar populated')
+                quick_y = app.quick_entry.winfo_rooty()
                 side.canvas.yview_moveto(1.0)
+                app.update_idletasks()
                 assert 0 < side.canvas.yview()[0] < 1
+                assert app.quick_entry.winfo_rooty() == quick_y
                 inside(app.quick_options_button, side)
                 assert app.quick_entry.winfo_viewable()
 
@@ -137,6 +144,17 @@ def main():
                 clickable(chat.send_button)
                 if args.screenshots:
                     capture_own_window(app, args.screenshots / 'assistant-idle.png')
+                full_label = '这个很长的中文会话名称不应挤走右边的设置按钮' * 3
+                chat.display({'sessions': [{'session_id': chat.session_id, 'label': full_label}],
+                              'messages': [{'role': 'user', 'content': '一条较长的中文提问' * 20},
+                                           {'role': 'assistant', 'content': '一条较长的中文答复' * 35}]})
+                pump(app)
+                assert chat.sessions.get().endswith('…') and full_label in chat.sessions['values']
+                assert chat.transcript.tag_ranges('user') and chat.transcript.tag_ranges('assistant')
+                assert chat.transcript.yview()[0] > 0
+                clickable(chat.settings_button)
+                if args.screenshots:
+                    capture_own_window(app, args.screenshots / 'assistant-long.png')
                 chat.display({'status': 'clarification_required', 'habit_candidates': [
                     {'title': '隔离习惯', 'schedule': '每天', 'object_type': 'habit'}]})
                 pump(app)
@@ -167,12 +185,27 @@ def main():
                     for button in (chat.send_button, chat.confirm_button, chat.cancel_button):
                         clickable(button)
                 request_delete()
+                side.preferred_width = None
+                app.geometry(narrow_geometry)
+                pump(app, .2)
+                assert side.winfo_manager() == 'place'
+                assert side.winfo_width() == app.dpi.px(side.MIN_WIDTH)
+                active_tab = side.tabs['assistant']
+                if app.theme.rounded_widget_shells:
+                    _, _, right, _ = active_tab.bbox('all')
+                    assert abs(active_tab.winfo_width() - right) <= app.dpi.px(4)
+                assert chat.transcript.winfo_height() >= app.dpi.px(15)
+                for button in (chat.send_button, chat.confirm_button, chat.cancel_button):
+                    inside(button, side)
+                    clickable(button)
                 if args.screenshots:
                     capture_own_window(app, args.screenshots / 'assistant-confirm.png')
                 chat.cancel_button.invoke()
                 wait(app, lambda: not chat.busy, 'cancel delete')
                 assert store.event_by_id('delete-me') is not None
                 assert not chat.confirm_button.winfo_viewable()
+                app.geometry(full_geometry)
+                pump(app, .2)
                 request_delete()
                 chat.confirm_button.invoke()
                 wait(app, lambda: not chat.busy, 'confirm delete')
@@ -189,9 +222,8 @@ def main():
                 assert side.chat is chat and chat.input.get('1.0', 'end-1c') == '未发送草稿'
                 wait(app, lambda: not chat.busy, 'resume embedded chat')
 
-                narrow = min(width, app.dpi.px(780))
                 side.preferred_width = None
-                app.geometry(f'{narrow}x{min(height, app.dpi.px(520))}{area.left:+d}{area.top:+d}')
+                app.geometry(narrow_geometry)
                 pump(app, .25)
                 assert side.winfo_manager() == 'place'
                 assert side.winfo_width() == app.dpi.px(GLOBAL_TIMELINE_LAYOUT.detail_min_width)
@@ -212,6 +244,11 @@ def main():
                 app._focus_quick_entry()
                 pump(app)
                 assert side.winfo_manager() == 'place' and side.mode == 'day' and app.quick_entry.winfo_viewable()
+                inside(app.quick_entry, side, minimum_width=app.dpi.px(60))
+                inside(app.quick_options_button, side)
+                clickable(app.quick_options_button)
+                if args.screenshots:
+                    capture_own_window(app, args.screenshots / 'day-narrow.png')
 
                 # The earlier editable shortcut work, when present, is exercised
                 # through the native helper; the layout also works without it.
@@ -235,7 +272,7 @@ def main():
                 window.close()
                 assert app.grab_current() is None and side.chat is chat
                 assert not errors, errors
-                print(json.dumps(dict(theme='modern', dpi=app.dpi.dpi, day_scroll=True, quick_add=True,
+                print(json.dumps(dict(theme=args.theme, dpi=app.dpi.dpi, day_scroll=True, quick_add=True,
                                       chat_confirm_cancel=True, narrow_drawer=True, standalone=via)), flush=True)
             finally:
                 blocker = app._active_modal_window()
