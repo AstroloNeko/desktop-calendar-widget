@@ -7096,6 +7096,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             command=lambda: self._queue_context_menu_action(menu, self.request_storage_upgrade))
         data_menu.add_command(label="备份数据…", command=self.export_backup)
         data_menu.add_command(label="恢复数据…", command=self.restore_data_backup)
+        data_menu.add_command(label="导入旧 JSON…", command=self.import_legacy_calendar)
         if self.backup_warning:
             data_menu.add_command(label="自动备份暂不可用…", command=lambda: self._data_message(
                 messagebox.showwarning, f"最近自动备份未完成：{self.backup_warning}\n请检查磁盘空间或目录权限。"))
@@ -7490,12 +7491,16 @@ def main(arguments=None) -> None:
                 break
             # Old Tk owner, Store, history and HTTP admission are stopped before
             # taking the offline lifecycle lease and activating a fresh epoch.
-            options.manager().restore(request[0], authorize_replacement=True,
-                reminder_replay_reviewed=True, expected_backup_hash=request[1])
+            source, fingerprint, *operation = request
+            if operation == ['import_json']:
+                options.manager().import_legacy_json(source, authorize_import=True, expected_source_hash=fingerprint)
+            else:
+                options.manager().restore(source, authorize_replacement=True,
+                    reminder_replay_reviewed=True, expected_backup_hash=fingerprint)
     except (DataCompatibilityError, RuntimeError, OSError, KeyError, ValueError) as exc:
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror(APP_NAME, f"无法安全打开或恢复日历。\n\n{exc}\n\n未回退旧 JSON。若数据库损坏，可使用 --recover-storage 选择有效备份；请保留原件。", parent=root)
+        messagebox.showerror(APP_NAME, f"无法安全打开、导入或恢复日历。\n\n{exc}\n\n未回退旧 JSON。若数据库损坏，可使用 --recover-storage 选择有效备份；请保留原件。", parent=root)
         root.destroy()
     finally:
         if instance is not None:

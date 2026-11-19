@@ -44,6 +44,83 @@ def run(approve):
             entry.main(['--isolated-data-dir',str(root)])
         print('Modern desktop button, consent='+str(approve)+', persistence/restart passed',flush=True)
 
+
+def policy_smoke():
+    """Test the production Tk entry with synthetic profiles and no remote calls."""
+    from contextlib import ExitStack
+    from desktop_preferences import sqlite_upgrade_declined
+    fixture = json.loads((Path(__file__).resolve().parents[1]/'tests/fixtures/schema8_v0102.json')
+                         .read_text(encoding='utf8'))['document']
+    fixture['settings']['theme'] = 'modern'
+    with tempfile.TemporaryDirectory(prefix='calendar-storage-policy-') as folder, ExitStack() as stack:
+        root = Path(folder)
+        legacy, fresh = root/'legacy', root/'fresh'
+        legacy.mkdir()
+        source = legacy/'calendar_data.json'
+        source.write_text(json.dumps(fixture), encoding='utf8')
+        external = root/'import.json'
+        original = source.read_bytes()
+        external.write_bytes(original)
+        stack.enter_context(patch.object(entry.CalendarApp, '_start_tray_icon'))
+        stack.enter_context(patch.object(entry.CalendarApp, 'check_reminders'))
+        stack.enter_context(patch('storage_startup_ui.messagebox.askyesno', return_value=True))
+        stack.enter_context(patch('storage_startup_ui.messagebox.showinfo'))
+        stack.enter_context(patch('backup_ui.messagebox.showerror', side_effect=AssertionError('unexpected storage error')))
+
+        def launch(profile, loop):
+            def run_loop(app):
+                app.report_callback_exception = lambda *_: (_ for _ in ()).throw(AssertionError('Tk callback failed'))
+                pump(app, .15)
+                assert app.theme.name == 'modern'
+                loop(app)
+            with patch.object(entry.CalendarApp, 'mainloop', run_loop):
+                entry.main(['--isolated-data-dir', str(profile)])
+
+        opened = []
+        def fresh_import(app):
+            assert app.storage_session.sqlite and not app.storage_banner_visible()
+            assert not (fresh/'calendar_data.json').exists()
+            opened.append(app.storage_session.state['operation'])
+            if len(opened) == 1:
+                assert not app.store.events
+                with (patch('backup_ui.filedialog.askopenfilename', return_value=str(external)),
+                      patch('backup_ui.messagebox.askyesno', side_effect=[False, True])):
+                    app.import_legacy_calendar()
+                    assert not app.lifecycle.stopped
+                    assert app.storage_session.state['operation'] == 'initialize'
+                    app.import_legacy_calendar()
+                    assert app.storage_session.closed
+            else:
+                assert {e.id for e in app.store.events} == {e['id'] for e in fixture['events']}
+                cleanup(app)
+        launch(fresh, fresh_import)
+        assert opened == ['initialize', 'import_json'] and external.read_bytes() == original
+
+        def decline(app):
+            assert not app.storage_session.sqlite and app.storage_banner_visible()
+            assert app.storage_decline_button.winfo_viewable()
+            app.storage_decline_button.invoke()
+            assert not app.storage_banner_visible() and sqlite_upgrade_declined(legacy)
+            cleanup(app)
+        launch(legacy, decline)
+
+        modes = []
+        def manual_upgrade(app):
+            modes.append(app.storage_session.sqlite)
+            assert not app.storage_banner_visible()
+            if not app.storage_session.sqlite:
+                # Same callback as the permanent Data Management entry.
+                app.request_storage_upgrade()
+                assert app.storage_session.closed
+            else:
+                state = app.storage_session.state
+                assert source.read_bytes() == (legacy/state['protection']).read_bytes()
+                cleanup(app)
+        launch(legacy, manual_upgrade)
+        assert modes == [False, True]
+        print('Modern: native SQLite, cancelled/confirmed legacy import, permanent decline and manual upgrade passed',
+              flush=True)
+
 if __name__=='__main__':
     if '--manual-exe' in sys.argv:
         import os, subprocess, uuid
@@ -55,5 +132,7 @@ if __name__=='__main__':
         exe=Path(__file__).resolve().parents[1]/'dist/DesktopCalendar/DesktopCalendar.exe'
         p=subprocess.Popen([str(exe)],cwd=exe.parent,env={**os.environ,'APPDATA':str(folder)})
         print(str(profile),p.pid,flush=True)
+    elif '--policy' in sys.argv:
+        policy_smoke()
     else:
         run(True);run(False)

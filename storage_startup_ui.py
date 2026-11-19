@@ -11,7 +11,7 @@ class StartupDialogs:
 
     def confirm(self):
         return messagebox.askyesno('桌面月历 · 存储升级',
-            '将升级已有 JSON 日历；空目录将创建新日历。\n\n将先保留并校验原件保护副本，再验证并转换为 SQLite。'
+            '将升级当前 JSON 日历。\n\n将先保留并校验原件保护副本，再验证并转换为 SQLite。'
             '\n迁移期间需要独占数据目录；成功后仅使用 SQLite，不再采纳旧版 JSON 的修改。'
             '\n取消则继续使用 JSON。\n\n是否开始？', parent=self.root)
 

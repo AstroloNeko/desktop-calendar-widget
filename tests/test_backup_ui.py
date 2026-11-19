@@ -29,14 +29,52 @@ class Owner(BackupActionsMixin):
 
 class BackupUiTests(unittest.TestCase):
     def test_storage_banner_only_for_unmigrated_json(self):
-        owner = Owner.__new__(Owner)
-        owner.store = object()
+        owner = self.owner
         with patch.object(owner, '_sqlite_backup_boundary', return_value=True):
             self.assertFalse(owner.storage_banner_visible())
         with patch.object(owner, '_sqlite_backup_boundary', return_value=False):
             self.assertTrue(owner.storage_banner_visible())
             owner._storage_prompt_dismissed = True
             self.assertFalse(owner.storage_banner_visible())
+
+    def test_explicit_decline_survives_restore_and_remains_manually_upgradable(self):
+        self.owner.storage_banner = Mock()
+        self.owner.render = Mock()
+        create_backup(self.owner.store.data_file.read_bytes(), self.path)
+        self.owner._dismiss_storage_banner()
+        self.assertTrue(Owner(self.root).storage_banner_visible())
+        self.owner._decline_storage_banner()
+        with (patch("backup_ui.filedialog.askopenfilename", return_value=str(self.path)),
+              patch("backup_ui.messagebox.askyesno", return_value=True), patch("backup_ui.messagebox.showinfo")):
+            self.owner.restore_data_backup()
+        reopened = Owner(self.root)
+        self.assertFalse(reopened.storage_banner_visible())
+        reopened.storage_session = object()
+        reopened.on_close = Mock(return_value=True)
+        reopened.request_storage_upgrade()
+        reopened.on_close.assert_called_once()
+        self.assertTrue(reopened._pending_storage_upgrade)
+
+    def test_json_import_is_explicit_snapshot_replacement_and_keeps_preference(self):
+        from desktop_preferences import decline_sqlite_upgrade
+        decline_sqlite_upgrade(self.root)
+        original = self.owner.store.data_file.read_bytes()
+        legacy = self.root / 'external.json'
+        external = Store(legacy)
+        external.events = [Event('external-event', 'imported', '2026-12-10T10:00')]
+        external.save()
+        raw = legacy.read_bytes()
+        with (patch("backup_ui.filedialog.askopenfilename", return_value=str(legacy)),
+              patch("backup_ui.messagebox.askyesno", side_effect=[False, True]), patch("backup_ui.messagebox.showinfo")):
+            self.owner.import_legacy_calendar()
+            self.assertEqual(self.owner.store.data_file.read_bytes(), original)
+            self.assertFalse((self.root / 'backups').exists())
+            self.owner.import_legacy_calendar()
+        self.assertEqual(legacy.read_bytes(), raw)
+        self.assertEqual([event.id for event in self.owner.store.events], ['external-event'])
+        self.assertFalse(self.owner.storage_banner_visible())
+        protected, = (self.root / 'backups').glob('*.dcalbackup')
+        self.assertEqual(read_backup(protected)[1], original)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

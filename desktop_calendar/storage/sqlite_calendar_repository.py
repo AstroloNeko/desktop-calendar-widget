@@ -1,4 +1,4 @@
-"""Explicit, isolated SQLite adapter. Default desktop storage remains JSON.
+"""SQLite adapter; desktop backend selection is owned by the storage lifecycle.
 
 Reads are detached snapshots of the owning Store at its loaded revision. Call
 Store.load() explicitly to observe other writers; every commit checks that loaded

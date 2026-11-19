@@ -45,11 +45,13 @@
 - 可选开机启动、完整数据备份/安全恢复和单实例保护
 - 从 GitHub Releases 检查、校验、下载并自动安装更新
 
-数据目录为 `%APPDATA%\DesktopCalendar`。未迁移时使用 `calendar_data.json`；主动升级后由 `storage-state.json` 指定 `calendar-<标识>.sqlite3` 为唯一权威存储。请勿自行修改状态文件或用旧 JSON 覆盖 SQLite。
+数据目录为 `%APPDATA%\DesktopCalendar`。全新用户直接使用 SQLite；已有 JSON 日历继续使用 `calendar_data.json`，直到主动升级。SQLite 由 `storage-state.json` 指定唯一权威数据库 `calendar-<标识>.sqlite3`。请勿自行修改状态文件或用旧 JSON 覆盖 SQLite。
 
 ### SQLite 升级与数据恢复
 
-JSON 模式下点击主界面“升级到 SQLite”，或进入“更多 → 数据管理 → 升级到 SQLite”。应用会先停止旧运行时，再请你确认；不会静默迁移。原 JSON 与 `original-<标识>.json` 保护副本保留，激活后不再采纳旧 EXE 对旧 JSON 的修改。**不要直接用旧 EXE 回退。**
+JSON 模式下点击主界面“升级到 SQLite”，或进入“更多 → 数据管理 → 升级到 SQLite”。应用会先停止旧运行时，再请你确认；不会静默迁移。选择“继续使用 JSON，不再提醒”会在本机保留该偏好，恢复旧备份也不会重置；关闭提示条只影响本次运行。原 JSON 与 `original-<标识>.json` 保护副本保留，激活后不再采纳旧 EXE 对旧 JSON 的修改。**不要直接用旧 EXE 回退。**
+
+“更多 → 数据管理 → 导入旧 JSON”支持显式导入 Schema 8/9。JSON 模式下经确认后保护并替换日历；空 SQLite 下验证并转换后仍使用 SQLite；非空 SQLite 不提供直接覆盖或合并，可使用“恢复数据”对有效备份进行明确的替换恢复。导入不修改源文件。
 
 “更多 → 数据管理”可导出和恢复备份：JSON 沿用 Format 1，SQLite 使用官方 Backup API 生成 Format 2，一并保留事项、分类、习惯历史、设置与提醒账本。支持旧备份转换恢复；恢复会清空撤销历史并失效旧 AI 待执行操作。旧备份可能遗忘近期已投递提醒，恢复前会提示可能再次提醒。
 

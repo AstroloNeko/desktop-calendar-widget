@@ -138,15 +138,146 @@ class DesktopStartupTests(unittest.TestCase):
         self.addCleanup(session.close)
         self.assertTrue(session.sqlite)
 
-    def test_new_profile_upgrade_consent_and_cancel(self):
+    def test_new_profile_initializes_without_json_or_migration_dialog(self):
         self.source.unlink()
-        options = StartupOptions(self.root, upgrade_storage=True)
-        session = open_desktop_storage(options, confirm=lambda: False)
+        from unittest.mock import Mock
+        confirm = Mock(side_effect=AssertionError('not a migration'))
+        notify = Mock(side_effect=AssertionError('not a migration'))
+        with patch.object(StorageLifecycle, 'migrate', side_effect=AssertionError('no JSON migration')):
+            session = self.open(confirm=confirm, notify=notify)
+        self.assertTrue(session.sqlite)
+        self.assertEqual(session.state['operation'], 'initialize')
+        self.assertFalse(session.store.events)
+        path = session.store.data_file
+        epoch = session.state['epoch']
+        from event_commands import EventCommandHistory
+        from calendar_event_service import CalendarEventService
+        from datetime import date
+        created = CalendarEventService(EventCommandHistory(session.store)).create_quick('First SQLite task', date.today())
         session.close()
         self.assertFalse(self.source.exists())
-        session = open_desktop_storage(options, confirm=lambda: True)
+        reopened = self.open(confirm=confirm, notify=notify)
+        self.assertEqual((reopened.store.data_file, reopened.state['epoch']), (path, epoch))
+        self.assertEqual([e.id for e in reopened.store.events], list(created.event_ids))
+        self.assertEqual(list(self.root.glob('*.sqlite3')), [path])
+
+    def test_legacy_empty_schema9_is_still_json(self):
+        from calendar_core import Store
+        self.source.unlink()
+        Store(self.source).save()
+        original = self.source.read_bytes()
+        self.assertEqual(json.loads(original)['version'], 9)
+        self.assertFalse(self.open().sqlite)
+        self.assertFalse((self.root / 'storage-state.json').exists())
+        self.assertEqual(self.source.read_bytes(), original)
+
+    def test_unknown_profile_and_missing_metadata_do_not_initialize_or_fall_back(self):
+        for name, legacy_source in (('calendar-old.sqlite3', True), ('historical.dcalbackup', False),
+                                    ('storage-state.json', False), ('calendar_data.json.tmp', True)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                data = b'{"format":1,"state":"NOT_STARTED"}' if name == 'storage-state.json' else b'original'
+                (root / name).write_bytes(data)
+                if legacy_source:
+                    (root / self.source.name).write_bytes(self.original)
+                with self.assertRaisesRegex(LifecycleError, 'unrecognized'):
+                    open_desktop_storage(StartupOptions(root))
+                self.assertEqual((root / name).read_bytes(), data)
+                self.assertFalse((root / '.storage-managed').exists())
+
+    def test_interrupted_fresh_initialization_is_recoverable_or_refused(self):
+        for stage in ('PREPARING', 'STAGED', 'ACTIVATING', 'PLACED'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                def interrupt(point):
+                    if point == stage:
+                        raise RuntimeError('synthetic process interruption')
+                manager = StorageLifecycle(root, isolated=True, checkpoint=interrupt)
+                with patch.object(StartupOptions, 'manager', return_value=manager):
+                    with self.assertRaisesRegex(RuntimeError, 'interruption'):
+                        open_desktop_storage(StartupOptions(root))
+                if stage == 'PREPARING':
+                    with self.assertRaisesRegex(LifecycleError, 'recovery_required'):
+                        open_desktop_storage(StartupOptions(root))
+                    self.assertFalse(list(root.glob('*.sqlite3')))
+                else:
+                    session = open_desktop_storage(StartupOptions(root))
+                    try:
+                        self.assertTrue(session.sqlite)
+                        self.assertEqual(session.state['operation'], 'initialize')
+                    finally:
+                        session.close()
+                self.assertFalse((root / self.source.name).exists())
+
+    def test_legacy_writer_appearing_during_initialization_is_not_ignored(self):
+        self.source.unlink()
+        def old_program(point):
+            if point == 'PLACED':
+                self.source.write_bytes(self.original)
+        manager = StorageLifecycle(self.root, isolated=True, checkpoint=old_program)
+        with patch.object(StartupOptions, 'manager', return_value=manager):
+            with self.assertRaisesRegex(LifecycleError, 'json_appeared'):
+                self.open()
+        self.assertEqual(manager._read()['state'], 'ACTIVATING')
+        self.assertEqual(self.source.read_bytes(), self.original)
+        with self.assertRaisesRegex(LifecycleError, 'json_appeared'):
+            self.open()
+
+    def test_legacy_json_import_is_consented_verified_and_limited_to_empty_sqlite(self):
+        from desktop_calendar.storage.calendar_storage_lifecycle import digest, inspect_database
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            opts = StartupOptions(root)
+            empty = open_desktop_storage(opts)
+            original_epoch = empty.state['epoch']
+            empty_identity = inspect_database(empty.store.data_file)
+            empty.close()
+            manager = opts.manager()
+            with self.assertRaisesRegex(LifecycleError, 'explicit_review'):
+                manager.import_legacy_json(self.source)
+            with self.assertRaisesRegex(LifecycleError, 'changed_since_review'):
+                manager.import_legacy_json(self.source, authorize_import=True, expected_source_hash='0' * 64)
+            self.assertEqual(manager._read()['epoch'], original_epoch)
+            state = manager.import_legacy_json(self.source, authorize_import=True, expected_source_hash=digest(self.source))
+            self.assertEqual(state['operation'], 'import_json')
+            self.assertNotEqual(state['epoch'], original_epoch)
+            self.assertEqual(inspect_database(root / state['protection']), empty_identity)
+            active = open_desktop_storage(opts)
+            try:
+                self.assertEqual({e.id for e in active.store.events}, {e['id'] for e in FIXTURE['events']})
+                self.assertIn(state['epoch'], str(active.journal_path))
+            finally:
+                active.close()
+            with self.assertRaisesRegex(LifecycleError, 'requires_empty_sqlite'):
+                manager.import_legacy_json(self.source, authorize_import=True, expected_source_hash=digest(self.source))
+            self.assertEqual(manager._read(), state)
+            self.assertEqual(self.source.read_bytes(), self.original)
+            self.assertFalse((root / self.source.name).exists())
+
+    def test_fresh_production_launch_does_not_require_migration_permission(self):
+        self.source.unlink()
+        with patch('desktop_storage_startup.DATA_DIR', self.root):
+            session = open_desktop_storage(StartupOptions())
         self.addCleanup(session.close)
+        self.assertTrue(session.manager.existing_only)
         self.assertTrue(session.sqlite)
+
+    def test_schema9_import_into_fresh_sqlite(self):
+        from calendar_core import Store, Event
+        from desktop_calendar.storage.calendar_storage_lifecycle import digest
+        legacy = self.root / 'source-schema9.json'
+        source = Store(legacy)
+        source.events = [Event('schema9-id', 'Schema 9', '2026-11-16T10:00')]
+        source.save()
+        with tempfile.TemporaryDirectory() as folder:
+            opts = StartupOptions(Path(folder))
+            open_desktop_storage(opts).close()
+            opts.manager().import_legacy_json(legacy, authorize_import=True, expected_source_hash=digest(legacy))
+            session = open_desktop_storage(opts)
+            try:
+                self.assertEqual([event.id for event in session.store.events], ['schema9-id'])
+            finally:
+                session.close()
 
     def test_chat_folder_retained(self):
         folder = self.root / 'ai-assistant'

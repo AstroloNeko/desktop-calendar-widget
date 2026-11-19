@@ -1,4 +1,5 @@
 """Explicit offline restore; damaged authority is never opened as a Store."""
+import hashlib
 import json
 from pathlib import Path
 import uuid
@@ -12,25 +13,38 @@ from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRe
 
 def candidate_from_backup(manager, backup, token):
     manifest, data, backend = read_container(backup)
+    if backend == 'json':
+        return candidate_from_legacy_json(manager, data, token)
     candidate = manager._path('candidate-' + token + '.sqlite3')
-    if backend == 'sqlite':
-        durable_new(candidate, data)
-        identity = inspect_database(candidate)
-        if identity != manifest.get('identity'):
-            raise LifecycleError('backup_identity')
-    else:
-        source = manager._path('restore-input-' + token + '.json')
-        durable_new(source, data)
-        report = dry_run_migration(source, manager.root / ('restore-stage-' + token), managed_directory=manager.root)
-        if not report['candidate_ready']:
-            raise LifecycleError('legacy_backup_invalid')
-        store = Store(Path(report['candidate_path']), repository_factory=SqliteCalendarRepository)
-        try:
-            store.repository.backup_to(candidate)
-        finally:
-            store.repository.close()
-        identity = inspect_database(candidate)
+    durable_new(candidate, data)
+    identity = inspect_database(candidate)
+    if identity != manifest.get('identity'):
+        raise LifecycleError('backup_identity')
     return candidate, identity
+
+
+def read_reviewed_json(source, expected_source_hash):
+    from desktop_calendar.storage.calendar_migration_validation import MAX_SOURCE_BYTES
+    with Path(source).open('rb') as stream:
+        data = stream.read(MAX_SOURCE_BYTES + 1)
+    if len(data) > MAX_SOURCE_BYTES or hashlib.sha256(data).hexdigest() != expected_source_hash:
+        raise LifecycleError('json_changed_since_review')
+    return data
+
+
+def candidate_from_legacy_json(manager, data, token):
+    source = manager._path('restore-input-' + token + '.json')
+    durable_new(source, data)
+    report = dry_run_migration(source, manager.root / ('restore-stage-' + token), managed_directory=manager.root)
+    if not report['candidate_ready']:
+        raise LifecycleError('legacy_backup_invalid')
+    candidate = manager._path('candidate-' + token + '.sqlite3')
+    store = Store(Path(report['candidate_path']), repository_factory=SqliteCalendarRepository)
+    try:
+        store.repository.backup_to(candidate)
+    finally:
+        store.repository.close()
+    return candidate, inspect_database(candidate)
 
 
 def verify_archive(manager, state):

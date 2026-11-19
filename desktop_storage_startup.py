@@ -1,6 +1,6 @@
 """Desktop authority selection, before Tk services can read or write a Store.
 
-Migration is opt-in and restricted to an explicitly supplied isolated directory.
+New profiles initialize SQLite directly. Existing JSON migration is opt-in.
 The session owns the repository and directory lease for the desktop lifetime.
 """
 from dataclasses import dataclass
@@ -42,7 +42,7 @@ class DesktopStorageSession:
     @property
     def journal_path(self):
         folder = self.manager.root / 'ai-assistant'
-        if self.state.get('operation') in ('restore', 'disaster_restore'):
+        if self.state.get('operation') in ('restore', 'disaster_restore', 'import_json'):
             folder = folder / ('epoch-' + self.state['epoch'])
         return folder / 'sessions.sqlite3'
 
@@ -63,31 +63,27 @@ def open_desktop_storage(options=StartupOptions(), *, confirm=lambda: False,
     store = None
     try:
         state = manager._read()
-        if state['state'] == 'NOT_STARTED' and (options.offer_migration or options.upgrade_storage):
-            source = manager._path('calendar_data.json')
-            original = digest(source) if source.exists() else None
-            if confirm():
-                if original is None:
-                    # Explicit consent only; a new profile is first serialized
-                    # through the existing default model, then strictly migrated.
-                    initial = Store(source)
-                    initial.save()
-                    initial.repository.close()
-                    original = digest(source)
-                # migrate() owns its own exclusive lease and revalidates source.
-                # A contender in this narrow gap makes startup fail, not bypass locking.
-                lease.__exit__(None, None, None)
-                if digest(source) != original:
-                    raise LifecycleError('source_changed')
-                notify('migrating')
-                manager.migrate(expected_source_hash=original)
-                lease.__enter__()
-                notify('activated')
+        if state['state'] == 'NOT_STARTED':
+            source = manager.uninitialized_desktop_source()
+            if source is None:
+                manager._initialize_desktop()
+            elif options.offer_migration or options.upgrade_storage:
+                original = digest(source)
+                if confirm():
+                    if digest(source) != original:
+                        raise LifecycleError('source_changed')
+                    # migrate() owns its own exclusive lease and revalidates
+                    # the reviewed source after acquiring it.
+                    lease.__exit__(None, None, None)
+                    notify('migrating')
+                    manager.migrate(expected_source_hash=original)
+                    lease.__enter__()
+                    notify('activated')
         state, path, factory = manager._select()
         if factory is not None and not re.fullmatch(r'[0-9a-f]{32}', str(state.get('epoch', ''))):
             raise LifecycleError('invalid_storage_epoch')
         # Legacy/offline restores without explicit replay review remain blocked.
-        if state.get('operation') in ('restore', 'disaster_restore') and state.get('reminder_replay_reviewed') is not True:
+        if state.get('operation') in ('restore', 'disaster_restore', 'import_json') and state.get('reminder_replay_reviewed') is not True:
             raise LifecycleError('restored_desktop_requires_review_c2')
         store = Store(path, repository_factory=factory)
         if store.load_error:

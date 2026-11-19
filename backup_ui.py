@@ -1,9 +1,11 @@
 """Lightweight native-dialog entry points, using the app's owned-modal runner."""
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from tkinter import filedialog, messagebox
 
 from data_backup import BackupError, create_backup, read_backup, restore_store
+from desktop_preferences import decline_sqlite_upgrade, sqlite_upgrade_declined
 from calendar_flow_layout import normalize_global_display_mode
 from view_mode import WindowGeometry
 
@@ -11,7 +13,8 @@ from view_mode import WindowGeometry
 class BackupActionsMixin:
     def storage_banner_visible(self):
         return (bool(getattr(self, 'store', None)) and not self._sqlite_backup_boundary()
-                and not getattr(self, '_storage_prompt_dismissed', False))
+                and not getattr(self, '_storage_prompt_dismissed', False)
+                and not sqlite_upgrade_declined(self.store.data_file.parent))
 
     def build_storage_banner(self):
         if not self.storage_banner_visible():
@@ -21,18 +24,26 @@ class BackupActionsMixin:
         frame = tk.Frame(self.shell, bg=self.theme.panel_background)
         frame.pack(fill='x')
         self.storage_banner = frame
-        if self._sqlite_backup_boundary():
-            tk.Label(frame, text='SQLite 已启用', bg=self.theme.panel_background,
-                fg=self.theme.text_secondary).pack(side='left', padx=self.dpi.px(10))
-        else:
-            self.storage_upgrade_button = reminder_button(frame, self, '升级到 SQLite', self.request_storage_upgrade, primary=True)
-            self.storage_upgrade_button.pack(side='left', padx=self.dpi.px(8))
-            def dismiss():
-                self._storage_prompt_dismissed = True
-                frame.destroy()
-                self.render()
-            self.storage_dismiss_button = reminder_button(frame, self, '本次不再提示', dismiss)
-            self.storage_dismiss_button.pack(side='right')
+        self.storage_upgrade_button = reminder_button(frame, self, '升级到 SQLite', self.request_storage_upgrade, primary=True)
+        self.storage_upgrade_button.pack(side='left', padx=self.dpi.px(8))
+        self.storage_dismiss_button = reminder_button(frame, self, '×', self._dismiss_storage_banner)
+        self.storage_dismiss_button.pack(side='right')
+        self.storage_decline_button = reminder_button(
+            frame, self, '继续使用 JSON，不再提醒', self._decline_storage_banner)
+        self.storage_decline_button.pack(side='right')
+
+    def _dismiss_storage_banner(self):
+        self._storage_prompt_dismissed = True
+        self.storage_banner.destroy()
+        self.render()
+
+    def _decline_storage_banner(self):
+        try:
+            decline_sqlite_upgrade(self.store.data_file.parent)
+        except OSError as exc:
+            self._data_message(messagebox.showerror, f'无法保存提醒偏好：{exc}')
+            return
+        self._dismiss_storage_banner()
 
     def request_storage_upgrade(self):
         if self._sqlite_backup_boundary() or self.update_busy or self._active_modal_window() is not None:
@@ -106,11 +117,6 @@ class BackupActionsMixin:
             except (OSError, ValueError, RuntimeError) as exc:
                 self._data_message(messagebox.showerror, f"恢复未完成：{exc}")
             return
-        refreshed = False
-        def refresh():
-            nonlocal refreshed
-            refreshed = True
-            self._refresh_restored_data()
         try:
             manifest, _data = read_backup(Path(filename))
             created = datetime.fromisoformat(manifest["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
@@ -118,7 +124,64 @@ class BackupActionsMixin:
                     f"备份时间：{created}\n来源版本：{manifest['app_version']}\n\n"
                     "将替换全部事项、分类、习惯记录和设置。\n当前数据会先自动备份。是否继续？"):
                 return
-            restore_store(self.store, Path(filename), apply=refresh)
+            self._apply_json_replacement(Path(filename))
+        except Exception as exc:
+            self._data_message(messagebox.showerror, f"恢复未完成：{exc}")
+            return
+        self._data_message(messagebox.showinfo, "数据已恢复；恢复前的备份已保存在数据目录的 backups 文件夹。")
+
+    def import_legacy_calendar(self):
+        """Import raw JSON explicitly, separate from backup restore and upgrade."""
+        if self._active_modal_window() is not None or self.update_busy:
+            return
+        from desktop_calendar.storage.calendar_storage_lifecycle import empty_calendar
+        from desktop_calendar.storage.calendar_migration_validation import validate_source
+        from desktop_calendar.storage.calendar_disaster_recovery import read_reviewed_json
+        sqlite = self._sqlite_backup_boundary()
+        if sqlite and not empty_calendar(self.store):
+            self._data_message(messagebox.showinfo,
+                '当前 SQLite 日历已有数据，不能导入 JSON 覆盖或合并。若要替换为历史备份，请使用「恢复数据」。')
+            return
+        filename = self._owned_data_dialog(lambda: filedialog.askopenfilename(
+            parent=self, title="导入旧 JSON", filetypes=(("旧月历数据", "*.json"),)))
+        if not filename:
+            return
+        try:
+            source = Path(filename)
+            if source.resolve() == self.store.data_file.resolve():
+                raise BackupError('这已经是当前日历数据。要切换存储，请使用「升级到 SQLite」。')
+            validation = validate_source(source)
+            if not validation.valid:
+                raise BackupError('该文件未通过适用于 Schema 8/9 的严格校验，当前日历与源文件未修改。')
+            fingerprint = validation.source['sha256']
+            plan = ('将旧 JSON 转换到当前空 SQLite 日历，继续使用 SQLite。'
+                    if sqlite else '将用旧 JSON 完整替换当前日历，继续使用 JSON；不会合并数据。')
+            if not self._data_message(messagebox.askyesno, f'{plan}\n当前数据会先保护，原文件不会修改。'
+                    '\n历史提醒可能再次投递。是否继续？'):
+                return
+            if sqlite:
+                if getattr(self, 'storage_session', None) is None:
+                    raise RuntimeError('请通过正式存储启动入口打开月历后导入。')
+                self._pending_storage_restore = (source, fingerprint, 'import_json')
+                if not self.on_close():
+                    self._pending_storage_restore = None
+            else:
+                data = read_reviewed_json(source, fingerprint)
+                with TemporaryDirectory() as folder:
+                    capsule = create_backup(data, Path(folder) / 'legacy-import.dcalbackup', reason='legacy-import')
+                    self._apply_json_replacement(capsule)
+                self._data_message(messagebox.showinfo, '旧 JSON 已导入；原文件和导入前的保护备份均已保留。')
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._data_message(messagebox.showerror, f'导入未完成：{exc}')
+
+    def _apply_json_replacement(self, backup):
+        refreshed = False
+        def refresh():
+            nonlocal refreshed
+            refreshed = True
+            self._refresh_restored_data()
+        try:
+            restore_store(self.store, backup, apply=refresh)
         except Exception as exc:
             # A refresh error rolls back the store too; repaint its original data.
             if refreshed:
@@ -126,10 +189,8 @@ class BackupActionsMixin:
                     self._refresh_restored_data()
                 except Exception:
                     pass  # Preserve the actual transaction error in the dialog.
-            self._data_message(messagebox.showerror, f"恢复未完成：{exc}")
-            return
+            raise
         self.event_commands.clear()
-        self._data_message(messagebox.showinfo, "数据已恢复；恢复前的备份已保存在数据目录的 backups 文件夹。")
 
     def _refresh_restored_data(self):
         self._cancel_schedule_drag()
