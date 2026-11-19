@@ -1,4 +1,5 @@
 """Modern-only Windows smoke for the right workspace against a synthetic Store."""
+import argparse
 import ctypes
 from ctypes import wintypes as w
 from datetime import date
@@ -43,7 +44,20 @@ def inside(child, outer, *, minimum_width=None):
     assert child.winfo_rooty() + child.winfo_height() <= outer.winfo_rooty() + outer.winfo_height(), str(child)
 
 
+def clickable(button):
+    # Geometry alone missed buttons painted underneath a sibling frame.
+    x = button.winfo_rootx() + button.winfo_width() // 2
+    y = button.winfo_rooty() + button.winfo_height() // 2
+    assert button.winfo_containing(x, y) is button, str(button)
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--screenshots', type=Path)
+    args = parser.parse_args()
+    if args.screenshots:
+        from tools.check_habit_schedules import capture_own_window
+        args.screenshots.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='calendar-right-workspace-') as folder:
         store = Store(Path(folder) / 'data.json')
         today = date.today()
@@ -77,7 +91,7 @@ def main():
                     side._resize_from_left(SimpleNamespace(x_root=side.winfo_rootx()-app.dpi.px(18)))
                     pump(app)
                     assert side.winfo_width() > old_width
-                assert '当日样例 27' in set(label_texts(side.rows))
+                wait(app, lambda: '当日样例 27' in set(label_texts(side.rows)), 'daily sidebar populated')
                 side.canvas.yview_moveto(1.0)
                 assert 0 < side.canvas.yview()[0] < 1
                 inside(app.quick_options_button, side)
@@ -118,6 +132,19 @@ def main():
                 chat, runtime = side.chat, app.chat_runtime
                 wait(app, lambda: not chat.busy and chat.session_id, 'conversation ready')
                 assert not app.quick_entry.winfo_viewable() and not app.quick_options_button.winfo_viewable()
+                assert not chat.candidate.winfo_viewable() and not chat.confirm_button.winfo_viewable()
+                assert '还没有消息' in chat.transcript.get('1.0', 'end')
+                clickable(chat.send_button)
+                if args.screenshots:
+                    capture_own_window(app, args.screenshots / 'assistant-idle.png')
+                chat.display({'status': 'clarification_required', 'habit_candidates': [
+                    {'title': '隔离习惯', 'schedule': '每天', 'object_type': 'habit'}]})
+                pump(app)
+                inside(chat.candidate, side, minimum_width=app.dpi.px(100))
+                assert not chat.confirm_button.winfo_viewable()
+                chat.resume(chat.session_id)
+                wait(app, lambda: not chat.busy, 'resume after candidate layout check')
+                assert not chat.candidate.winfo_viewable()
                 sid = chat.session_id
                 chat.new_button.invoke()
                 wait(app, lambda: not chat.busy and chat.session_id != sid, 'new conversation')
@@ -137,10 +164,15 @@ def main():
                     wait(app, lambda: not chat.busy, 'delete preview')
                     assert chat.operation and chat.operation['status'] == 'pending', chat.transcript.get('1.0', 'end')
                     assert store.event_by_id('delete-me') is not None
+                    for button in (chat.send_button, chat.confirm_button, chat.cancel_button):
+                        clickable(button)
                 request_delete()
+                if args.screenshots:
+                    capture_own_window(app, args.screenshots / 'assistant-confirm.png')
                 chat.cancel_button.invoke()
                 wait(app, lambda: not chat.busy, 'cancel delete')
                 assert store.event_by_id('delete-me') is not None
+                assert not chat.confirm_button.winfo_viewable()
                 request_delete()
                 chat.confirm_button.invoke()
                 wait(app, lambda: not chat.busy, 'confirm delete')
@@ -163,14 +195,17 @@ def main():
                 pump(app, .25)
                 assert side.winfo_manager() == 'place'
                 assert side.winfo_width() == app.dpi.px(GLOBAL_TIMELINE_LAYOUT.detail_min_width)
-                for widget in (chat.new_button, chat.clear_button, chat.settings_button,
-                               chat.send_button, chat.confirm_button, chat.cancel_button):
+                for widget in (chat.new_button, chat.clear_button, chat.settings_button, chat.send_button):
                     inside(widget, side)
+                    clickable(widget)
+                assert not chat.candidate.winfo_viewable() and not chat.confirm_button.winfo_viewable()
                 inside(chat.sessions, side, minimum_width=app.dpi.px(38))
                 assert not app.quick_entry.winfo_viewable()
                 for widget in (chat.input, chat.transcript):
                     assert widget.winfo_viewable() and widget.winfo_height() > app.dpi.px(15), (
                         str(widget), widget.winfo_height(), chat.winfo_height(), app.winfo_height())
+                if args.screenshots:
+                    capture_own_window(app, args.screenshots / 'assistant-narrow.png')
                 side.toggle_drawer()
                 pump(app)
                 assert not side.winfo_manager()

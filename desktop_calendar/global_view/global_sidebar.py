@@ -37,11 +37,12 @@ class GlobalSidebar(tk.Frame):
         surface = theme.control_background if theme.rounded_widget_shells else bg
         tabs = tk.Frame(body, bg=bg)
         tabs.pack(fill="x", padx=dp(12), pady=(dp(8), dp(5)))
+        tabs.columnconfigure((0, 1), weight=1, uniform="right-tabs")
         self.tabs = {}
-        for name, text in (("day", "当日详情"), ("assistant", "AI 助理")):
+        for column, (name, text) in enumerate((("day", "当日详情"), ("assistant", "AI 助理"))):
             button = button_factory(tabs, app, text, lambda mode=name: self.switch(mode, focus=True),
                                     width=82, height=23, font_size=8, surface_background=surface, outlined=True)
-            button.pack(side="left", padx=(0, dp(4)))
+            button.grid(row=0, column=column, sticky="ew", padx=(0, dp(4)) if column == 0 else 0)
             self.tabs[name] = button
 
         self.pages = tk.Frame(body, bg=bg)

@@ -118,6 +118,16 @@ def start_chat_if_enabled(app):
 class _ChatWidgets:
     """One chat UI and set of callbacks, hosted by a dialog or the workspace."""
 
+    _INPUT_HINT = 'Enter 发送\nShift+Enter 换行'
+    _EMPTY_HINT = '还没有消息\n在下方输入，开始对话。'
+    _STATUS_LABELS = {
+        'pending': '等待确认', 'confirmation_required': '等待确认',
+        'clarification_required': '请补充信息', 'confirmed': '已确认',
+        'succeeded': '操作已完成', 'cancelled': '操作已取消',
+        'failed': '本次操作未完成', 'expired': '操作已过期',
+        'uncertain': '结果待核查，请勿重复执行',
+    }
+
     def _build_chat(self, app, runtime, width, *, embedded=False):
         self.app, self.runtime, self.session_id, self.operation, self.busy = app, runtime, None, None, False
         self._embedded = embedded
@@ -125,31 +135,39 @@ class _ChatWidgets:
         self.configure(bg=theme.panel_background)
         bar = tk.Frame(self, bg=theme.panel_background)
         bar.pack(fill='x', padx=dp(12), pady=dp(3 if embedded else 6))
-        session_bar = bar
+        self.settings_button = reminder_button(bar, app, 'AI 设置' if embedded else '模型 / 本机API设置', self.configure_ai)
+        self.new_button = reminder_button(bar, app, '新对话', lambda: self.request(self.runtime.service.new_session))
+        self.clear_button = reminder_button(bar, app, '清除此对话', self.clear)
+        self.sessions = ttk.Combobox(bar, state='readonly', width=8 if embedded else 10)
         if embedded:
-            session_bar = tk.Frame(bar, bg=theme.panel_background)
-            session_bar.pack(fill='x')
-        self.settings_button = reminder_button(bar, app, '模型 / 本机API设置', self.configure_ai)
-        self.settings_button.pack(side='right', pady=(dp(4), 0) if embedded else 0)
-        self.new_button = reminder_button(session_bar, app, '新对话', lambda: self.request(self.runtime.service.new_session))
-        self.new_button.pack(side='left')
-        self.clear_button = reminder_button(session_bar, app, '清除此对话', self.clear)
-        self.clear_button.pack(side='left', padx=dp(5))
-        self.sessions = ttk.Combobox(bar if embedded else session_bar, state='readonly', width=10)
-        self.sessions.pack(side='left', fill='x' if embedded else 'none', expand=embedded,
-                           padx=(0, dp(5)) if embedded else 0, pady=(dp(4), 0) if embedded else 0)
+            for control in (self.settings_button, self.new_button, self.clear_button):
+                control.configure(pady=dp(3))
+            bar.columnconfigure(0, weight=1)
+            bar.columnconfigure(1, weight=1)
+            self.sessions.grid(row=0, column=0, sticky='nsew', padx=(0, dp(4)))
+            self.settings_button.grid(row=0, column=1, sticky='ew')
+            self.new_button.grid(row=1, column=0, sticky='ew', padx=(0, dp(4)), pady=(dp(4), 0))
+            self.clear_button.grid(row=1, column=1, sticky='ew', pady=(dp(4), 0))
+        else:
+            self.settings_button.pack(side='right')
+            self.new_button.pack(side='left')
+            self.clear_button.pack(side='left', padx=dp(5))
+            self.sessions.pack(side='left')
         self.sessions.bind('<<ComboboxSelected>>', self.load_session)
         bottom = tk.Frame(self, bg=theme.panel_background)
         bottom.pack(side='bottom', fill='x', padx=dp(12), pady=dp(4 if embedded else 8))
         self.status = tk.StringVar(value='未启用远程模型。请先阅读隐私说明并配置自己的密钥。')
         status = tk.Label(bottom, textvariable=self.status, font=(font, 8), wraplength=width-dp(40), justify='left',
+                          anchor='w' if embedded else 'center',
                           bg=theme.panel_background, fg=theme.text_secondary)
-        status.pack(fill='x')
+        if not embedded:
+            status.pack(fill='x')
         if embedded:
             bottom.bind('<Configure>', lambda e: status.configure(wraplength=max(dp(80), e.width)))
         self.input = tk.Text(bottom, height=3, wrap='word', font=(font, 10), bg=theme.input_background,
                              fg=theme.text_primary, insertbackground=theme.text_primary, undo=True)
-        self.input.pack(fill='x', pady=dp(3 if embedded else 5))
+        if not embedded:
+            self.input.pack(fill='x', pady=dp(5))
         self.input.bind('<Return>', self.send)
         self.input.bind('<Shift-Return>', lambda _e: None)
         if embedded:
@@ -159,62 +177,55 @@ class _ChatWidgets:
                     self.input.configure(height=lines)
             self.bind('<Configure>', fit_composer, add='+')
         self.candidate = ttk.Combobox(bottom, state='readonly')
-        if embedded:
-            self.candidate.pack(fill='x', pady=dp(4))
-        actions = bottom
-        if embedded:
-            actions = tk.Frame(bottom, bg=theme.panel_background)
-            actions.pack(fill='x')
-        self.send_button = reminder_button(actions, app, '发送', self.send, primary=True)
-        self.send_button.pack(side='right')
-        self.close_button = reminder_button(actions, app, '关闭', self.close)
-        self.close_button.pack(side='right', padx=dp(5))
+        actions = tk.Frame(bottom, bg=theme.panel_background) if embedded else bottom
         self.confirm_button = reminder_button(actions, app, '确认此操作', self.confirm)
-        self.confirm_button.pack(side='left')
         self.cancel_button = reminder_button(actions, app, '取消操作', self.cancel)
-        self.cancel_button.pack(side='left', padx=dp(5))
+        self.send_button = reminder_button(bottom, app, '发送', self.send, primary=True)
         if embedded:
-            pending_row = tk.Frame(actions, bg=theme.panel_background)
-            send_row = tk.Frame(actions, bg=theme.panel_background)
-            wrapped = None
-
-            def arrange_actions(event):
-                nonlocal wrapped
-                # Leave room for the longer final-delete label as well.
-                narrow = event.width < dp(330)
-                if narrow == wrapped:
-                    return
-                wrapped = narrow
-                for button in (self.confirm_button, self.cancel_button, self.send_button, self.close_button):
-                    button.pack_forget()
-                if narrow:
-                    pending_row.pack(fill='x')
-                    send_row.pack(fill='x', pady=(dp(3), 0))
-                else:
-                    pending_row.pack_forget()
-                    send_row.pack_forget()
-                pending = pending_row if narrow else actions
-                sending = send_row if narrow else actions
-                self.send_button.pack(in_=sending, side='right')
-                self.close_button.pack(in_=sending, side='right', padx=dp(5))
-                self.confirm_button.pack(in_=pending, side='left')
-                self.cancel_button.pack(in_=pending, side='left', padx=dp(5))
-
-            actions.bind('<Configure>', arrange_actions)
+            bottom.columnconfigure(0, weight=1)
+            self.candidate.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, dp(4)))
+            actions.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, dp(4)))
+            actions.columnconfigure(0, weight=1)
+            actions.columnconfigure(1, weight=1)
+            self.confirm_button.grid(row=0, column=0, sticky='ew', padx=(0, dp(4)))
+            self.cancel_button.grid(row=0, column=1, sticky='ew')
+            self._pending_actions = actions
+            self.candidate.grid_remove()
+            actions.grid_remove()
+            self.input.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(0, dp(4)))
+            status.grid(row=3, column=0, sticky='ew', padx=(0, dp(4)))
+            self.send_button.grid(row=3, column=1, sticky='e')
+            status.bind('<Configure>', lambda e: status.configure(wraplength=e.width))
+        else:
+            self.send_button.pack(side='right')
+            self.close_button = reminder_button(bottom, app, '关闭', self.close)
+            self.close_button.pack(side='right', padx=dp(5))
+            self.confirm_button.pack(side='left')
+            self.cancel_button.pack(side='left', padx=dp(5))
+            self.candidate.pack(fill='x', pady=dp(4))
         self.confirm_button.configure(state='disabled')
         self.cancel_button.configure(state='disabled')
-        if not embedded:
-            self.candidate.pack(fill='x', pady=dp(4))
         self.candidate.bind('<<ComboboxSelected>>', self.select_candidate)
         frame = tk.Frame(self, bg=theme.panel_background)
         frame.pack(fill='both', expand=True, padx=dp(12))
-        self.transcript = tk.Text(frame, wrap='word', font=(font, 10), bg=theme.workspace_detail, fg=theme.text_primary,
+        self.transcript = tk.Text(frame, wrap='word', font=(font, 9 if embedded else 10), bg=theme.workspace_detail, fg=theme.text_primary,
                                   relief='flat', state='disabled', padx=dp(8), pady=dp(6),
                                   **({'height': 1, 'width': 1} if embedded else {}))
         scroll = ttk.Scrollbar(frame, command=self.transcript.yview, style='Global.Vertical.TScrollbar')
         scroll.pack(side='right', fill='y')
         self.transcript.configure(yscrollcommand=scroll.set)
         self.transcript.pack(fill='both', expand=True)
+        self._empty_transcript = False
+        if embedded:
+            self.transcript.tag_configure('empty', foreground=theme.text_muted, justify='center')
+            def scroll_if_needed(first, last):
+                scroll.set(first, last)
+                if float(first) == 0.0 and float(last) == 1.0:
+                    if scroll.winfo_manager():
+                        scroll.pack_forget()
+                elif not scroll.winfo_manager():
+                    scroll.pack(side='right', fill='y', before=self.transcript)
+            self.transcript.configure(yscrollcommand=scroll_if_needed)
 
     def resume(self, session_id=None):
         runtime = self.runtime
@@ -240,6 +251,9 @@ class _ChatWidgets:
 
     def append(self, text):
         self.transcript.configure(state='normal')
+        if self._empty_transcript:
+            self.transcript.delete('1.0', 'end')
+            self._empty_transcript = False
         self.transcript.insert('end', text+'\n\n')
         self.transcript.configure(state='disabled')
         self.transcript.see('end')
@@ -259,10 +273,12 @@ class _ChatWidgets:
             self.status.set('本次请求未完成；详细提示见对话区。')
             self.append('系统：'+response['error_message'])
         else:
-            self.status.set('状态：'+response.get('status', 'ok'))
+            status = response.get('status', 'ok')
+            self.status.set(self._STATUS_LABELS.get(status, self._INPUT_HINT) if self._embedded else '状态：'+status)
             if response.get('assistant_message'):
                 self.append('助理：'+response['assistant_message'])
         if response.get('messages') is not None:
+            self._empty_transcript = False
             self.transcript.configure(state='normal')
             self.transcript.delete('1.0', 'end')
             self.transcript.configure(state='disabled')
@@ -290,7 +306,15 @@ class _ChatWidgets:
         self.cancel_button.configure(state='normal' if pending else 'disabled')
         if self.operation and self.operation['status'] == 'pending':
             self.render_operation(self.operation)
-        if not self._embedded:
+        if self._embedded:
+            (self.candidate.grid if self.candidates else self.candidate.grid_remove)()
+            (self._pending_actions.grid if pending else self._pending_actions.grid_remove)()
+            if not self.transcript.get('1.0', 'end-1c').strip():
+                self.transcript.configure(state='normal')
+                self.transcript.insert('1.0', self._EMPTY_HINT, 'empty')
+                self.transcript.configure(state='disabled')
+                self._empty_transcript = True
+        else:
             self.input.focus_set()
 
     def render_operation(self, operation):
