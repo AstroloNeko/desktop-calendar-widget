@@ -1,10 +1,11 @@
 """Exercise plan lifetimes through the same service used by desktop and HTTP."""
+from dataclasses import replace
 from datetime import date, timedelta
 from unittest import TestCase
 from unittest.mock import patch
 
 import test_calendar_chat as fixture
-from calendar_core import Store
+from calendar_core import Event, Store
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from desktop_calendar.assistant.calendar_action_gateway import CalendarActionGateway
 from desktop_calendar.assistant.calendar_chat_service import CalendarChatService
@@ -19,6 +20,186 @@ def propose(action, *members):
 class EventPlanTests(TestCase):
     setUp = fixture.ChatTests.setUp
     send = fixture.ChatTests.send
+
+    def use_sqlite(self, *events):
+        number = len(list(self.root.glob('operations-*.sqlite3')))
+        self.store = Store(self.root/f'operations-{number}.sqlite3', repository_factory=SqliteCalendarRepository)
+        self.addCleanup(self.store.repository.close)
+        self.commands = EventCommandHistory(self.store)
+        self.gateway = CalendarActionGateway(self.store, self.commands)
+        for event in events:
+            self.gateway.events.upsert(event)
+        self.commands = EventCommandHistory(self.store)
+        self.gateway = CalendarActionGateway(self.store, self.commands)
+        self.service = CalendarChatService(self.gateway, self.journal, self.provider, clock=lambda:self.clock)
+
+    def test_replay_reschedule_notice_keeps_patch_and_checks_receipt(self):
+        self.use_sqlite(Event('meeting-28','组会','2026-11-28T10:30',reminder=10,notes='每周讨论'),
+                        Event('other','组会','2026-11-29T09:00'))
+        untouched = self.gateway.detail('other')
+        source = dict(start='2026-11-28', end='2026-11-28', keyword='组会')
+        moved = dict(date='2026-11-30', end_date='2026-11-30')
+        with patch('desktop_calendar.assistant.calendar_chat_attributes.date',wraps=date) as today:
+            today.today.return_value = date(2026,11,19)
+            result = self.send([fixture.tool('query_events',source),
+                                propose('update',dict(event_id='meeting-28',fields=moved))],
+                               '会议改期通知：原定11月28日的组会改为11月30日','memo-reschedule')
+        receipt = result['operation_result']
+        self.assertTrue(receipt['committed'])
+        self.assertTrue(receipt['goal_satisfied'])
+        self.assertIsNotNone(self.store.repository.receipt(receipt['operation_id']))
+        self.assertEqual((receipt['event']['date'],receipt['event']['end'],receipt['event']['time'],
+                          receipt['event']['notes'],receipt['event']['reminder']),
+                         ('2026-11-30','2026-11-30','10:30','每周讨论',10))
+        self.assertEqual(self.gateway.detail('other'),untouched)
+        self.commands.undo()
+        self.assertEqual(self.gateway.detail('meeting-28')['date'],'2026-11-28')
+
+    def test_reschedule_range_with_patch_has_same_result_for_target_and_items(self):
+        self.use_sqlite(Event('meeting-28','组会','2026-11-28T10:30',duration_days=2,reminder=10),
+                        Event('other','组会','2026-12-03T09:00'))
+        untouched = self.gateway.detail('other')
+        fields = dict(date='2026-11-30', end_date='2026-12-02', reminder=30, color='#52B788')
+        bounds = dict(start='2026-11-28',end='2026-11-29')
+        query = fixture.tool('query_events',dict(bounds,keyword='组会'))
+        target = fixture.tool('propose_events',dict(action='update',target=dict(bounds,titles=['组会'],quantity='one'),fields=fields))
+        items = propose('update',dict(event_id='meeting-28',fields=fields))
+        for index, calls in enumerate(([query,items],[target]),1):
+            with self.subTest(index=index):
+                result = self.send(calls,'把11月28日到29日的组会改到11月30日至12月2日，换薄荷绿并提前30分钟提醒',f'reschedule-range-{index}')
+                self.assertEqual(result['status'],'succeeded')
+                row = result['operation_result']['event']
+                self.assertEqual((row['id'],row['date'],row['end'],row['color'],row['reminder']),
+                                 ('meeting-28','2026-11-30','2026-12-02','#52B788',30))
+                self.assertEqual(self.gateway.detail('other'),untouched)
+                self.commands.undo()
+
+    def test_noop_reschedule_requires_final_date_to_match(self):
+        self.use_sqlite(Event('meeting','组会','2026-11-28T10:30'))
+        query = fixture.tool('query_events',dict(keyword='组会'))
+        same = propose('update',dict(event_id='meeting',fields={'date':'2026-11-28'}))
+        result = self.send([query,same],'把组会改到11月28日','same-date-noop')
+        self.assertEqual(result['status'],'succeeded')
+        receipt = result['operation_result']
+        self.assertEqual((receipt['changed'],receipt['committed'],receipt['goal_satisfied']),(False,False,True))
+        self.assertEqual(receipt['event']['date'],'2026-11-28')
+        self.assertIn('原本已符合要求',result['assistant_message'])
+        self.assertIsNone(self.store.repository.receipt(receipt['operation_id']))
+
+    def test_committed_wrong_date_is_reported_and_not_replayed(self):
+        self.use_sqlite(Event('meeting','组会','2026-11-28T10:30'))
+        target = dict(start='2026-11-28',end='2026-11-28',titles=['组会'],quantity='one')
+        plan = dict(action='update',target=target,fields={'date':'2026-11-30'})
+        commit = self.gateway.events.commit
+
+        def commit_wrong_date(command, *, operation_id=None):
+            wrong = replace(command.event(),due='2026-11-29T10:30')
+            return commit(self.gateway.events.preview_upsert(wrong),operation_id=operation_id)
+
+        with patch.object(self.gateway.events,'commit',side_effect=commit_wrong_date) as executor:
+            result = self.send([fixture.tool('propose_events',plan)],'组会改到11月30日','committed-wrong-date')
+            self.assertEqual(result['status'],'committed_unverified')
+            self.assertEqual(result['error_code'],'effect_not_verified')
+            receipt = result['operation_result']
+            self.assertEqual((receipt['committed'],receipt['goal_satisfied']),(True,False))
+            self.assertIsNotNone(self.store.repository.receipt(receipt['operation_id']))
+            self.assertEqual(self.gateway.detail('meeting')['date'],'2026-11-29')
+            repeated = self.service.confirm_operation(self.sid,receipt['operation_id'],revision=result['pending_operation']['revision'])
+            self.assertEqual(repeated['operation_result'],receipt)
+            executor.assert_called_once()
+
+    def test_selection_refuses_event_modified_after_candidate_snapshot(self):
+        self.use_sqlite(Event('slot-a','组会','2026-11-20T10:00'),Event('slot-b','组会','2026-11-20T14:00'))
+        target = dict(start='2026-11-20',end='2026-11-20',titles=['组会'],quantity='one')
+        fields = dict(color='#52B788',reminder=30)
+        response = self.send([fixture.tool('propose_events',dict(action='update',target=target,fields=fields))],
+                             '选一条改成薄荷绿并提前30分钟提醒','candidate-snapshot')
+        self.gateway.events.upsert(replace(self.store.event_by_id('slot-b'),notes='另一个客户端已编辑'))
+        result = self.service.select_candidate(self.sid,'slot-b',revision=response['selection_revision'])
+        self.assertEqual(result['error_code'],'operation_conflict')
+        self.assertIsNone(result['operation_result'])
+        self.assertEqual(self.gateway.detail('slot-b')['notes'],'另一个客户端已编辑')
+        self.assertEqual(self.commands.undo_count,1)
+
+    def test_text_candidates_are_repaired_into_revision_bound_selection(self):
+        for reply in ('2','第二个',None):
+            with self.subTest(reply=reply):
+                self.use_sqlite(Event('slot-a','组会','2026-11-20T10:00',notes='第一项'),
+                                Event('slot-b','组会','2026-11-20T14:00'))
+                self.sid = self.service.new_session()['session_id']
+                offset = len(self.provider.messages)
+                first = self.gateway.detail('slot-a')
+                bounds = dict(start='2026-11-20',end='2026-11-20')
+                fields = dict(color='#52B788',reminder=30)
+                plan = dict(action='update',target=dict(bounds,titles=['组会'],quantity='one'),fields=fields)
+                request = f'candidate-repair-{offset}'
+                response = self.send([fixture.tool('query_events',dict(bounds,keyword='组会')),
+                                      fixture.tool('clarify',dict(question='10:00 和 14:00，选择哪个？')),
+                                      fixture.tool('propose_events',plan)],
+                                     '周五有两个组会，想把其中一个改成薄荷绿并提前半小时提醒。',request)
+                self.assertEqual([row['id'] for row in response['candidates']],['slot-a','slot-b'])
+                revision = response['selection_revision']
+                self.assertEqual(self.service.get_session(self.sid)['event_input']['plan'],plan)
+                self.assertEqual(self.commands.undo_count,0)
+                self.service = CalendarChatService(self.gateway,self.journal,self.provider,clock=lambda:self.clock)
+                restored = self.service.get_pending_operations(self.sid)
+                self.assertEqual(restored['selection_revision'],revision)
+                self.assertEqual(restored['candidates'],response['candidates'])
+                with self.assertRaises(ChatError):
+                    self.service.select_candidate(self.sid,'slot-b',revision='stale')
+                result = (self.service.select_candidate(self.sid,'slot-b',revision=revision) if reply is None
+                          else self.send([],reply,f'{request}-selection'))
+                self.assertEqual(len(self.provider.messages)-offset,3)
+                receipt = result['operation_result']
+                self.assertEqual((receipt['event_id'],receipt['event']['color'],receipt['event']['reminder']),
+                                 ('slot-b','#52B788',30))
+                self.assertEqual(self.gateway.detail('slot-a'),first)
+                self.assertIsNotNone(self.store.repository.receipt(receipt['operation_id']))
+
+    def test_ambiguous_multiday_waits_then_reuses_draft_after_restart(self):
+        self.use_sqlite()
+        plan = propose('create',dict(fields=dict(title='WB实验',date='2026-11-20',end_date='2026-11-21',time='09:00')))
+        with patch('desktop_calendar.assistant.calendar_chat_service.date',wraps=date) as today:
+            today.today.return_value = date(2026,11,19)
+            result = self.send([plan],'明后天WB实验','ambiguous-days')
+            self.assertEqual(result['status'],'confirmation_required')
+            operation = result['pending_operation']
+            self.assertEqual(self.store.events,[])
+            self.service = CalendarChatService(self.gateway,self.journal,self.provider,clock=lambda:self.clock)
+            today.today.return_value = date(2026,11,20)
+            result = self.send([], '对的','authorize-span')
+        row = result['operation_result']['event']
+        self.assertEqual((row['date'],row['end'],row['time']),('2026-11-20','2026-11-21','09:00'))
+        self.assertEqual(len(self.provider.messages),1)
+        repeated = self.service.confirm_operation(self.sid,operation['operation_id'],revision=operation['revision'])
+        self.assertEqual(repeated['operation_result'],result['operation_result'])
+        self.assertEqual(self.commands.undo_count,1)
+
+    def test_ambiguous_span_can_be_replaced_by_two_independent_members(self):
+        self.use_sqlite()
+        plan = propose('create',dict(fields=dict(title='WB实验',date='2026-11-20',end_date='2026-11-21',time='09:00')))
+        with patch('desktop_calendar.assistant.calendar_chat_service.date',wraps=date) as today:
+            today.today.return_value = date(2026,11,19)
+            result = self.send([plan],'明后天WB实验','draft-for-split')
+            old = result['pending_operation']
+            self.assertEqual(self.store.events,[])
+            result = self.send([],'每天各一项','replace-by-split')
+        self.assertEqual(result['status'],'succeeded')
+        self.assertEqual(sorted((row['date'],row['end'],row['time']) for row in result['operation_result']['events']),
+                         [('2026-11-20','2026-11-20','09:00'),('2026-11-21','2026-11-21','09:00')])
+        self.assertEqual(self.service.confirm_operation(self.sid,old['operation_id'],revision=old['revision'])['status'],'cancelled')
+        self.assertEqual(self.commands.undo_count,1)
+
+    def test_yes_does_not_pick_between_two_options(self):
+        self.use_sqlite()
+        span = propose('create',dict(fields=dict(title='WB实验',date='2026-11-20',end_date='2026-11-21')))
+        with patch('desktop_calendar.assistant.calendar_chat_service.date',wraps=date) as today:
+            today.today.return_value = date(2026,11,19)
+            self.send([fixture.tool('clarify',dict(question='一个跨日还是两天各一个？'))],'明后天WB实验','ask-two-options')
+            result = self.send([span],'对的','answer-unspecified')
+        self.assertEqual(result['status'],'clarification_required')
+        self.assertEqual(len(self.provider.messages),1)
+        self.assertEqual(self.store.events,[])
 
     def batch(self):
         return propose('create', *[dict(fields=dict(title='WB实验', date=day)) for day in

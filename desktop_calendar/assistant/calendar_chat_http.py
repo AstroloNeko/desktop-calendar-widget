@@ -151,6 +151,8 @@ class LocalChatHTTP:
                                     raise ChatError('invalid_arguments', '需要唯一session_id。')
                                 result = adapter.service.get_operation_result(params['session_id'][0], identifier)
                             elif method == 'POST' and action == 'confirm' and set(body) == {'session_id', 'revision'}:
+                                if not isinstance(body['revision'], str) or not body['revision']:
+                                    raise ChatError('invalid_arguments', '需要当前预览的 revision。')
                                 result = adapter.service.confirm_operation(body['session_id'], identifier, source='loopback-http', revision=body['revision'])
                             elif method == 'POST' and action == 'cancel' and set(body) == {'session_id'}:
                                 result = adapter.service.cancel_operation(body['session_id'], identifier, source='loopback-http')

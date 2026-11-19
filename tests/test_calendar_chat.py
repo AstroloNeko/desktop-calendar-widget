@@ -431,6 +431,8 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(len(self.store.events), 2)
         route = '/v1/operations/'+op['operation_id']+'/confirm'
         body = {'session_id': sid, 'revision': op['revision']}
+        self.assertEqual(self.request(route, dict(body,revision=None))[0], 400)
+        self.assertEqual(len(self.store.events), 2)
         self.assertEqual(self.request(route, body)[1]['status'], 'succeeded')
         self.assertEqual(self.request(route, body)[1]['status'], 'succeeded')
         self.assertEqual(len(self.store.events), 3)

@@ -9,12 +9,16 @@ import uuid
 
 from desktop_calendar.assistant import calendar_batch_delete
 from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
+from desktop_calendar.assistant.calendar_chat_intent import requested_fields
 from desktop_calendar.assistant.calendar_chat_model import MAX_REPAIRS, MAX_ROUNDS as MAX_ROUNDS, run_model_turn
 from desktop_calendar.assistant.calendar_chat_protocol import OWNER, ChatError, envelope, fail, fingerprint, receipt_message
 from desktop_calendar.assistant.calendar_chat_tools import PROPOSAL_TOOLS, TASK_TOOLS, request_context, validate_call
 from desktop_calendar.assistant.calendar_task_plan import recover_task, run_task
 from desktop_calendar.assistant.operation_engine import compile_target_members, deletion_outcome, event_action, event_result, resolve_target
-from desktop_calendar.assistant.operation_plan import check_creation_members, choice_with_color, compile_proposal, dated_target, independent_dates, member_count, validate_target_plan
+from desktop_calendar.assistant.operation_plan import (
+    check_creation_members, choice_with_color, compile_proposal, creation_quantity, creation_quantity_reply,
+    dated_target, independent_dates, member_count, reshape_creation, validate_target_plan,
+)
 
 
 class CalendarChatService:
@@ -105,10 +109,15 @@ class CalendarChatService:
 
     def get_pending_operations(self, session_id, owner=OWNER):
         session = self.get_session(session_id, owner)
-        if not session['pending']:
-            return envelope(session_id)
-        response = self.get_operation_result(session_id, session['pending'], owner)
-        return response if response['status'] in ('pending', 'ready','executing','uncertain') else envelope(session_id)
+        if session['pending']:
+            response = self.get_operation_result(session_id, session['pending'], owner)
+            if response['status'] in ('pending', 'ready','executing','uncertain'):
+                return response
+        waiting = session.get('event_input')
+        if waiting and waiting.get('plan') and waiting['expires'] >= self.clock():
+            return envelope(session_id,status='clarification_required',candidates=session['candidates'],
+                            selection_revision=waiting['revision'])
+        return envelope(session_id)
 
     def _audit(self, op, owner, source):
         audit = dict(timestamp=datetime.now(timezone.utc).isoformat(), request_id=op['request_id'],
@@ -207,7 +216,7 @@ class CalendarChatService:
             self.journal.put('session', session_id, owner, session)
             return envelope(session_id, assistant_message='已选择该事项，请继续描述修改内容。')
 
-    def _resolve_target(self, plan, session, owner, request_id, source, chosen=None):
+    def _resolve_target(self, plan, session, owner, request_id, source, chosen=None, chosen_revision=None):
         validate_target_plan(plan)
         sid = session['session_id']
         target = plan['target']
@@ -234,16 +243,19 @@ class CalendarChatService:
         session.update(candidates=rows,habit_candidates=[],selected_kind='event',selected=rows[0]['id'] if len(rows)==1 else None)
         if target['quantity']=='one' and len(rows)>1:
             revision = secrets.token_urlsafe(16)
-            session['event_input'] = dict(plan=plan,ids=[r['id'] for r in rows],revision=revision,expires=self.clock()+900)
+            ids = [row['id'] for row in rows]
+            session['event_input'] = dict(plan=plan,ids=ids,revision=revision,expires=self.clock()+900,
+                                          event_revisions=self.gateway.event_revisions(ids))
             return envelope(sid,request_id,status='clarification_required',candidates=rows,selection_revision=revision,
                             assistant_message='有多个匹配事项，请选择要操作的一项。')
         if plan['action']=='delete':
             self._bind_delete_scope(session,dict(events=rows,total=len(rows),truncated=False),target)
             return calendar_batch_delete.prepare(self,session,session['delete_scope']['ids'],owner,request_id)
         name,args = compile_target_members(self.gateway,plan,rows)
-        return self._tool(name,args,session,owner,request_id,source,structured=True,preview_only=plan.get('preview_only',False))
+        return self._tool(name,args,session,owner,request_id,source,structured=True,
+                          preview_only=plan.get('preview_only',False), expected_before=chosen_revision)
 
-    def _tool(self, name, args, session, owner, request_id, source, message='', diagnostic=None, continuation=(), target_lock=None, *, structured=False, preview_only=False):
+    def _tool(self, name, args, session, owner, request_id, source, message='', diagnostic=None, continuation=(), target_lock=None, *, structured=False, preview_only=False, expected_before=None):
         validate_call(name, args)
         if name == 'revise_event_target':
             draft = session.get('awaiting_target')
@@ -256,6 +268,20 @@ class CalendarChatService:
             plan['target'].update(patch)
             return self._resolve_target(plan,session,owner,request_id,source)
         if name == 'propose_events':
+            if args['action'] == 'create' and not preview_only:
+                days = session.get('member_dates') or independent_dates(message, date.today())
+                if days and not creation_quantity(message, days):
+                    response = self._tool(name,args,session,owner,request_id,source,message,diagnostic,
+                                          preview_only=True)
+                    operation = response['pending_operation']
+                    quantity = 'span' if len(args['items']) == 1 else 'separate'
+                    title = args['items'][0]['fields']['title']
+                    question = (f'按一个跨{len(days)}天的「{title}」创建，可以吗？' if quantity == 'span' else
+                                '按预览为每一天各创建一项，可以吗？')
+                    session['awaiting_create'] = dict(plan=args,message=message,days=days,quantity=quantity,
+                        expires=operation['expires'],operation_id=operation['operation_id'],revision=operation['revision'])
+                    response['assistant_message'] = question
+                    return response
             if 'target' in args:
                 if re.search(r'有什么安排|有哪些任务|查询|查一下|查看', message) and not re.search(r'然后|再把|并把',message):
                     fail('查询请求不能提交修改或删除计划。','clarification_required')
@@ -264,7 +290,7 @@ class CalendarChatService:
                 return self._resolve_target(args,session,owner,request_id,source)
             preview_only = preview_only or args.get('preview_only', False)
             name, args = compile_proposal(args)
-            structured = name in ('preview_create', 'batch_create_events')
+            structured = name in ('preview_create', 'batch_create_events', 'preview_update', 'batch_update_events')
             validate_call(name, args)
         if name in PROPOSAL_TOOLS:
             session.pop('awaiting_target',None)
@@ -318,15 +344,15 @@ class CalendarChatService:
             fail('用户要求周期习惯，请使用preview_create_habit，不得创建一次性Event。')
         if name in ('preview_create', 'preview_create_habit') and re.search(r'有什么安排|有哪些任务|有哪些习惯|查询|查一下|查看', message):
             fail('这是查询请求，不会自动创建事项。', 'clarification_required')
+        if name == 'preview_update' and session.get('selected') == args['event_id'] and re.search(r'随便|任意|随机', message) and '颜色' in message:
+            current = self.gateway.detail(args['event_id'])
+            args['changes']['color'] = secrets.choice([c for c in self.gateway.categories()['palette'].values()
+                                                      if c.casefold() != current['color'].casefold()])
         if structured and name == 'preview_create':
             provenance = dict(explicit=sorted(args),inferred=[])
         elif structured and name == 'preview_update':
             provenance = dict(explicit=sorted(args['changes']),inferred=[])
         elif name in ('preview_create', 'preview_update'):
-            if name == 'preview_update' and session.get('selected') == args['event_id'] and re.search(r'随便|任意|随机', message) and '颜色' in message:
-                current = self.gateway.detail(args['event_id'])
-                args['changes']['color'] = secrets.choice([c for c in self.gateway.categories()['palette'].values()
-                                                          if c.casefold() != current['color'].casefold()])
             original = args if name == 'preview_create' else args['changes']
             scoped, ignored, provenance = adapt_attributes(original, message, name == 'preview_create',
                                                           self.gateway.categories()['categories'], continuation)
@@ -351,9 +377,11 @@ class CalendarChatService:
         if name == 'clarify':
             plan = args.get('create_plan')
             if plan:
+                days = session.get('member_dates') or independent_dates(message, date.today())
+                if days and not creation_quantity(message, days):
+                    return self._tool('propose_events',plan,session,owner,request_id,source,message,diagnostic)
                 tool, proposal = compile_proposal(plan)
                 validate_call(tool, proposal)
-                days = session.get('member_dates') or independent_dates(message, date.today())
                 check_creation_members([item['fields'] for item in plan['items']], message, days)
                 session['awaiting_create'] = dict(plan=plan, message=message, days=days, expires=self.clock()+900)
             session['clarification'] = args['question']
@@ -425,6 +453,8 @@ class CalendarChatService:
         if previous and previous['preview']['event_id'] != identifier:
             fail('请先取消或确认当前待处理操作。', 'confirmation_required')
         preview = self.gateway.preview(name, args, identifier, previous['preview'] if previous else None, message=message)
+        if expected_before is not None and preview['before_hash'] != expected_before:
+            fail('所选事项已变化，请重新查询。','operation_conflict')
         if name in ('preview_create', 'preview_update'):
             preview['field_provenance'] = provenance
         op = previous or dict(operation_id=secrets.token_urlsafe(24), session_id=sid, request_id=request_id,
@@ -495,9 +525,12 @@ class CalendarChatService:
                     task['status']='cancelled'
                     self.journal.put('task',task['task_id'],owner,task)
                     response=envelope(session_id,request_id,status='cancelled',task=task,assistant_message='已取消批量任务。')
-                elif message.strip() in ('取消', '取消操作') and session.pop('awaiting_create', None):
+                elif message.strip() in ('取消', '取消操作') and session.get('awaiting_create'):
+                    draft = session.pop('awaiting_create')
                     session.pop('clarified_request', None)
-                    response = envelope(session_id, request_id, status='cancelled', assistant_message='已取消待确认的创建方案。')
+                    response = (self.cancel_operation(session_id,draft['operation_id'],owner,source)
+                                if draft.get('operation_id') else
+                                envelope(session_id,request_id,status='cancelled',assistant_message='已取消待确认的创建方案。'))
                 elif message.strip() in ('取消', '取消操作') and (session.pop('event_input', None) or session.pop('awaiting_target', None)):
                     session.pop('awaiting_fields', None)
                     response = envelope(session_id, request_id, status='cancelled', assistant_message='已取消待选择的修改。')
@@ -585,7 +618,26 @@ class CalendarChatService:
         nudge = reply in ('添加一下','添加','帮我添加一下')
         creation_question = reply.rstrip('？?') in ('刚才添加了吗','添加好了吗','添加了吗')
         assent = re.fullmatch(r'对的(?:[，, ]*对的)?|对|是的|就这样|没错', reply)
+        quantity = creation_quantity_reply(reply)
         independent = re.fullmatch(r'(?:是|要|建|创建)?[两二三四五六七八九十\d]+(?:个|条)(?:独立|单独)(?:的)?(?:实验|事项|任务|日程)?[。！ ]*', message.strip())
+        if draft and draft.get('operation_id') and (assent or nudge or quantity or reply in ('确认','确认执行') or creation_question):
+            operation = self._operation(session['session_id'], draft['operation_id'], owner)
+            if operation['revision'] != draft['revision']:
+                fail('创建方案已更新，请核对最新预览。','operation_conflict')
+            if operation['status'] != 'pending':
+                return self.get_operation_result(session['session_id'],operation['operation_id'],owner)
+            if creation_question:
+                session['awaiting_create'] = draft
+                return envelope(session['session_id'],request_id,status='confirmation_required',pending_operation=operation,
+                                assistant_message='创建方案尚待确认，请核对预览。')
+            if quantity and quantity != draft['quantity']:
+                plan = reshape_creation(draft['plan'],draft['days'],quantity)
+                self.cancel_operation(session['session_id'],operation['operation_id'],owner,source)
+                session['pending'] = None
+                session['member_dates'] = draft['days']
+                return self._tool('propose_events',plan,session,owner,request_id,source,
+                                  draft['message']+'。'+reply,diagnostic)
+            return self.confirm_operation(session['session_id'],operation['operation_id'],owner,source,draft['revision'])
         if draft and (assent or nudge or reply in ('确认','确认执行') or
                       (independent and member_count(message)==len(draft['plan']['items']))):
             if draft['expires'] < self.clock():
@@ -625,10 +677,15 @@ class CalendarChatService:
             if previous and previous['turn']==last_turn:
                 return envelope(session['session_id'],request_id,operation_result=previous['result'],
                                 assistant_message='上一项创建已完成。\n'+receipt_message(previous['result']))
-        if prior and (assent or independent) and (not isinstance(prior,dict) or prior.get('expires',float('inf')) >= self.clock()):
+        if prior and (assent or independent or quantity) and (not isinstance(prior,dict) or prior.get('expires',float('inf')) >= self.clock()):
             if isinstance(prior, dict):
+                days = independent_dates(prior['text'], date.fromisoformat(prior['anchor']))
+                if not draft and assent and days and not creation_quantity(prior['text'], days):
+                    session['clarified_request'] = prior
+                    return envelope(session['session_id'],request_id,status='clarification_required',
+                                    assistant_message='请选择一个跨日事项，或每天各创建一项。')
                 session['clarification_anchor'] = prior['anchor']
-                session['member_dates'] = independent_dates(prior['text'], date.fromisoformat(prior['anchor']))
+                session['member_dates'] = days
                 prior = prior['text']
             message = prior + '。' + message
         waiting = session.pop('event_input', None)
@@ -644,7 +701,8 @@ class CalendarChatService:
                     if color and plan['action']=='update':
                         plan.pop('color_policy',None)
                         plan.setdefault('fields',{}).update(color=color,color_mode='override')
-                    return self._resolve_target(plan,session,owner,request_id,source,chosen)
+                    return self._resolve_target(plan,session,owner,request_id,source,chosen,
+                                                waiting.get('event_revisions',{}).get(chosen))
                 session['selected'] = chosen
                 args = dict(waiting['args'], event_id=chosen)
                 fields = session.pop('awaiting_fields', [])
@@ -741,10 +799,30 @@ class CalendarChatService:
                      recent_task=session.get('recent_task'), delete_intent=session.get('delete_intent',False),
                      clarified_query=session.get('clarified_query'), clarification=session.get('clarification'), pending=pending_context)
 
+        update_intent = bool(requested_fields(message) and re.search(r'改|换|调整|设置|提前|推迟', message))
+        multiple_matches = False
+        selection_instruction = ('如修改值已明确，请调用 propose_events，action=update，'
+                                 '提供原日期、精确标题、quantity=one 的 target 和完整 fields。'
+                                 '由宿主生成可选候选和保留修改字段；不要猜 ID。'
+                                 '如果仍缺少修改值，请只询问缺少的字段。')
+
         def dispatch_tool(name, args, entry):
-            return self._tool(name, args, session, owner, request_id, source, message, entry, continuation, target_lock)
+            nonlocal multiple_matches
+            if name == 'clarify' and not args.get('create_plan') and update_intent and multiple_matches:
+                if not diagnostic.get('selection_plan_repair'):
+                    diagnostic['selection_plan_repair'] = True
+                    fail(selection_instruction, 'target_plan_required')
+            reply = self._tool(name, args, session, owner, request_id, source, message, entry, continuation, target_lock)
+            if name == 'query_events' and 'events' in reply:
+                multiple_matches = reply['total'] > 1 and not reply.get('truncated')
+            return reply
 
         def on_no_tools(result, last_query, repairs, messages):
+            if update_intent and multiple_matches and not diagnostic.get('selection_plan_repair') and repairs < MAX_REPAIRS:
+                diagnostic['selection_plan_repair'] = True
+                messages.append({'role':'assistant','content': result.get('content') or '已取得多个候选。'})
+                messages.append({'role':'system','content':selection_instruction})
+                return None
             if last_query is None and not session.get('awaiting_target'):
                 deletion = calendar_batch_delete.handle_message(self, session, message, owner, request_id)
                 if deletion is not None:

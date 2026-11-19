@@ -44,7 +44,7 @@ def receipt_message(result):
     if not rows:
         return '已核对执行结果。' if result.get('recovered') else ''
     label = {'create':'已创建','complete':'已更新完成状态'}.get(result.get('action'),'已修改')
-    if result.get('changed') is False:
+    if result.get('changed') is False and result.get('goal_satisfied') is True:
         label = '原本已符合要求，无需修改'
     details = []
     for row in rows:

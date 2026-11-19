@@ -67,13 +67,20 @@ def check_create_count(message, actual):
         fail(f'请求包含{count}个成员，请提交一个包含全部成员的批量创建计划。', 'invalid_arguments')
 
 
+def creation_quantity(message, days):
+    if re.search(r'分别|独立|每天|各(?:一|加|建|做|安排|有)', message) or member_count(message) == len(days) > 1:
+        return 'separate'
+    if re.search(r'连续|跨(?:日|[两二三]天)|(?:同一|共一)(?:个|条|项)', message):
+        return 'span'
+    return None
+
+
 def check_creation_members(members, message, days):
     check_create_count(message, len(members))
     if not days:
         return
-    separate = re.search(r'各|分别|独立', message)
-    spanning = re.search(r'(?:一个|一条|一项).{0,8}跨日|(?:同一|一个).{0,8}跨[两二]天', message)
-    if spanning or (len(members) == 1 and not separate):
+    quantity = creation_quantity(message, days)
+    if quantity == 'span' or (len(members) == 1 and quantity is None):
         first = members[0]
         end_matches = first.get('end_date') == days[-1] if 'end_date' in first else (
             first.get('duration_days') == len(days) and not first.get('skip_non_working_days'))
@@ -83,8 +90,35 @@ def check_creation_members(members, message, days):
         fail('成员日期与原请求不一致，请重新规划明天和后天的两个成员。')
 
 
+def creation_quantity_reply(text):
+    if re.fullmatch(r'(?:按|就按|要|建|创建)?(?:同一|一)(?:个|条|项)(?:跨日|跨[两二]天)(?:的来|事项|实验)?', text):
+        return 'span'
+    if re.fullmatch(r'(?:是|要|建|创建)?(?:每天各?一(?:个|条|项)|[两二2](?:个|条|项)(?:独立|单独)的?)(?:实验|事项|任务|日程)?', text):
+        return 'separate'
+    return None
+
+
+def reshape_creation(plan, days, quantity):
+    """Change only the date grouping of otherwise identical members."""
+    members = [item['fields'] for item in plan['items']]
+    range_fields = {'date','end_date','duration_days','skip_non_working_days','end_as_ddl'}
+    shared = [{key:value for key,value in fields.items() if key not in range_fields} for fields in members]
+    if any(fields.get('skip_non_working_days') or fields.get('end_as_ddl') for fields in members) or any(
+            fields != shared[0] for fields in shared):
+        fail('各天的字段或截止规则不同，请明确调整后的安排。','clarification_required')
+    if quantity == 'span':
+        return dict(action='create',items=[dict(fields=dict(shared[0],date=days[0],end_date=days[-1]))])
+    return dict(action='create',items=[dict(fields=dict(shared[0],date=day)) for day in days],
+                distinct_colors=plan.get('distinct_colors',False))
+
+
 def selected_reply(message, candidates):
-    text = message.strip()
+    text = message.strip(' 。！!')
+    ordinal = re.fullmatch(r'第([一二三四五六七八九十两1-9]|10)(?:个|条|项)', text)
+    if ordinal:
+        token = ordinal[1].replace('两', '二')
+        index = int(token) if token.isdigit() else '一二三四五六七八九十'.index(token) + 1
+        return candidates[index-1]['id'] if index <= len(candidates) else None
     number = re.fullmatch(r'(\d+)(?:[.．、]\s*(.+))?', text)
     if number and 1 <= int(number[1]) <= len(candidates):
         item = candidates[int(number[1]) - 1]

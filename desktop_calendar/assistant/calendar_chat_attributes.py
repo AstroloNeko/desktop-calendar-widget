@@ -12,9 +12,10 @@ def adapt_attributes(values, message, creating, categories, continuation=()):
     instruction = re.split(r'备注(?:是|为|[:：])?', message, maxsplit=1)[0]
     scoped, ignored = scope_patch(values, instruction, creating, continuation)
     explicit = requested_fields(instruction, creating) | set(continuation)
-    # Month/day without a year is this local year, not an invisible rollover.
+    # Only a legacy creation can infer the year from its first month/day.
+    # In a patch that date can belong to the old target rather than the new value.
     md = re.search(r'(?<![\d-])(\d{1,2})(?:[./]|月)(\d{1,2})(?:日|号)?', instruction)
-    if 'date' in scoped and md and not re.search(r'\d{4}[-年/.]|明年|去年|下个月|上个月', instruction):
+    if creating and 'date' in scoped and md and not re.search(r'\d{4}[-年/.]|明年|去年|下个月|上个月', instruction):
         try:
             expected = date(date.today().year, int(md[1]), int(md[2]))
         except ValueError:

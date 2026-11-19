@@ -20,8 +20,11 @@ def build_messages(state, history):
               '创建默认只需title/date；没有明确时间则省略time，无分类则省略category_id和color_mode。不要编造时间、持续天数、颜色。'
               '修改时changes必须是本次用户要求的局部Patch，改名仅传title，不要重发其他Event字段或默认值。'
               '多候选只能请用户点击候选项或回复序号，不可替用户选择。未确认的修改使用相同event_id合并。')
-    system += ('明确多个独立Event使用一个propose_events工具，最多10项，宿主原子保存；不可分成多个单事项提案。'
-               '如果已有完整的创建方案，只等用户回答是否认可，调用clarify并附create_plan，宿主保存全部成员。'
+    system += ('有明确日期、事项及已给时间的备忘录，即使没有创建动词，也直接提交创建提案；无需先问是否创建。'
+               '结合上下文区分日期和编号、版本号。两种解释都合理且写入会改变日程时先澄清。'
+               '明确多个独立Event使用一个propose_events工具，最多10项，宿主原子保存；不可分成多个单事项提案。'
+               '连续与分日仍有数量歧义时，可优先推荐一个跨日事项，用clarify附完整create_plan，只问是否认可这一个方案。'
+               '已明确修改值但有多个同名候选时，直接提交含target和完整fields的propose_events。宿主返回可选择的候选并保留Patch；不要用query后纯文字clarify代替。'
                '按条件删改直接调用 propose_events 的 target，不猜 ID；日期不确定时提交无日期的 target；回答 awaiting_target 时用 revise_event_target；用户全部表示当前完整集合，不是单选；必须两级本地确认，不能自动删除。'
                '往后/未来三天各一个表示从明天起三天，连续三天一个任务不是三个独立Event。随机不同颜色传distinct_colors=true，本地固定抽取。'
                '第二天/第二个/最后一个和前面那批优先用recent_task日期顺序和稳定ID，不重新模糊搜索。'
@@ -154,15 +157,17 @@ def run_model_turn(provider, state, history, diagnostic, *, dispatch, on_no_tool
             messages.append(assistant)
             for identifier, _, _, _ in parsed:
                 reply = replies.get(identifier, {'error_code': error.code if error else 'not_executed',
-                    'instruction': '本批未准备写入。请提交一个覆盖全部请求成员的计划，省略用户未要求的字段；有歧义请澄清。'})
+                    'instruction': str(error) if error and error.code == 'target_plan_required' else
+                    '本批未准备写入。请提交一个覆盖全部请求成员的计划，省略用户未要求的字段；有歧义请澄清。'})
                 messages.append({'role': 'tool', 'tool_call_id': identifier, 'content': json.dumps(reply, ensure_ascii=False)})
         if error:
             batch['error_code'] = error.code
             last_error = error
-            if error.code not in ('invalid_arguments', 'tool_plan_rejected', 'clarification_required') or repairs >= MAX_REPAIRS:
+            if error.code not in ('invalid_arguments', 'tool_plan_rejected', 'clarification_required', 'target_plan_required') or repairs >= MAX_REPAIRS:
                 raise error
             repairs += 1
-            messages.append({'role': 'system', 'content': '保留请求中的全部成员及字段；多个独立事项用一个批量工具提交，省略未要求的字段。若不确定，请调用clarify。'})
+            messages.append({'role': 'system', 'content': str(error) if error.code == 'target_plan_required' else
+                '保留请求中的全部成员及字段；多个独立事项用一个批量工具提交，省略未要求的字段。若不确定，请调用clarify。'})
             continue
         last_error = None
         if terminal:

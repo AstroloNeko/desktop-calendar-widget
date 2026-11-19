@@ -134,6 +134,9 @@ class CalendarActionGateway:
                 'category': asdict(self.store.category_by_id(event.category_id)) if event.category_id else None,
                 'notifications': sorted(key for key in self.store.notified if key.startswith(identifier+':'))}
 
+    def event_revisions(self, identifiers):
+        return self.dispatch(lambda: {identifier: fingerprint(self._state(identifier)) for identifier in identifiers})
+
     def preview(self, name, arguments, event_id, previous=None, *, message=''):
         validate_call(name, arguments)
         return self.dispatch(lambda: self._preview(name, arguments, event_id, previous, message))
