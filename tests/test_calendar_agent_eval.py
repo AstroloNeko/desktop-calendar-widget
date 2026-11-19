@@ -190,11 +190,23 @@ class CalendarAgentEvaluationTests(unittest.TestCase):
 
     def test_different_clarification_stops_before_sending_an_unrelated_answer(self):
         case = self.case('c04-affirm-draft')
-        case['turns'][0]['mock'][0][0]['arguments']['question'] = '要不要先指定一个时间？'
+        case['turns'][0]['mock'][0][0]['arguments'] = {'question': '要不要先指定一个时间？'}
         result = eval_tool.run_case(case,eval_tool.MockProvider(),[20])
         self.assertEqual(result['verdict'],'needs_review',result['issues'])
         self.assertEqual(len(result['turns']),1)
         self.assertFalse(result['final_delta']['receipts'])
+
+    def test_ddl_can_move_from_title_to_type_but_cannot_be_lost(self):
+        case = self.memo_case('memo-a01-compact-ddl')
+        fields = case['turns'][0]['mock'][0][0]['arguments']['items'][0]['fields']
+        fields['title'] = '新药研发'
+        typed = eval_tool.run_case(case,eval_tool.MockProvider(),[10])
+        self.assertEqual(typed['verdict'],'pass',typed['issues'])
+        self.assertEqual(typed['final_delta']['created'][0]['event_type'],'ddl')
+        fields.pop('event_type')
+        untyped = eval_tool.run_case(case,eval_tool.MockProvider(),[10])
+        self.assertEqual(untyped['verdict'],'fail',untyped['issues'])
+        self.assertEqual(untyped['final_delta']['created'][0]['event_type'],'general')
 
     def test_text_quality_is_independent_of_transaction_success(self):
         case = self.case('a01-create-tomorrow')

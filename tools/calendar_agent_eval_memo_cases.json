@@ -8,8 +8,8 @@
     "support": "supported",
     "initial_calendar": [],
     "turns": [{"action":"message","text":"1128新药研发DDL","mock":[[{"name":"propose_events","arguments":{"action":"create","items":[{"fields":{"title":"新药研发DDL","date":"2026-11-28","event_type":"ddl"}}]}}]]}],
-    "expected_plan": [{"turn":1,"action":"create","members":[{"title":{"one_of":["新药研发DDL","新药研发 DDL"]},"date":"2026-11-28","event_type":"ddl"}]}],
-    "expected_final_state": {"create":[{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["新药研发DDL","新药研发 DDL"]},"date":"2026-11-28","event_type":"ddl","end":"2026-11-28","deadline":"2026-11-28"}],"update":{},"delete":[],"writes":1},
+    "expected_plan": [{"turn":1,"action":"create","members":[{"title":{"one_of":["新药研发DDL","新药研发 DDL","新药研发"]},"date":"2026-11-28","event_type":"ddl"}]}],
+    "expected_final_state": {"create":[{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["新药研发DDL","新药研发 DDL","新药研发"]},"date":"2026-11-28","event_type":"ddl","end":"2026-11-28","deadline":"2026-11-28"}],"update":{},"delete":[],"writes":1},
     "expected_interaction": [{"kind":"succeeded","writes":1}],
     "tags": ["memo","core"]
   },
@@ -36,8 +36,8 @@
     "support": "supported",
     "initial_calendar": [],
     "turns": [{"action":"message","text":"1128新药研发DDL，1130课程pre","mock":[[{"name":"propose_events","arguments":{"action":"create","items":[{"fields":{"title":"新药研发DDL","date":"2026-11-28","event_type":"ddl"}},{"fields":{"title":"课程pre","date":"2026-11-30"}}]}}]]}],
-    "expected_plan": [{"turn":1,"action":"create","members":[{"title":{"one_of":["新药研发DDL","新药研发 DDL"]},"date":"2026-11-28","event_type":"ddl"},{"title":{"one_of":["课程pre","课程 pre","课程 Pre","课程PRE"]},"date":"2026-11-30"}]}],
-    "expected_final_state": {"create":[{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["新药研发DDL","新药研发 DDL"]},"date":"2026-11-28","event_type":"ddl","end":"2026-11-28","deadline":"2026-11-28"},{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["课程pre","课程 pre","课程 Pre","课程PRE"]},"date":"2026-11-30","end":"2026-11-30"}],"update":{},"delete":[],"writes":1},
+    "expected_plan": [{"turn":1,"action":"create","members":[{"title":{"one_of":["新药研发DDL","新药研发 DDL","新药研发"]},"date":"2026-11-28","event_type":"ddl"},{"title":{"one_of":["课程pre","课程 pre","课程 Pre","课程PRE"]},"date":"2026-11-30"}]}],
+    "expected_final_state": {"create":[{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["新药研发DDL","新药研发 DDL","新药研发"]},"date":"2026-11-28","event_type":"ddl","end":"2026-11-28","deadline":"2026-11-28"},{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["课程pre","课程 pre","课程 Pre","课程PRE"]},"date":"2026-11-30","end":"2026-11-30"}],"update":{},"delete":[],"writes":1},
     "expected_interaction": [{"kind":"succeeded","writes":1}],
     "tags": ["memo","core"]
   },
@@ -259,10 +259,10 @@
     "timezone": "Asia/Shanghai",
     "support": "supported",
     "initial_calendar": [],
-    "turns": [{"action":"message","text":"明后天WB实验","mock":[[{"name":"clarify","arguments":{"question":"按一个跨两天的 WB 实验创建，可以吗？","create_plan":{"action":"create","items":[{"fields":{"title":"WB实验","date":"2026-11-20","end_date":"2026-11-21"}}]}}}]]},{"action":"message","text":"按一个跨日的来","mock":[[{"name":"propose_events","arguments":{"action":"create","items":[{"fields":{"title":"WB实验","date":"2026-11-20","end_date":"2026-11-21"}}]}}]],"when":{"kind":"clarification","question_any":["跨","各","独立","两条"]}}],
+    "turns": [{"action":"message","text":"明后天WB实验","mock":[[{"name":"clarify","arguments":{"question":"按一个跨两天的 WB 实验创建，可以吗？","create_plan":{"action":"create","items":[{"fields":{"title":"WB实验","date":"2026-11-20","end_date":"2026-11-21"}}]}}}]]},{"action":"message","text":"按一个跨日的来","mock":[],"when":{"kind":"confirmation","question_any":["按一个跨"]}}],
     "expected_plan": [{"turn":1,"action":"create","members":[{"title":{"one_of":["WB实验","WB 实验"]},"date":"2026-11-20","end_date":"2026-11-21"}]}],
     "expected_final_state": {"create":[{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["WB实验","WB 实验"]},"date":"2026-11-20","end":"2026-11-21"}],"update":{},"delete":[],"writes":1},
-    "expected_interaction": [{"kind":"clarification","writes":0},{"kind":"succeeded","writes":1}],
+    "expected_interaction": [{"kind":"confirmation","writes":0},{"kind":"succeeded","writes":1}],
     "tags": ["memo","c04-retest"]
   },
   {
@@ -274,8 +274,8 @@
     "support": "supported",
     "initial_calendar": [],
     "turns": [{"action":"message","text":"1128新药研发DDL","mock":[[{"name":"propose_events","arguments":{"action":"create","items":[{"fields":{"title":"新药研发DDL","date":"2026-11-28","event_type":"ddl"}}]}}]]},{"action":"message","text":"再加一个一样的","mock":[[{"name":"propose_events","arguments":{"action":"create","items":[{"fields":{"title":"新药研发DDL","date":"2026-11-28","event_type":"ddl"}}]}}]],"when":{"kind":"succeeded"}}],
-    "expected_plan": [{"turn":1,"action":"create","members":[{"title":{"one_of":["新药研发DDL","新药研发 DDL"]},"date":"2026-11-28","event_type":"ddl"}]},{"turn":2,"action":"create","members":[{"title":{"one_of":["新药研发DDL","新药研发 DDL"]},"date":"2026-11-28","event_type":"ddl"}]}],
-    "expected_final_state": {"create":[{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["新药研发DDL","新药研发 DDL"]},"date":"2026-11-28","event_type":"ddl","end":"2026-11-28","deadline":"2026-11-28"},{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["新药研发DDL","新药研发 DDL"]},"date":"2026-11-28","event_type":"ddl","end":"2026-11-28","deadline":"2026-11-28"}],"update":{},"delete":[],"writes":2},
+    "expected_plan": [{"turn":1,"action":"create","members":[{"title":{"one_of":["新药研发DDL","新药研发 DDL","新药研发"]},"date":"2026-11-28","event_type":"ddl"}]},{"turn":2,"action":"create","members":[{"title":{"one_of":["新药研发DDL","新药研发 DDL","新药研发"]},"date":"2026-11-28","event_type":"ddl"}]}],
+    "expected_final_state": {"create":[{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["新药研发DDL","新药研发 DDL","新药研发"]},"date":"2026-11-28","event_type":"ddl","end":"2026-11-28","deadline":"2026-11-28"},{"time":null,"reminder":null,"category_id":null,"notes":"","title":{"one_of":["新药研发DDL","新药研发 DDL","新药研发"]},"date":"2026-11-28","event_type":"ddl","end":"2026-11-28","deadline":"2026-11-28"}],"update":{},"delete":[],"writes":2},
     "expected_interaction": [{"kind":"succeeded","writes":1},{"kind":"succeeded","writes":1}],
     "tags": ["memo"]
   },

@@ -189,10 +189,10 @@
     "timezone": "Asia/Singapore",
     "support": "supported",
     "initial_calendar": [],
-    "turns": [{"action":"message","text":"明天后天加 WB 实验。","mock":[[{"name":"clarify","arguments":{"question":"是按两天各建一条独立事项吗？","create_plan":{"action":"create","items":[{"fields":{"title":"WB实验","date":"2026-11-19"}},{"fields":{"title":"WB实验","date":"2026-11-20"}}]}}}]]},{"action":"message","text":"对的对的。","mock":[],"when":{"kind":"clarification","question_any":["独立","各建"]}}],
+    "turns": [{"action":"message","text":"明天后天加 WB 实验。","mock":[[{"name":"clarify","arguments":{"question":"是按两天各建一条独立事项吗？","create_plan":{"action":"create","items":[{"fields":{"title":"WB实验","date":"2026-11-19"}},{"fields":{"title":"WB实验","date":"2026-11-20"}}]}}}]]},{"action":"message","text":"对的对的。","mock":[],"when":{"kind":"confirmation","question_any":["各创建"]}}],
     "expected_plan": [{"turn":1,"action":"create","members":[{"title":{"one_of":["WB实验","WB 实验"]},"date":"2026-11-19"},{"title":{"one_of":["WB实验","WB 实验"]},"date":"2026-11-20"}]}],
     "expected_final_state": {"create":[{"title":{"one_of":["WB实验","WB 实验"]},"date":"2026-11-19"},{"title":{"one_of":["WB实验","WB 实验"]},"date":"2026-11-20"}],"update":{},"delete":[],"writes":1},
-    "expected_interaction": [{"kind":"clarification","writes":0},{"kind":"succeeded","writes":1}],
+    "expected_interaction": [{"kind":"confirmation","writes":0},{"kind":"succeeded","writes":1}],
     "tags": ["core"]
   },
   {

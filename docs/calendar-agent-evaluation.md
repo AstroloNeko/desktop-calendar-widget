@@ -27,6 +27,19 @@ python -m tools.calendar_agent_eval --mode live --cases c01-select-second,c04-af
 
 Mock 模式下版本号歧义和抱怨回复仍保留人工复核。CLI 对支持案例的待复核返回非零，查看报告可区分这些结果与测试错误。
 
+### 可靠性修复前基线
+
+提交 `c100516` 保留旧案例、裁判与文档。以下真实原始记录仍位于 `build/calendar-agent-eval/`，每个运行目录有 `cases.jsonl`、`summary.json` 和 `report.md`。表内摘要用于核对原始逐轮轨迹，含模型调用、Pending、回执和 SQLite 差异。
+
+| 运行 | `cases.jsonl` SHA-256 |
+|---|---|
+| `run-20261119-085552-ac6da762`（冒烟） | `e3dc5b25e082f76d63e73d665f19a32c915707222468492d6b4463dcf0e1cedb` |
+| `run-20261119-085836-0fc86cf2`（Memo 完整） | `44e798c21e46683102cada40b6124fbcbace7e96a4f2f4ecc12d7d7da90ae2ef` |
+| `run-20261119-085757-36065c9e`（旧案例复测） | `8de80c09d8424ca6c59de1321ebc37fb74d5eab2961db97aa1086a83c3947fe6` |
+| `run-20261119-085915-4a4616ec`（跨日补跑） | `4c0896860a497df08e23df791e13a5e607ee780a74c8a0f0abc20cdc05483aee` |
+
+本轮只调整两类预期。DDL 用例仍要求结构化提案及最终 Event 为 `ddl`，标题可省略 `DDL`。C04 和 Memo D19 在首次回复要求显示可执行的待确认预览且零写入，用户认可以后才检查事务与最终成员。历史运行的原始答案与判定留在原报告中。旧 C04 固定评测分日草案，Memo D19 固定评测跨日草案，真实核心复测使用符合最新推荐交互的 D19。
+
 ### Live DeepSeek
 
 以下入口会发起计费请求。运行时只传输合成案例及其合成日历上下文，使用应用已有的 DPAPI 凭据和远程同意设置。脚本以只读方式加载指定的 `configuration.dpapi`，只把模型所需字段保留在内存。评测 Runtime 使用单独的临时配置，HTTP 不启动。
