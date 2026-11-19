@@ -684,8 +684,9 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn('self.global_timeline_mode_button.pack(side="left")', source)
 
     def test_global_quick_add_uses_enter_without_ambiguous_plus_button(self) -> None:
-        source = inspect.getsource(CalendarApp._build_global_ui)
+        source = inspect.getsource(CalendarApp._build_global_quick_add)
         self.assertIn('self.quick_entry.bind("<Return>", self.quick_add)', source)
+        self.assertIn('quick_frame.pack(side="bottom", fill="x")', source)
         self.assertNotIn('ThemeButton(quick_frame, self, "+", self.quick_add', source)
 
     def test_global_toolbar_names_compact_return_explicitly(self) -> None:
@@ -935,22 +936,6 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertIn("fill=stripe_color", source)
         self.assertIn("theme.ddl_indicator_highlight", source)
 
-    def test_global_detail_uses_status_badge_and_muted_empty_actions(self) -> None:
-        build_source = inspect.getsource(CalendarApp._build_global_ui)
-        update_source = inspect.getsource(CalendarApp._update_global_detail)
-        self.assertIn("global_detail_state_label", build_source)
-        self.assertIn("theme.text_disabled", update_source)
-        self.assertIn("theme.danger_soft", update_source)
-
-    def test_global_detail_presents_category_and_color_source_as_user_language(self) -> None:
-        build_source = inspect.getsource(CalendarApp._build_global_ui)
-        update_source = inspect.getsource(CalendarApp._update_global_detail)
-        self.assertIn("global_detail_category_dot", build_source)
-        self.assertIn("global_detail_category_label", build_source)
-        self.assertIn('"跟随分类"', update_source)
-        self.assertIn('"自定义颜色"', update_source)
-        self.assertNotIn('text="category_id"', build_source)
-
     def test_escape_cancels_calendar_flow_drag_without_opening_editor(self) -> None:
         actions: list[str] = []
         fake = type(
@@ -973,63 +958,13 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertFalse(fake._global_flow_drag_moved)
         self.assertEqual(actions, ["redraw"])
 
-    def test_global_detail_keeps_existing_task_semantics(self) -> None:
-        from desktop_calendar.ui.ui_theme import get_theme
-
-        class Capture:
-            def __init__(self) -> None:
-                self.values: dict[str, object] = {}
-
-            def configure(self, **values) -> None:
-                self.values.update(values)
-
-            def set_text(self, text: str) -> None:
-                self.values["text"] = text
-
-            def draw(self) -> None:
-                pass
-
-        fake = SimpleNamespace(
-            global_detail_title=Capture(),
-            global_detail_meta=Capture(),
-            global_detail_notes=Capture(),
-            global_detail_toggle_button=Capture(),
-            global_detail_edit_button=Capture(),
-            global_detail_delete_button=Capture(),
-            global_detail_state_label=Capture(),
-            global_detail_category_label=Capture(),
-            global_detail_color_label=Capture(),
-            global_detail_category_dot=SimpleNamespace(delete=lambda *_a: None, create_oval=lambda *_a, **_kw: None),
-            theme=get_theme("modern"),
-        )
-        item = SimpleNamespace(
-            title="跨周交付",
-            start_date=date(2026, 8, 3),
-            end_date=date(2026, 8, 7),
-            calendar_span_days=5,
-            effective_days_count=5,
-            task_type="urgent",
-            ddl_date=date(2026, 8, 7),
-            completed=False,
-            notes="交付前复核",
-        )
-        CalendarApp._update_global_detail(fake, item)
-        self.assertEqual(fake.global_detail_title.values["text"], "跨周交付")
-        detail = str(fake.global_detail_meta.values["text"])
-        self.assertIn("2026-08-03 → 2026-08-07", detail)
-        self.assertIn("5 个自然日 · 5 个有效工作日", detail)
-        self.assertIn("事项性质\n紧急", detail)
-        self.assertEqual(fake.global_detail_category_label.values["text"], "无分类")
-        self.assertIn("DDL：2026-08-07", detail)
-        self.assertEqual(fake.global_detail_state_label.values["text"], "已逾期")
-        self.assertIn("交付前复核", str(fake.global_detail_notes.values["text"]))
-
     def test_global_workspace_wires_complete_toolbar_and_quick_add(self) -> None:
         from desktop_calendar.global_view.global_header import GlobalHeader
-        source = inspect.getsource(CalendarApp._build_global_ui) + inspect.getsource(GlobalHeader)
+        source = (inspect.getsource(CalendarApp._build_global_ui) + inspect.getsource(GlobalHeader)
+                  + inspect.getsource(CalendarApp._build_global_quick_add))
         for command in (
             "open_new_event",
-            "open_day_detail",
+            "toggle_drawer",
             "open_routine_manager",
             "open_ddl_list",
             "toggle_window_mode",

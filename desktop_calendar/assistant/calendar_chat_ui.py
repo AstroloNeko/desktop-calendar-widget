@@ -73,12 +73,8 @@ class ChatRuntime:
         self.http = None
 
 
-def open_chat(app):
-    blocker = app._active_modal_window()
+def chat_runtime_for(app):
     runtime = getattr(app, 'chat_runtime', None)
-    if blocker:
-        app._focus_lifecycle_owner(blocker)
-        return
     if runtime is None:
         try:
             runtime = ChatRuntime(app)
@@ -86,6 +82,17 @@ def open_chat(app):
         except (OSError, ValueError):
             app._show_feedback('AI组件无法初始化；日历仍可正常使用，请检查本机配置目录。')
             return
+    return runtime
+
+
+def open_chat(app):
+    blocker = app._active_modal_window()
+    if blocker:
+        app._focus_lifecycle_owner(blocker)
+        return
+    runtime = chat_runtime_for(app)
+    if runtime is None:
+        return
     if runtime.window and runtime.window.winfo_exists():
         runtime.window.lift()
         return
@@ -108,65 +115,85 @@ def start_chat_if_enabled(app):
         app._show_feedback('AI本机API未启动；日历仍可用，请检查AI设置。')
 
 
-class ChatDialog(tk.Toplevel):
-    def __init__(self, app, runtime):
-        super().__init__(app)
-        self.withdraw()
+class _ChatWidgets:
+    """One chat UI and set of callbacks, hosted by a dialog or the workspace."""
+
+    def _build_chat(self, app, runtime, width, *, embedded=False):
         self.app, self.runtime, self.session_id, self.operation, self.busy = app, runtime, None, None, False
+        self._embedded = embedded
         theme, dp, font = app.theme, app.dpi.px, app.search_font
-        self.title('AI 私人助理')
         self.configure(bg=theme.panel_background)
-        width, height, x, y = dialog_geometry(app.dpi.work_area(), app.dpi.dpi,
-            (app.winfo_rootx(), app.winfo_rooty(), app.winfo_width(), app.winfo_height()))
-        self.geometry(f'{width}x{height}{x:+d}{y:+d}')
-        self.minsize(min(width, dp(340)), min(height, dp(330)))
         bar = tk.Frame(self, bg=theme.panel_background)
-        bar.pack(fill='x', padx=dp(12), pady=dp(6))
-        reminder_button(bar, app, '模型 / 本机API设置', self.configure_ai).pack(side='right')
-        reminder_button(bar, app, '新对话', lambda: self.request(self.runtime.service.new_session)).pack(side='left')
-        reminder_button(bar, app, '清除此对话', self.clear).pack(side='left', padx=dp(5))
-        self.sessions = ttk.Combobox(bar, state='readonly', width=10)
+        bar.pack(fill='x', padx=dp(12), pady=dp(3 if embedded else 6))
+        session_bar = bar
+        if embedded:
+            session_bar = tk.Frame(bar, bg=theme.panel_background)
+            session_bar.pack(fill='x')
+        self.settings_button = reminder_button(bar, app, '模型 / 本机API设置', self.configure_ai)
+        self.settings_button.pack(side='left' if embedded else 'right', pady=(dp(4), 0) if embedded else 0)
+        self.new_button = reminder_button(session_bar, app, '新对话', lambda: self.request(self.runtime.service.new_session))
+        self.new_button.pack(side='left')
+        self.clear_button = reminder_button(session_bar, app, '清除此对话', self.clear)
+        self.clear_button.pack(side='left', padx=dp(5))
+        self.sessions = ttk.Combobox(session_bar, state='readonly', width=10)
         self.sessions.pack(side='left')
         self.sessions.bind('<<ComboboxSelected>>', self.load_session)
         bottom = tk.Frame(self, bg=theme.panel_background)
-        bottom.pack(side='bottom', fill='x', padx=dp(12), pady=dp(8))
+        bottom.pack(side='bottom', fill='x', padx=dp(12), pady=dp(4 if embedded else 8))
         self.status = tk.StringVar(value='未启用远程模型。请先阅读隐私说明并配置自己的密钥。')
-        tk.Label(bottom, textvariable=self.status, font=(font, 8), wraplength=width-dp(40), justify='left',
-                 bg=theme.panel_background, fg=theme.text_secondary).pack(fill='x')
+        status = tk.Label(bottom, textvariable=self.status, font=(font, 8), wraplength=width-dp(40), justify='left',
+                          bg=theme.panel_background, fg=theme.text_secondary)
+        status.pack(fill='x')
+        if embedded:
+            bottom.bind('<Configure>', lambda e: status.configure(wraplength=max(dp(80), e.width)))
         self.input = tk.Text(bottom, height=3, wrap='word', font=(font, 10), bg=theme.input_background,
                              fg=theme.text_primary, insertbackground=theme.text_primary, undo=True)
-        self.input.pack(fill='x', pady=dp(5))
+        self.input.pack(fill='x', pady=dp(3 if embedded else 5))
         self.input.bind('<Return>', self.send)
         self.input.bind('<Shift-Return>', lambda _e: None)
-        self.send_button = reminder_button(bottom, app, '发送', self.send, primary=True)
+        if embedded:
+            def fit_composer(event):
+                lines = 2 if event.height < dp(325) else 3
+                if int(self.input.cget('height')) != lines:
+                    self.input.configure(height=lines)
+            self.bind('<Configure>', fit_composer, add='+')
+        self.candidate = ttk.Combobox(bottom, state='readonly')
+        if embedded:
+            self.candidate.pack(fill='x', pady=dp(4))
+        actions = bottom
+        if embedded:
+            actions = tk.Frame(bottom, bg=theme.panel_background)
+            actions.pack(fill='x')
+        self.send_button = reminder_button(actions, app, '发送', self.send, primary=True)
         self.send_button.pack(side='right')
-        reminder_button(bottom, app, '关闭', self.close).pack(side='right', padx=dp(5))
-        self.confirm_button = reminder_button(bottom, app, '确认此操作', self.confirm)
+        self.close_button = reminder_button(actions, app, '关闭', self.close)
+        self.close_button.pack(side='right', padx=dp(5))
+        self.confirm_button = reminder_button(actions, app, '确认此操作', self.confirm)
         self.confirm_button.pack(side='left')
-        self.cancel_button = reminder_button(bottom, app, '取消操作', self.cancel)
+        self.cancel_button = reminder_button(actions, app, '取消操作', self.cancel)
         self.cancel_button.pack(side='left', padx=dp(5))
         self.confirm_button.configure(state='disabled')
         self.cancel_button.configure(state='disabled')
-        self.candidate = ttk.Combobox(bottom, state='readonly')
-        self.candidate.pack(fill='x', pady=dp(4))
+        if not embedded:
+            self.candidate.pack(fill='x', pady=dp(4))
         self.candidate.bind('<<ComboboxSelected>>', self.select_candidate)
         frame = tk.Frame(self, bg=theme.panel_background)
         frame.pack(fill='both', expand=True, padx=dp(12))
         self.transcript = tk.Text(frame, wrap='word', font=(font, 10), bg=theme.workspace_detail, fg=theme.text_primary,
-                                  relief='flat', state='disabled', padx=dp(8), pady=dp(6))
+                                  relief='flat', state='disabled', padx=dp(8), pady=dp(6),
+                                  **({'height': 1, 'width': 1} if embedded else {}))
         scroll = ttk.Scrollbar(frame, command=self.transcript.yview, style='Global.Vertical.TScrollbar')
         scroll.pack(side='right', fill='y')
         self.transcript.configure(yscrollcommand=scroll.set)
         self.transcript.pack(fill='both', expand=True)
-        self.protocol('WM_DELETE_WINDOW', self.close)
-        self.bind('<Escape>', lambda _e: self.close())
-        app.present_modal(self, app)
-        self.grab_set()
+
+    def resume(self, session_id=None):
+        runtime = self.runtime
         def resume():
             sessions = runtime.service.list_sessions()
             if not sessions:
                 return runtime.service.new_session()
-            sid = sessions[0]['session_id']
+            sid = session_id if any(row['session_id'] == session_id for row in sessions) else sessions[0]['session_id']
             response = runtime.service.get_pending_operations(sid)
             response['messages'] = runtime.service.get_history(sid)['messages']
             return response
@@ -234,7 +261,8 @@ class ChatDialog(tk.Toplevel):
         self.cancel_button.configure(state='normal' if pending else 'disabled')
         if self.operation and self.operation['status'] == 'pending':
             self.render_operation(self.operation)
-        self.input.focus_set()
+        if not self._embedded:
+            self.input.focus_set()
 
     def render_operation(self, operation):
         if operation['preview'].get('object_type') == 'event_batch':
@@ -327,16 +355,57 @@ class ChatDialog(tk.Toplevel):
         if not self.busy:
             AISettings(self)
 
+
+class ChatDialog(_ChatWidgets, tk.Toplevel):
+    def __init__(self, app, runtime):
+        super().__init__(app)
+        self.withdraw()
+        dp = app.dpi.px
+        self.title('AI 私人助理')
+        width, height, x, y = dialog_geometry(app.dpi.work_area(), app.dpi.dpi,
+            (app.winfo_rootx(), app.winfo_rooty(), app.winfo_width(), app.winfo_height()))
+        self.geometry(f'{width}x{height}{x:+d}{y:+d}')
+        self.minsize(min(width, dp(340)), min(height, dp(330)))
+        self._build_chat(app, runtime, width)
+        self.protocol('WM_DELETE_WINDOW', self.close)
+        self.bind('<Escape>', lambda _e: self.close())
+        app.present_modal(self, app)
+        self.grab_set()
+        self.resume()
+
     def close(self):
         if self.grab_current() is self:
             self.grab_release()
         self.runtime.window = None
         self.destroy()
+        embedded = getattr(self.runtime, 'embedded', None)
+        if embedded is not None and embedded.winfo_exists() and embedded.winfo_viewable():
+            embedded.resume(embedded.session_id)
+
+
+class EmbeddedChat(_ChatWidgets, tk.Frame):
+    def __init__(self, parent, app, runtime, on_close, *, session_id=None, draft=''):
+        super().__init__(parent)
+        self._on_close = on_close
+        self._build_chat(app, runtime, app.dpi.px(360), embedded=True)
+        if draft:
+            self.input.insert('1.0', draft)
+        runtime.embedded = self
+        self.resume(session_id)
+
+    def close(self):
+        self._on_close()
+
+    def destroy(self):
+        if getattr(self.runtime, 'embedded', None) is self:
+            self.runtime.embedded = None
+        super().destroy()
 
 
 class AISettings(tk.Toplevel):
     def __init__(self, chat):
-        super().__init__(chat)
+        owner = chat.winfo_toplevel()
+        super().__init__(owner)
         self.withdraw()
         self.chat, self.app = chat, chat.app
         self.configuration = chat.runtime.configuration
@@ -369,7 +438,7 @@ class AISettings(tk.Toplevel):
         self.geometry(f'{width}x{height}{x:+d}{y:+d}')
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.bind('<Escape>', lambda _e: self.close())
-        self.app.present_modal(self, chat)
+        self.app.present_modal(self, owner)
         self.grab_set()
 
     def copy_token(self):
@@ -400,5 +469,6 @@ class AISettings(tk.Toplevel):
             self.grab_release()
         self.destroy()
         if self.chat.winfo_exists():
-            self.chat.grab_set()
+            if not self.chat._embedded:
+                self.chat.grab_set()
             self.chat.input.focus_set()

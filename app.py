@@ -49,7 +49,6 @@ from calendar_flow_layout import (
 from desktop_calendar.global_view.global_timeline_ui import (
     GLOBAL_TIMELINE_LAYOUT,
     canvas_day_at,
-    detail_state_text,
     primary_action_for_view,
     timeline_tooltip_text,
     timeline_bar_label,
@@ -89,6 +88,7 @@ from bulk_ui import BulkActionsMixin
 from schedule_drag import ScheduleHit
 from desktop_calendar.global_view.global_drag_ui import GlobalDragMixin
 from desktop_calendar.global_view.global_header import GlobalHeader
+from desktop_calendar.global_view.global_sidebar import GlobalSidebar
 from desktop_calendar.global_view.global_search_ui import GlobalSearchMixin
 from desktop_calendar.ui.interaction_visuals import CanvasLayer, InteractionFeedbackMixin, elide, visible_rows
 from view_mode import WindowGeometry, fit_geometry_to_work_area, initial_global_geometry, saved_window_coordinate
@@ -3145,7 +3145,6 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self._global_category_filter_ids: Optional[set[str]] = None
         self._global_include_uncategorized = True
         self._global_category_sidebar_open = True
-        self._global_detail_visible = True
         self._global_tooltip: Optional[CanvasTooltip] = None
         self.day_cells: list[DayCell] = []
         self.agenda_open = bool(self.store.settings.get("agenda_open", True))
@@ -3494,49 +3493,11 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.mode_button = self.global_header.controls["pin"]
         self.menu_button = self.global_header.controls["more"]
 
-        quick_surface = blend(theme.schedule_background, theme.environment_haze, 0.18) if theme.style == "frutiger" else theme.schedule_background
-        quick_frame = tk.Frame(self.shell, bg=quick_surface, padx=dp(14), pady=dp(8))
-        quick_frame.pack(fill="x")
-        tk.Label(quick_frame, text="快速添加", bg=quick_surface, fg=theme.text_secondary, font=(FONT, 8, "bold")).pack(side="left", padx=(0, dp(9)))
-        self._quick_entry_hovered = False
-        self.quick_var = tk.StringVar(value="")
-        self.quick_entry = tk.Entry(
-            quick_frame,
-            textvariable=self.quick_var,
-            bg=theme.input_background,
-            fg=theme.text_muted,
-            insertbackground=theme.text_primary,
-            relief="flat",
-            highlightthickness=dp(1),
-            highlightbackground=theme.input_border,
-            highlightcolor=theme.input_focus,
-            font=(FONT, 9),
-        )
-        self._place_quick_entry(quick_frame)
-        self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
-        self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
-        self.quick_entry.bind("<Enter>", lambda _event: self._quick_entry_hover(True))
-        self.quick_entry.bind("<Leave>", lambda _event: self._quick_entry_hover(False))
-        self.quick_entry.bind("<Return>", self.quick_add)
-        self.quick_options_button = ThemeButton(
-            quick_frame,
-            self,
-            "一般 · 选项",
-            self.show_quick_options,
-            width=72,
-            height=29,
-            font_size=8,
-            surface_background=quick_surface,
-            outlined=True,
-        )
-        self.quick_options_button.pack(side="right", padx=(dp(6), 0))
-        self._refresh_quick_options_button()
-
         info_bar = tk.Frame(self.shell, bg=theme.panel_secondary, padx=dp(14), pady=dp(5))
         info_bar.pack(fill="x")
         self.global_summary_label = tk.Label(info_bar, text="", bg=theme.panel_secondary, fg=theme.text_secondary, font=(FONT, 8), anchor="w")
         self.global_summary_label.pack(side="left")
-        day_detail_button = ThemeButton(info_bar, self, "当天详情", self.open_day_detail, width=66, height=23, font_size=8, surface_background=theme.panel_secondary, outlined=True)
+        day_detail_button = ThemeButton(info_bar, self, "右侧面板", lambda: self.global_detail_frame.toggle_drawer(), width=66, height=23, font_size=8, surface_background=theme.panel_secondary, outlined=True)
         day_detail_button.pack(side="right", padx=(dp(8), 0))
         ThemeButton(info_bar, self, "搜索 Ctrl+K", self.open_search, width=90, height=23,
                     font_size=8, surface_background=theme.panel_secondary, outlined=True).pack(side="right", padx=(dp(8), 0))
@@ -3572,7 +3533,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             outlined=True,
         )
         self.global_timeline_mode_button.pack(side="left")
-        Tooltip(day_detail_button, "查看当前选中日期的完整事项列表")
+        Tooltip(day_detail_button, "显示当日详情、AI 助理与快速添加")
         Tooltip(self.global_flow_mode_button, "按周查看本月每天的安排")
         Tooltip(self.global_timeline_mode_button, "按事项查看持续时间与 DDL")
 
@@ -3689,91 +3650,15 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.global_flow_canvas.bind("<Button-3>", self._show_flow_day_menu)
         self._update_global_display_mode_widgets()
 
-        self.global_detail_frame = tk.Frame(
-            self.global_workspace,
-            width=dp(GLOBAL_TIMELINE_LAYOUT.detail_width),
-            bg=theme.workspace_detail,
-            highlightthickness=dp(1),
-            highlightbackground=theme.workspace_grid,
-            highlightcolor=theme.workspace_grid,
-            padx=dp(14),
-            pady=dp(14),
+        self.global_detail_frame = GlobalSidebar(
+            self.global_workspace, self, button_factory=ThemeButton, font_family=FONT,
+            snapshot=getattr(self, "_global_sidebar_snapshot", None),
         )
-        self.global_detail_frame.grid(row=0, column=2, sticky="nsew", padx=(dp(theme.metrics.workspace_gap), 0))
-        # A theme/DPI rebuild creates a visible frame, independent of the old one.
-        self._global_detail_visible = True
-        self.global_detail_frame.pack_propagate(False)
-        detail_heading = tk.Frame(self.global_detail_frame, bg=theme.workspace_detail)
-        detail_heading.pack(fill="x")
-        tk.Label(detail_heading, text="事项详情", bg=theme.workspace_detail, fg=theme.text_secondary, font=(FONT, 8, "bold"), anchor="w").pack(side="left")
-        self.global_detail_state_label = tk.Label(
-            detail_heading,
-            text="未选择",
-            bg=theme.control_background,
-            fg=theme.text_muted,
-            font=(FONT, 7, "bold"),
-            padx=dp(6),
-            pady=dp(2),
-        )
-        self.global_detail_state_label.pack(side="right")
-        self.global_detail_title = tk.Label(
-            self.global_detail_frame,
-            text="选择一个事项查看详情",
-            bg=theme.workspace_detail,
-            fg=theme.text_primary,
-            font=(FONT, 12, "bold"),
-            anchor="nw",
-            justify="left",
-            wraplength=dp(220),
-        )
-        self.global_detail_title.pack(fill="x", pady=(dp(12), dp(8)))
-        detail_identity = tk.Frame(self.global_detail_frame, bg=theme.workspace_detail)
-        self.global_detail_identity = detail_identity
-        self.global_detail_category_dot = LogicalCanvas(
-            detail_identity,
-            dpi=self.dpi,
-            width=18,
-            height=18,
-            bg=theme.workspace_detail,
-            bd=0,
-            highlightthickness=0,
-        )
-        self.global_detail_category_dot.pack(side="left", padx=(0, dp(4)))
-        self.global_detail_category_label = tk.Label(
-            detail_identity,
-            text="无分类",
-            bg=theme.workspace_detail,
-            fg=theme.text_secondary,
-            font=(FONT, 8, "bold"),
-            anchor="w",
-        )
-        self.global_detail_category_label.pack(side="left", fill="x", expand=True)
-        self.global_detail_color_label = tk.Label(
-            detail_identity,
-            text="",
-            bg=theme.workspace_detail,
-            fg=theme.text_muted,
-            font=(FONT, 7),
-            anchor="e",
-        )
-        self.global_detail_color_label.pack(side="right")
-        self.global_detail_meta = tk.Label(self.global_detail_frame, text="", bg=theme.workspace_detail, fg=theme.text_secondary, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
-        self.global_detail_meta.pack(fill="x")
-        self.global_detail_notes = tk.Label(self.global_detail_frame, text="", bg=theme.workspace_detail, fg=theme.text_muted, font=(FONT, 8), anchor="nw", justify="left", wraplength=dp(220))
-        self.global_detail_notes.pack(fill="both", expand=True, pady=(dp(12), dp(8)))
-        detail_actions = tk.Frame(self.global_detail_frame, bg=theme.workspace_detail)
-        detail_actions.pack(side="bottom", fill="x")
-        self.global_detail_edit_button = ThemeButton(detail_actions, self, "编辑", self._edit_selected_timeline, width=58, height=29, font_size=8, surface_background=theme.workspace_detail, accented=True)
-        self.global_detail_edit_button.pack(side="left")
-        self.global_detail_toggle_button = ThemeButton(detail_actions, self, "完成", self._toggle_selected_timeline, width=64, height=29, font_size=8, surface_background=theme.workspace_detail, outlined=True)
-        self.global_detail_toggle_button.pack(side="left", padx=(dp(5), 0))
-        self.global_detail_delete_button = ThemeButton(detail_actions, self, "删除", self._delete_selected_timeline, width=54, height=29, font_size=8, foreground=theme.danger, surface_background=theme.workspace_detail, outlined=True)
-        self.global_detail_delete_button.pack(side="right")
 
         self.global_status_label = tk.Label(
             self.shell,
             text="",
-            bg=quick_surface if theme.style == "frutiger" else theme.panel_background,
+            bg=self.quick_entry.master.cget("bg") if theme.style == "frutiger" else theme.panel_background,
             fg=theme.text_secondary,
             font=(FONT, 8),
             anchor="w",
@@ -4407,6 +4292,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             except tk.TclError:
                 pass
             self._global_render_job = None
+        sidebar = getattr(self, "global_detail_frame", None)
+        if sidebar is not None and sidebar.winfo_exists():
+            self._global_sidebar_snapshot = sidebar.snapshot()
         self.window_frame.destroy()
         self._configure_style()
         self._build_ui()
@@ -4624,6 +4512,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if refresh_sidebar:
             self._refresh_global_category_filter_button()
             self._refresh_global_category_sidebar()
+        sidebar = getattr(self, "global_detail_frame", None)
+        if sidebar is not None:
+            sidebar.day_dirty = True
         self._draw_active_global_view()
 
     def set_global_display_mode(self, mode: str) -> None:
@@ -4681,21 +4572,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self._draw_global_timeline()
 
     def _on_global_workspace_configure(self, event: tk.Event) -> None:
-        logical_width = self.dpi.logical(event.width)
-        show_detail = GLOBAL_TIMELINE_LAYOUT.show_detail_panel(logical_width)
-        if show_detail != self._global_detail_visible:
-            self._global_detail_visible = show_detail
-            if show_detail:
-                self.global_detail_frame.grid()
-            else:
-                self.global_detail_frame.grid_remove()
-        if show_detail:
-            detail_width = GLOBAL_TIMELINE_LAYOUT.detail_panel_width(logical_width)
-            self.global_detail_frame.configure(width=self.dpi.px(detail_width))
-            wraplength = self.dpi.px(max(160, detail_width - 36))
-            self.global_detail_title.configure(wraplength=wraplength)
-            self.global_detail_meta.configure(wraplength=wraplength)
-            self.global_detail_notes.configure(wraplength=wraplength)
+        if hasattr(self, "global_detail_frame") and self.global_detail_frame.winfo_exists():
+            self.global_detail_frame.arrange(event.width)
         self._schedule_global_render()
 
     def _draw_global_timeline(self, *, rows_only: bool = False) -> None:
@@ -5688,106 +5566,50 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if source:
             self.show_event_menu(source, event.x_root, event.y_root)
 
-    def _update_global_detail(self, item: Optional[TimelineItem]) -> None:
-        if not hasattr(self, "global_detail_title"):
-            return
-        if item is None:
-            total = len(self.timeline_model.items) if self.timeline_model else 0
-            self.global_detail_title.configure(text="选择一个事项查看详情")
-            self.global_detail_meta.configure(text=f"本月共 {total} 项工作\n单击事项选择，双击直接编辑")
-            self.global_detail_notes.configure(text="日期空白区域可双击新建事项。")
-            if hasattr(self, "global_detail_identity"):
-                self.global_detail_identity.pack_forget()
-            if hasattr(self, "global_detail_state_label"):
-                self.global_detail_state_label.configure(text="未选择", bg=self.theme.control_background, fg=self.theme.text_muted)
-                self.global_detail_edit_button.accented = False
-                self.global_detail_edit_button.outlined = True
-                self.global_detail_edit_button.foreground = self.theme.text_disabled
-                self.global_detail_edit_button.draw()
-                self.global_detail_toggle_button.foreground = self.theme.text_disabled
-                self.global_detail_toggle_button.draw()
-                self.global_detail_delete_button.foreground = self.theme.text_disabled
-                self.global_detail_delete_button.draw()
-            self.global_detail_toggle_button.set_text("完成")
-            return
-        date_text = f"{item.start_date:%Y-%m-%d}" if item.start_date == item.end_date else f"{item.start_date:%Y-%m-%d} → {item.end_date:%Y-%m-%d}"
-        duration = f"{item.calendar_span_days} 个自然日 · {item.effective_days_count} 个有效工作日"
-        ddl_text = f"\nDDL：{item.ddl_date:%Y-%m-%d}" if item.ddl_date else ""
-        category_text = getattr(item, "category_name", None) or "无分类"
-        source_event = None
-        store = getattr(self, "store", None)
-        if store is not None and hasattr(store, "event_by_id"):
-            source_event = store.event_by_id(item.id)
-        self.global_detail_title.configure(text=item.title)
-        state_text = detail_state_text(item)
-        self.global_detail_meta.configure(
-            text=f"日期\n{date_text}\n\n持续\n{duration}\n\n事项性质\n{timeline_type_label(item)}{ddl_text}"
+    def _update_global_detail(self, _item=None) -> None:
+        sidebar = getattr(self, "global_detail_frame", None)
+        if sidebar is not None and sidebar.winfo_exists():
+            sidebar.refresh_day()
+
+    def _build_global_quick_add(self, parent) -> None:
+        theme, dp = self.theme, self.dpi.px
+        quick_surface = blend(theme.schedule_background, theme.environment_haze, 0.18) if theme.style == "frutiger" else theme.schedule_background
+        quick_frame = tk.Frame(parent, bg=quick_surface, padx=dp(14), pady=dp(8))
+        quick_frame.pack(side="bottom", fill="x")
+        tk.Label(quick_frame, text="快速添加", bg=quick_surface, fg=theme.text_secondary, font=(FONT, 8, "bold")).pack(side="left", padx=(0, dp(9)))
+        self._quick_entry_hovered = False
+        self.quick_var = tk.StringVar(value="")
+        self.quick_entry = tk.Entry(
+            quick_frame,
+            textvariable=self.quick_var,
+            bg=theme.input_background,
+            fg=theme.text_muted,
+            insertbackground=theme.text_primary,
+            relief="flat",
+            highlightthickness=dp(1),
+            highlightbackground=theme.input_border,
+            highlightcolor=theme.input_focus,
+            font=(FONT, 9),
         )
-        self.global_detail_notes.configure(text=f"备注\n{item.notes}" if item.notes else "备注\n暂无备注")
-        if hasattr(self, "global_detail_identity") and not self.global_detail_identity.winfo_manager():
-            self.global_detail_identity.pack(before=self.global_detail_meta, fill="x", pady=(0, self.dpi.px(9)))
-        if hasattr(self, "global_detail_category_dot"):
-            category = store.category_by_id(source_event.category_id) if source_event is not None else None
-            category_color = category.color if category else self.theme.text_muted
-            self.global_detail_category_dot.delete("all")
-            self.global_detail_category_dot.create_oval(
-                4,
-                4,
-                14,
-                14,
-                fill=category_color if category_text != "无分类" else self.theme.workspace_detail,
-                outline=category_color,
-                width=2 if category_text == "无分类" else 1,
-            )
-            self.global_detail_category_label.configure(text=category_text, fg=self.theme.text_primary)
-            color_source = (
-                "跟随分类"
-                if source_event is not None and source_event.color_mode == "inherit"
-                else "自定义颜色"
-                if source_event is not None and source_event.category_id
-                else "单独颜色"
-            )
-            self.global_detail_color_label.configure(text=color_source)
-        if hasattr(self, "global_detail_state_label"):
-            if item.completed:
-                state_background, state_foreground = self.theme.card_done_background, self.theme.text_done
-            elif state_text == "已逾期":
-                state_background, state_foreground = self.theme.danger_soft, self.theme.danger
-            elif getattr(item, "native_ddl", False) or item.ddl_date:
-                state_background, state_foreground = self.theme.event_type_ddl_background, self.theme.event_type_ddl
-            elif getattr(item, "is_urgent", False):
-                state_background, state_foreground = self.theme.event_type_urgent_background, self.theme.event_type_urgent
-            else:
-                state_background, state_foreground = self.theme.control_background, self.theme.text_secondary
-            self.global_detail_state_label.configure(text=state_text, bg=state_background, fg=state_foreground)
-            self.global_detail_edit_button.accented = True
-            self.global_detail_edit_button.outlined = False
-            self.global_detail_edit_button.foreground = None
-            self.global_detail_edit_button.draw()
-            self.global_detail_toggle_button.foreground = None
-            self.global_detail_toggle_button.draw()
-            self.global_detail_delete_button.foreground = self.theme.danger
-            self.global_detail_delete_button.draw()
-        self.global_detail_toggle_button.set_text("取消完成" if item.completed else "完成")
-
-    def _selected_timeline_event(self) -> Optional[Event]:
-        item = self.get_selected_timeline_item()
-        return self.store.event_by_id(item.id) if item else None
-
-    def _edit_selected_timeline(self) -> None:
-        event = self._selected_timeline_event()
-        if event:
-            self.open_editor(event)
-
-    def _toggle_selected_timeline(self) -> None:
-        event = self._selected_timeline_event()
-        if event:
-            self.toggle_done(event)
-
-    def _delete_selected_timeline(self) -> None:
-        event = self._selected_timeline_event()
-        if event:
-            self._confirm_delete(event, parent=self)
+        self.quick_entry.bind("<FocusIn>", self._quick_focus_in)
+        self.quick_entry.bind("<FocusOut>", self._quick_focus_out)
+        self.quick_entry.bind("<Enter>", lambda _event: self._quick_entry_hover(True))
+        self.quick_entry.bind("<Leave>", lambda _event: self._quick_entry_hover(False))
+        self.quick_entry.bind("<Return>", self.quick_add)
+        self.quick_options_button = ThemeButton(
+            quick_frame,
+            self,
+            "一般 · 选项",
+            self.show_quick_options,
+            width=72,
+            height=29,
+            font_size=8,
+            surface_background=quick_surface,
+            outlined=True,
+        )
+        self.quick_options_button.pack(side="right", padx=(dp(6), 0))
+        self._place_quick_entry(quick_frame)
+        self._refresh_quick_options_button()
 
     def select_timeline_item(self, item_id: str) -> Optional[TimelineItem]:
         model = self.timeline_model or build_month_timeline(self.store, self.shown_year, self.shown_month)
@@ -5975,24 +5797,25 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def _open_ddl_detail(self, event: Event) -> None:
         self.open_day_detail(self.store.event_end_date(event))
 
-    def _agenda_card_surface(self, background):
+    def _agenda_card_surface(self, background, *, parent=None):
         theme, dp = self.theme, self.dpi.px
+        parent = self.agenda_inner if parent is None else parent
         if not theme.rounded_widget_shells:
-            card = tk.Frame(self.agenda_inner, bg=background, highlightthickness=1,
+            card = tk.Frame(parent, bg=background, highlightthickness=1,
                             highlightbackground=theme.schedule_card_border, cursor="hand2")
             card.pack(fill="x", pady=(0, 5), padx=1)
             return card
-        shell = RoundedCardShell(self.agenda_inner, theme, dp, background)
+        shell = RoundedCardShell(parent, theme, dp, background)
         shell.pack(fill="x", padx=dp(1), pady=(0, dp(6)))
         card = tk.Frame(shell, bg=background, cursor="hand2")
         card.pack(fill="both", expand=True, padx=dp(6), pady=dp(3))
         shell.bindtags((str(shell), str(card), *shell.bindtags()[1:]))
         return card
 
-    def _build_event_card(self, item: Event) -> None:
+    def _build_event_card(self, item: Event, *, parent=None, scroll=None) -> None:
         theme = self.theme
         card_bg = theme.card_done_background if item.done else theme.schedule_card_background
-        card = self._agenda_card_surface(card_bg)
+        card = self._agenda_card_surface(card_bg, parent=parent)
         stripe = tk.Frame(
             card,
             bg=event_stripe_color(theme, item, self.store.effective_event_color(item)),
@@ -6053,18 +5876,18 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         for widget in (card, content, title_row, title, meta, more, stripe):
             widget.bind("<Button-1>", lambda _event, event=item: self.open_editor(event))
             widget.bind("<Button-3>", lambda event, item=item: self.show_event_menu(item, event.x_root, event.y_root))
-            widget.bind("<MouseWheel>", self._agenda_wheel)
+            widget.bind("<MouseWheel>", scroll or self._agenda_wheel)
         if badge:
             badge.bind("<Button-1>", lambda _event, event=item: self.open_editor(event))
             badge.bind("<Button-3>", lambda event, item=item: self.show_event_menu(item, event.x_root, event.y_root))
-            badge.bind("<MouseWheel>", self._agenda_wheel)
+            badge.bind("<MouseWheel>", scroll or self._agenda_wheel)
         self._bind_card_hover((card, content, title_row, title, meta, more), card_bg)
 
-    def _build_routine_card(self, item: RoutineItem) -> None:
+    def _build_routine_card(self, item: RoutineItem, *, parent=None, scroll=None) -> None:
         theme = self.theme
         done = item.is_done_on(self.selected)
         card_bg = theme.card_done_background if done else theme.schedule_card_background
-        card = self._agenda_card_surface(card_bg)
+        card = self._agenda_card_surface(card_bg, parent=parent)
         stripe = tk.Frame(card, bg=theme.event_done if done else item.color, width=EVENT_STRIPE_WIDTH)
         stripe.pack(side="left", fill="y", pady=self.dpi.px(3) if theme.rounded_widget_shells else 0)
         stripe.pack_propagate(False)
@@ -6105,7 +5928,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         tag.pack(side="right", padx=(2, 7))
         for widget in (card, content, title, meta, tag, stripe):
             widget.bind("<Button-1>", lambda _event, entry=item: self.open_routine_editor(entry))
-            widget.bind("<MouseWheel>", self._agenda_wheel)
+            widget.bind("<MouseWheel>", scroll or self._agenda_wheel)
         self._bind_card_hover((card, content, title, meta), card_bg)
 
     def _bind_card_hover(self, widgets: tuple[tk.Widget, ...], normal: str) -> None:
@@ -6691,6 +6514,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 # Row ordering and weekly lane packing require one active-Canvas
                 # redraw, but not a shell, sidebar, modal, or theme rebuild.
                 self._render_global_timeline(refresh_sidebar=False)
+            elif self.selected in change.affected_dates:
+                # Calendar Flow also allows selecting spillover days from another month.
+                self.global_detail_frame.day_dirty = True
+                self._update_global_detail()
         elif month_changed:
             self.render()
             return
@@ -7180,6 +7007,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             )), focus_result=True)
 
     def _focus_quick_entry(self) -> None:
+        if self.view_mode == "global":
+            self.global_detail_frame.show()
+            self.update_idletasks()
         self.quick_entry.focus_set()
 
     def _set_ddl_list_entry_state(self, state: str) -> None:

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Event, EventCategory, Store
 from dpi_utils import scaled_geometry
-from desktop_calendar.global_view.global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
+from desktop_calendar.global_view.global_sidebar import GlobalSidebar
 from tools.check_frameless_global import assert_header
 from tools.check_interactions import cleanup, position_hit, pump
 from tools.check_window_drag import native_signatures, save_png
@@ -143,8 +143,8 @@ def main():
                                 app.geometry(scaled_geometry(width_check, height, area.left + 20, area.top + 20, dpi))
                                 pump(app, .06)
                                 assert_header(app)
-                                expected = GLOBAL_TIMELINE_LAYOUT.show_detail_panel(app.dpi.logical(app.global_workspace.winfo_width()))
-                                assert bool(app.global_detail_frame.winfo_manager()) == expected, (theme, dpi, width_check)
+                                docked = app.dpi.logical(app.global_workspace.winfo_width()) >= GlobalSidebar.DOCK_BELOW
+                                assert (app.global_detail_frame.winfo_manager() == "grid") == docked, (theme, dpi, width_check)
                             app.open_new_event(today)
                             pump(app)
                             assert app.grab_current() is app.editor_window
