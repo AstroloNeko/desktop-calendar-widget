@@ -7008,7 +7008,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
     def _focus_quick_entry(self) -> None:
         if self.view_mode == "global":
-            self.global_detail_frame.show()
+            self.global_detail_frame.show(mode="day")
             self.update_idletasks()
         self.quick_entry.focus_set()
 

@@ -130,13 +130,14 @@ class _ChatWidgets:
             session_bar = tk.Frame(bar, bg=theme.panel_background)
             session_bar.pack(fill='x')
         self.settings_button = reminder_button(bar, app, '模型 / 本机API设置', self.configure_ai)
-        self.settings_button.pack(side='left' if embedded else 'right', pady=(dp(4), 0) if embedded else 0)
+        self.settings_button.pack(side='right', pady=(dp(4), 0) if embedded else 0)
         self.new_button = reminder_button(session_bar, app, '新对话', lambda: self.request(self.runtime.service.new_session))
         self.new_button.pack(side='left')
         self.clear_button = reminder_button(session_bar, app, '清除此对话', self.clear)
         self.clear_button.pack(side='left', padx=dp(5))
-        self.sessions = ttk.Combobox(session_bar, state='readonly', width=10)
-        self.sessions.pack(side='left')
+        self.sessions = ttk.Combobox(bar if embedded else session_bar, state='readonly', width=10)
+        self.sessions.pack(side='left', fill='x' if embedded else 'none', expand=embedded,
+                           padx=(0, dp(5)) if embedded else 0, pady=(dp(4), 0) if embedded else 0)
         self.sessions.bind('<<ComboboxSelected>>', self.load_session)
         bottom = tk.Frame(self, bg=theme.panel_background)
         bottom.pack(side='bottom', fill='x', padx=dp(12), pady=dp(4 if embedded else 8))
@@ -172,6 +173,34 @@ class _ChatWidgets:
         self.confirm_button.pack(side='left')
         self.cancel_button = reminder_button(actions, app, '取消操作', self.cancel)
         self.cancel_button.pack(side='left', padx=dp(5))
+        if embedded:
+            pending_row = tk.Frame(actions, bg=theme.panel_background)
+            send_row = tk.Frame(actions, bg=theme.panel_background)
+            wrapped = None
+
+            def arrange_actions(event):
+                nonlocal wrapped
+                # Leave room for the longer final-delete label as well.
+                narrow = event.width < dp(330)
+                if narrow == wrapped:
+                    return
+                wrapped = narrow
+                for button in (self.confirm_button, self.cancel_button, self.send_button, self.close_button):
+                    button.pack_forget()
+                if narrow:
+                    pending_row.pack(fill='x')
+                    send_row.pack(fill='x', pady=(dp(3), 0))
+                else:
+                    pending_row.pack_forget()
+                    send_row.pack_forget()
+                pending = pending_row if narrow else actions
+                sending = send_row if narrow else actions
+                self.send_button.pack(in_=sending, side='right')
+                self.close_button.pack(in_=sending, side='right', padx=dp(5))
+                self.confirm_button.pack(in_=pending, side='left')
+                self.cancel_button.pack(in_=pending, side='left', padx=dp(5))
+
+            actions.bind('<Configure>', arrange_actions)
         self.confirm_button.configure(state='disabled')
         self.cancel_button.configure(state='disabled')
         if not embedded:

@@ -12,6 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Event, Store
+from desktop_calendar.global_view.global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
 from tools.check_calendar_chat import wait
 from tools.check_interactions import cleanup, pump
 
@@ -34,9 +35,10 @@ def label_texts(widget):
         yield from label_texts(child)
 
 
-def inside(child, outer):
+def inside(child, outer, *, minimum_width=None):
     assert child.winfo_viewable(), str(child)
-    assert child.winfo_width() >= child.winfo_reqwidth(), str(child)
+    assert child.winfo_width() >= (child.winfo_reqwidth() if minimum_width is None else minimum_width), (
+        str(child), child.winfo_width(), child.winfo_reqwidth())
     assert child.winfo_rootx() + child.winfo_width() <= outer.winfo_rootx() + outer.winfo_width(), str(child)
     assert child.winfo_rooty() + child.winfo_height() <= outer.winfo_rooty() + outer.winfo_height(), str(child)
 
@@ -67,6 +69,8 @@ def main():
                 side = app.global_detail_frame
                 side.show()
                 pump(app, .15)
+                logical_width = app.dpi.logical(app.global_workspace.winfo_width())
+                assert side.winfo_width() == app.dpi.px(GLOBAL_TIMELINE_LAYOUT.detail_panel_width(logical_width))
                 if app.dpi.logical(app.global_workspace.winfo_width()) >= side.DOCK_BELOW:
                     assert side.winfo_manager() == 'grid'
                     old_width = side.winfo_width()
@@ -113,6 +117,7 @@ def main():
                 side.switch('assistant', focus=True)
                 chat, runtime = side.chat, app.chat_runtime
                 wait(app, lambda: not chat.busy and chat.session_id, 'conversation ready')
+                assert not app.quick_entry.winfo_viewable() and not app.quick_options_button.winfo_viewable()
                 sid = chat.session_id
                 chat.new_button.invoke()
                 wait(app, lambda: not chat.busy and chat.session_id != sid, 'new conversation')
@@ -145,19 +150,25 @@ def main():
 
                 chat.input.insert('1.0', '未发送草稿')
                 side.switch('day')
+                pump(app)
+                assert app.quick_entry.winfo_viewable()
                 assert '隔离删除样例' not in set(label_texts(side.rows))
                 side.switch('assistant')
                 assert side.chat is chat and chat.input.get('1.0', 'end-1c') == '未发送草稿'
                 wait(app, lambda: not chat.busy, 'resume embedded chat')
 
                 narrow = min(width, app.dpi.px(780))
+                side.preferred_width = None
                 app.geometry(f'{narrow}x{min(height, app.dpi.px(520))}{area.left:+d}{area.top:+d}')
                 pump(app, .25)
                 assert side.winfo_manager() == 'place'
-                for widget in (chat.new_button, chat.clear_button, chat.sessions, chat.settings_button,
-                               chat.send_button, chat.confirm_button, chat.cancel_button, app.quick_options_button):
+                assert side.winfo_width() == app.dpi.px(GLOBAL_TIMELINE_LAYOUT.detail_min_width)
+                for widget in (chat.new_button, chat.clear_button, chat.settings_button,
+                               chat.send_button, chat.confirm_button, chat.cancel_button):
                     inside(widget, side)
-                for widget in (chat.input, chat.transcript, app.quick_entry):
+                inside(chat.sessions, side, minimum_width=app.dpi.px(38))
+                assert not app.quick_entry.winfo_viewable()
+                for widget in (chat.input, chat.transcript):
                     assert widget.winfo_viewable() and widget.winfo_height() > app.dpi.px(15), (
                         str(widget), widget.winfo_height(), chat.winfo_height(), app.winfo_height())
                 side.toggle_drawer()
@@ -165,7 +176,7 @@ def main():
                 assert not side.winfo_manager()
                 app._focus_quick_entry()
                 pump(app)
-                assert side.winfo_manager() == 'place' and app.quick_entry.winfo_viewable()
+                assert side.winfo_manager() == 'place' and side.mode == 'day' and app.quick_entry.winfo_viewable()
 
                 # The earlier editable shortcut work, when present, is exercised
                 # through the native helper; the layout also works without it.

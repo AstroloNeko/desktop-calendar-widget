@@ -4,11 +4,12 @@ from tkinter import ttk
 
 from calendar_core import RoutineItem, WEEKDAYS
 from desktop_calendar.assistant.calendar_chat_ui import EmbeddedChat, chat_runtime_for
+from desktop_calendar.global_view.global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
 
 
 class GlobalSidebar(tk.Frame):
     DOCK_BELOW = 1000
-    MIN_WIDTH = 360
+    MIN_WIDTH = GLOBAL_TIMELINE_LAYOUT.detail_min_width
     MAX_WIDTH = 540
 
     def __init__(self, parent, app, *, button_factory, font_family, snapshot=None):
@@ -32,7 +33,6 @@ class GlobalSidebar(tk.Frame):
         grip.bind("<B1-Motion>", self._resize_from_left)
         body = tk.Frame(self, bg=bg)
         body.pack(side="left", fill="both", expand=True)
-        app._build_global_quick_add(body)
 
         surface = theme.control_background if theme.rounded_widget_shells else bg
         tabs = tk.Frame(body, bg=bg)
@@ -48,14 +48,17 @@ class GlobalSidebar(tk.Frame):
         self.pages.pack(fill="both", expand=True)
         self.pages.rowconfigure(0, weight=1)
         self.pages.columnconfigure(0, weight=1)
-        self.day_page = tk.Frame(self.pages, bg=bg, padx=dp(12))
+        self.day_page = tk.Frame(self.pages, bg=bg)
         self.day_page.grid(row=0, column=0, sticky="nsew")
-        self.date_label = tk.Label(self.day_page, bg=bg, fg=theme.text_primary,
+        app._build_global_quick_add(self.day_page)
+        agenda = tk.Frame(self.day_page, bg=bg, padx=dp(12))
+        agenda.pack(fill="both", expand=True)
+        self.date_label = tk.Label(agenda, bg=bg, fg=theme.text_primary,
                                    font=(font_family, 10, "bold"), anchor="w")
         self.date_label.pack(fill="x", pady=(dp(5), dp(6)))
-        scroll = ttk.Scrollbar(self.day_page, orient="vertical", style="Global.Vertical.TScrollbar")
+        scroll = ttk.Scrollbar(agenda, orient="vertical", style="Global.Vertical.TScrollbar")
         scroll.pack(side="right", fill="y")
-        canvas = tk.Canvas(self.day_page, width=1, height=1, bg=bg, highlightthickness=0,
+        canvas = tk.Canvas(agenda, width=1, height=1, bg=bg, highlightthickness=0,
                            yscrollcommand=scroll.set)
         self.canvas = canvas
         scroll.configure(command=canvas.yview)
@@ -154,7 +157,7 @@ class GlobalSidebar(tk.Frame):
                 self.grid(row=0, column=2, sticky="nsew", padx=(dp(self.app.theme.metrics.workspace_gap), 0))
             self._drawer = drawer
         maximum = min(self.MAX_WIDTH, max(self.MIN_WIDTH, logical - 560)) if not drawer else self.MAX_WIDTH
-        preferred = self.preferred_width or min(430, max(self.MIN_WIDTH, logical // 3))
+        preferred = self.preferred_width or GLOBAL_TIMELINE_LAYOUT.detail_panel_width(logical)
         pixels = min(max(1, width - dp(12)), dp(max(self.MIN_WIDTH, min(maximum, preferred))))
         if not drawer:
             if int(self.cget("width")) != pixels:
@@ -171,7 +174,9 @@ class GlobalSidebar(tk.Frame):
         self.preferred_width = max(self.MIN_WIDTH, min(self.MAX_WIDTH, self.app.dpi.logical(width)))
         self.arrange(self.workspace_width)
 
-    def show(self):
+    def show(self, *, mode=None):
+        if mode is not None:
+            self.switch(mode)
         self.drawer_open = True
         self.arrange(self.workspace_width or self.master.winfo_width())
 
