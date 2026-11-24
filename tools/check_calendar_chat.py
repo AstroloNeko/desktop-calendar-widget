@@ -227,6 +227,7 @@ def main():
                         assert settings.fields['remote_token'].cget('show') == '*'
                         assert '已关闭' in settings.remote_status.get()
                         assert settings.binding_state.get() == '尚未绑定'
+                        assert settings.last_check_time.get() == settings.check_result.get() == '暂无'
                         assert settings.safety_check.get() == '关闭'
                         assert settings.manual_check_button.cget('state') == 'disabled'
                         assert runtime.gateway.writable()
@@ -242,14 +243,20 @@ def main():
                             saved = settings.old
                             worker = Mock()
                             worker.snapshot.return_value = RemoteStatus('live')
-                            worker.request_check.return_value = True
+
+                            def request_check():
+                                worker.snapshot.return_value = RemoteStatus('live', check_result='checking')
+                                return True
+
+                            worker.request_check.side_effect = request_check
                             with patch.object(runtime.core, 'remote', worker):
                                 settings.old = {**saved, 'remote_enabled': True}
                                 wait(app, lambda: settings.manual_check_button.cget('state') == 'normal',
                                      'manual remote check available')
                                 settings.manual_check_button.invoke()
                                 worker.request_check.assert_called_once()
-                                assert '已按保存的配置' in settings.status.get()
+                                assert settings.check_result.get() == '正在检查……'
+                                assert settings.manual_check_button.cget('state') == 'disabled'
                             settings.old = saved
                             settings.inputs['remote_url'].set('https://example.invalid')
                             settings.inputs['activation_code'].set('synthetic-code')
@@ -284,17 +291,29 @@ def main():
                                     patch.object(runtime.core, 'recent_remote_history', return_value=rows):
                                 settings.old = {**bound, 'remote_enabled': True, 'api_key': 'synthetic-model-key', 'consent': True}
                                 settings.remote_enabled.set(True)
-                                worker.snapshot.return_value = RemoteStatus('live', history_revision=10)
+                                worker.snapshot.return_value = RemoteStatus('live', history_revision=10,
+                                                                           last_checked_at=timestamp, check_result='empty')
                                 settings.refresh_remote_panel()
                                 wait(app, lambda: '当时等待确认' in settings.history_view.get('1.0', 'end'), 'recent history visible')
                                 settings.refresh_remote_panel()
                                 assert settings.remote_status.get() == '实时在线'
+                                assert settings.check_result.get() == '无事发生，一切正常'
+                                assert settings.last_check_time.get() != '暂无'
+                                assert '已创建 1 项' in settings.latest_result.get()
+                                assert '无事发生' not in settings.history_view.get('1.0', 'end')
                                 if not getattr(sys, 'frozen', False):
                                     destination = Path(__file__).resolve().parents[1]/'build/calendar-chat-qa'
                                     destination.mkdir(parents=True, exist_ok=True)
                                     settings.status.set('')
                                     pump(app, .08)
                                     capture_own_window(settings, destination/'wechat-settings.png')
+                                last_success = settings.last_check_time.get()
+                                worker.snapshot.return_value = RemoteStatus('live', history_revision=10, request_failed=True,
+                                                                           last_checked_at=timestamp, check_result='failed')
+                                settings.refresh_remote_panel()
+                                assert settings.check_result.get() == '本次检查失败'
+                                assert settings.last_check_time.get() == last_success
+                                assert '已创建 1 项' in settings.latest_result.get()
                                 worker.snapshot.return_value = RemoteStatus('invalid', history_revision=10)
                                 settings.refresh_remote_panel()
                                 assert '已失效' in settings.remote_status.get()

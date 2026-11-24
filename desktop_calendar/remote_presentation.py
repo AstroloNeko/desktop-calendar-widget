@@ -63,4 +63,7 @@ class RemoteTrayConfig:
         if completion and completion.processed_at:
             when = datetime.fromtimestamp(completion.processed_at).strftime('%H:%M')
             tip += f'\n最近处理：{when} · {completion.result}'
+        if snapshot.last_checked_at is not None:
+            when = datetime.fromtimestamp(snapshot.last_checked_at).strftime('%m-%d %H:%M:%S')
+            tip += f'\n最近成功检查：{when}'
         return color, tip

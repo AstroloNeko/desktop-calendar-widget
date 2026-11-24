@@ -36,6 +36,15 @@ class TrayBadgePresentationTests(unittest.TestCase):
         self.assertIn('最近一次模型请求失败', tooltip)
         self.assertIn('最近处理', tooltip)
 
+    def test_successful_check_adds_tooltip_time_without_changing_color_or_completion(self):
+        configured = RemoteTrayConfig(True, True, True, True, True)
+        completion = RemoteCompletion(1795500000, '已创建 1 项', False)
+        badge, tooltip = configured.tray_status(RemoteStatus(
+            'live', completion=completion, last_checked_at=1795500010, check_result='empty'))
+        self.assertEqual(badge, 'green')
+        self.assertIn('最近成功检查', tooltip)
+        self.assertIn('已创建 1 项', tooltip)
+
     def test_dot_preserves_artwork_and_uses_white_outline_at_small_sizes(self):
         for size in (16, 20, 24, 32, 48):
             for color in BADGE_COLORS.values():

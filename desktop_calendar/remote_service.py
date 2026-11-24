@@ -41,10 +41,26 @@ class RemoteStatus:
     history_revision: int = 0
     request_failed: bool = False
     completion: Optional[RemoteCompletion] = None
+    last_checked_at: Optional[float] = None
+    check_result: str = ''
 
 
 def test_connection(url):
     return Client(url).request('/').get('status') == 'ok'
+
+
+def claim_checked_at(response, received_at):
+    checked_at = response.get('checked_at')
+    if isinstance(checked_at, str):
+        try:
+            parsed = datetime.fromisoformat(checked_at.replace('Z', '+00:00'))
+            if parsed.utcoffset() is not None:
+                stamp = parsed.timestamp()
+                datetime.fromtimestamp(stamp)
+                return stamp
+        except (ValueError, OverflowError, OSError):
+            pass
+    return received_at
 
 
 def message_time(job):
@@ -138,6 +154,8 @@ class RemoteWorker:
         self.processing_id = ''
         self.history_revision = 0
         self.completion = None
+        self.last_checked_at = None
+        self.check_result = ''
         self.on_status_change = on_status_change
         self._notified_status = None
         self.stopped = False
@@ -184,6 +202,8 @@ class RemoteWorker:
             self.cloud_unavailable = False
             self.processing_id = ''
             self.completion = None
+            self.last_checked_at = None
+            self.check_result = ''
             self.offline_since = time.monotonic()
             self.notification_status = '正在连接实时通知。' if active and self.notifications else ''
             if self.notifications:
@@ -199,6 +219,7 @@ class RemoteWorker:
         with self.condition:
             if not self._current(self.generation):
                 return False
+            self.check_result = 'checking'
             self.wake_serial += 1
             self.condition.notify_all()
             return True
@@ -207,6 +228,7 @@ class RemoteWorker:
         with self.condition:
             self.stopped = True
             self.config = None
+            self.check_result = ''
             self.status = '远程服务已停止。'
             self.notification_status = ''
             if self.notifications:
@@ -237,13 +259,14 @@ class RemoteWorker:
                     connection = 'reconnecting' if self.had_live_connection else 'connecting'
             else:
                 connection = 'reconnecting' if self.had_live_connection else 'connecting'
-            return RemoteStatus(connection, self.processing_id, self.history_revision, self.cloud_unavailable, self.completion)
+            return RemoteStatus(connection, self.processing_id, self.history_revision, self.cloud_unavailable,
+                                self.completion, self.last_checked_at, self.check_result)
 
     def _notify_status_change(self):
         if self.on_status_change is None:
             return
         snapshot = self.snapshot()
-        status = (snapshot.connection, snapshot.request_failed, snapshot.completion)
+        status = (snapshot.connection, snapshot.request_failed, snapshot.completion, snapshot.last_checked_at)
         if status != self._notified_status:
             self._notified_status = status
             self.on_status_change()
@@ -255,11 +278,13 @@ class RemoteWorker:
             self.completion = RemoteCompletion(when, result, record.get('model_unavailable') is True)
             self._notify_status_change()
 
-    def _reject_authentication(self, generation):
+    def _reject_authentication(self, generation, *, check_failed=False):
         with self.condition:
             if self._current(generation):
                 self.auth_rejected = True
                 self.notification_online = False
+                if check_failed or self.check_result == 'checking':
+                    self.check_result = 'failed'
                 self.status = '远程服务绑定已失效。'
                 self.notification_status = ''
                 if self.notifications:
@@ -267,12 +292,16 @@ class RemoteWorker:
                 self.condition.notify_all()
                 self._notify_status_change()
 
-    def _cloud_status(self, generation, ok):
+    def _cloud_status(self, generation, ok, *, check_result='', checked_at=None):
         with self.condition:
             if self._current(generation):
                 self.cloud_unavailable = not ok
                 if ok:
                     self.last_cloud_ok = time.monotonic()
+                if checked_at is not None:
+                    self.last_checked_at = checked_at
+                if check_result:
+                    self.check_result = check_result
                 self._notify_status_change()
 
     def _publish(self, generation, status=None, notice=None):
@@ -331,7 +360,7 @@ class RemoteWorker:
                     return
                 generation, (url, token, server, _) = self.generation, self.config
                 seen = self.wake_serial
-            idle = False
+            idle = checking_queue = False
             try:
                 if generation != previous:
                     client = self.client_factory(url)
@@ -362,19 +391,22 @@ class RemoteWorker:
                             continue
                 elif self.service.gateway.dispatch(self.service.gateway.writable) and self._current(generation):
                     if claim_uncertain:
+                        checking_queue = True
                         if client.request('/').get('status') != 'ok':
                             raise Unavailable
                         claim_uncertain = False
+                        checking_queue = False
                     if self._current(generation):
                         self.journal.check_capacity()
+                        checking_queue = True
                         try:
                             response = client.request(CLAIM_PATH, token)
+                            received_at = time.time()
                             job = response['job']
                             if job is not None and not self._identified(job):
                                 raise ValueError('领取响应缺少有效 MsgId。')
                         except (Unavailable, KeyError, ValueError):
                             claim_uncertain = True
-                            self._cloud_status(generation, False)
                             self._claim_incident(server, generation)
                             raise
                         except StatusError as error:
@@ -382,25 +414,29 @@ class RemoteWorker:
                             if claim_uncertain:
                                 self._claim_incident(server, generation)
                             raise
+                        idle = job is None
+                        self._cloud_status(generation, True, check_result='empty' if idle else 'claimed',
+                                           checked_at=claim_checked_at(response, received_at))
+                        checking_queue = False
                         if job is not None:
                             # Keep the decoded job in memory until durable intake succeeds.
                             unrecorded = (job, server, url)
                             backlog.append(self._intake(job, server, url))
                             unrecorded = None
-                        self._cloud_status(generation, True)
                         self._publish(generation, 'Worker 已认证，等待消息。' if job is None else '已领取微信消息。')
-                        idle = job is None
                         if backlog and self._handle_active(backlog[0], client, token, server, generation):
                             backlog.popleft()
                             if self.notifications:
                                 continue
             except StatusError as error:
                 if error.status in (401, 403):
-                    self._reject_authentication(generation)
+                    self._reject_authentication(generation, check_failed=checking_queue)
                 else:
-                    self._cloud_status(generation, False)
+                    self._cloud_status(generation, False, check_result='failed' if checking_queue else '')
                     self._publish(generation, f'服务返回 HTTP {error.status}，等待下次轮询。')
             except (Unavailable, KeyError, ValueError, OSError, sqlite3.Error):
+                if checking_queue:
+                    self._cloud_status(generation, False, check_result='failed')
                 self._publish(generation, '远程连接或本地台账暂不可用。')
             except Exception:
                 self._publish(generation, '远程处理暂不可用，请检查本地台账。')

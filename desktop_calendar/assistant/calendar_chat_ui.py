@@ -740,6 +740,8 @@ class AISettings(tk.Toplevel):
         self.connection_detail = tk.StringVar(self)
         self.binding_state = tk.StringVar(self)
         self.ai_state = tk.StringVar(self)
+        self.last_check_time = tk.StringVar(self)
+        self.check_result = tk.StringVar(self)
         self.latest_result = tk.StringVar(self)
         status_bg = theme.input_background
         status_card = (RoundedCardShell(content, theme, dp, status_bg, surface=bg, outline=theme.input_border,
@@ -755,7 +757,9 @@ class AISettings(tk.Toplevel):
                           fg=theme.text_secondary, font=(font, 8), anchor='w', justify='left')
         detail.pack(fill='x', pady=(dp(2), dp(6)))
         wrapped.append(detail)
-        for label, variable in (('微信账号', self.binding_state), ('AI 助理', self.ai_state), ('最近处理', self.latest_result)):
+        for label, variable in (('微信账号', self.binding_state), ('AI 助理', self.ai_state),
+                                ('最近成功检查', self.last_check_time), ('检查结果', self.check_result),
+                                ('最近处理', self.latest_result)):
             row = tk.Frame(details, bg=status_bg)
             row.pack(fill='x', pady=dp(1))
             tk.Label(row, text=label, bg=status_bg, fg=theme.text_secondary, font=(font, 9)).pack(side='left')
@@ -927,7 +931,8 @@ class AISettings(tk.Toplevel):
         invalid = state == 'invalid'
         available = state not in ('disabled', 'invalid')
         busy = self.binding_busy or self.pending_binding is not None
-        self.manual_check_button.configure(state='normal' if available and not busy and self.runtime.core.remote else 'disabled')
+        can_check = available and not busy and self.runtime.core.remote and snapshot.check_result != 'checking'
+        self.manual_check_button.configure(state='normal' if can_check else 'disabled')
         self.rebind_button.configure(text='重新绑定' if self.old['remote_token'] else '开始绑定',
                                      state='disabled' if busy else 'normal')
         if invalid:
@@ -947,6 +952,11 @@ class AISettings(tk.Toplevel):
         self.connection_detail.set(detail)
         self.binding_state.set('已失效' if invalid else '已绑定到本机' if self.old['remote_account'] else
                                '已配置手动连接' if self.old['remote_token'] else '尚未绑定')
+        checked_at = snapshot.last_checked_at
+        self.last_check_time.set(datetime.fromtimestamp(checked_at).strftime('%m-%d %H:%M:%S')
+                                 if checked_at is not None else '暂无')
+        self.check_result.set({'checking': '正在检查……', 'empty': '无事发生，一切正常',
+                               'claimed': '已领取微信任务', 'failed': '本次检查失败'}.get(snapshot.check_result, '暂无'))
         finished = (row for row in self.history_rows if row.result not in ('正在处理', '已接收，等待处理'))
         latest = max(finished, key=lambda row: row.processed_at or row.received_at, default=None)
         recent = snapshot.completion
@@ -1152,7 +1162,7 @@ class AISettings(tk.Toplevel):
             return
         worker = self.runtime.core.remote
         if self.old['remote_enabled'] and worker and worker.request_check():
-            self.status.set('已按保存的配置请求检查远程任务。')
+            self.refresh_remote_panel()
         else:
             self.status.set('请先启用远程服务并保存。')
 

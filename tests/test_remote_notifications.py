@@ -12,7 +12,7 @@ from desktop_calendar.assistant.calendar_chat_protocol import fingerprint
 from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
 from desktop_calendar.remote_cloud import Binding, FirebaseNotificationContract, NotificationSession, remote_scope
 from desktop_calendar.remote_notifications import NotificationListener, sse_events, stream_notifications
-from desktop_calendar.remote_service import JOBS, RemoteWorker
+from desktop_calendar.remote_service import JOBS, RemoteWorker, claim_checked_at
 from desktop_calendar.remote_transport import CLAIM_PATH, StatusError, Unavailable
 import test_remote_service as fixture
 from test_calendar_chat import tool
@@ -513,6 +513,53 @@ class WorkerTriggerTests(unittest.TestCase):
         worker.thread.join(3)
         self.assertFalse(worker.thread.is_alive())
 
+    def test_claim_check_time_accepts_offsets_and_falls_back_on_invalid_values(self):
+        expected = datetime(2026, 11, 24, 8, 22, 9, tzinfo=timezone.utc).timestamp()
+        for response in ({'checked_at': '2026-11-24T08:22:09Z'}, {'checked_at': '2026-11-24T16:22:09+08:00'}):
+            self.assertEqual(claim_checked_at(response, 42), expected)
+        for response in ({}, {'checked_at': None}, {'checked_at': 'invalid'}, {'checked_at': '2026-11-24T08:22:09'}):
+            self.assertEqual(claim_checked_at(response, 42), 42)
+
+    def test_manual_empty_check_and_failure_keep_separate_success_time(self):
+        calls = []
+        release = threading.Event()
+        before = time.time()
+
+        def request(path, token):
+            calls.append(path)
+            if len(calls) == 1:
+                return {'job': None, 'status': 'empty', 'checked_at': '2026-11-24T08:22:09Z', 'message': 'empty'}
+            if len(calls) == 2:
+                if not release.wait(3):
+                    raise Unavailable
+                return {'job': None}
+            raise Unavailable
+
+        worker = self.start_worker(request, grace=10, interval=10, minutes=0)
+        self.addCleanup(release.set)
+        expected = datetime(2026, 11, 24, 8, 22, 9, tzinfo=timezone.utc).timestamp()
+        self.assertTrue(until(lambda: worker.snapshot().last_checked_at == expected))
+        self.assertEqual(worker.snapshot().check_result, 'empty')
+        self.assertTrue(worker.request_check())
+        self.assertTrue(until(lambda: len(calls) == 2))
+        self.assertEqual(worker.snapshot().check_result, 'checking')
+        self.assertEqual(worker.snapshot().last_checked_at, expected)
+        release.set()
+        self.assertTrue(until(lambda: worker.snapshot().check_result == 'empty'))
+        latest = worker.snapshot().last_checked_at
+        self.assertLessEqual(before, latest)
+        self.assertLessEqual(latest, time.time())
+        self.assertFalse(worker.notification_online)
+        self.assertEqual(self.ledger.all(JOBS, worker.config[2]), [])
+        self.assertIsNone(worker.snapshot().completion)
+        self.assertTrue(worker.request_check())
+        self.assertTrue(until(lambda: worker.snapshot().check_result == 'failed'))
+        failed = worker.snapshot()
+        self.assertEqual(failed.last_checked_at, latest)
+        self.assertEqual(failed.connection, 'unavailable')
+        self.assertEqual(failed.history_revision, 0)
+        self.assertEqual(calls, [CLAIM_PATH] * 3)
+
     def test_idle_stream_claims_only_at_start_reconnect_and_safety_deadline(self):
         claims = []
         worker = self.start_worker(lambda path, token: claims.append(path) or {'job': None}, grace=1, safety=0.28)
@@ -547,6 +594,11 @@ class WorkerTriggerTests(unittest.TestCase):
         self.assertTrue(worker.request_check())
         self.assertTrue(until(lambda: len(claims) == 4 and len(uploaded) == 1))
         self.assertEqual(len(self.events()), 1)
+        self.assertTrue(until(lambda: worker.snapshot().check_result == 'empty'))
+        drained = worker.snapshot()
+        self.assertEqual(drained.completion.result, '已创建 1 项')
+        self.assertGreaterEqual(drained.last_checked_at, drained.completion.processed_at)
+        self.assertEqual(len(self.ledger.all(JOBS, worker.config[2])), 1)
 
         generation = worker.generation
         worker.configure({**fixture.CONFIG, 'remote_safety_check_minutes': 30})
@@ -566,14 +618,20 @@ class WorkerTriggerTests(unittest.TestCase):
         worker.notifications.signal()
         self.assertTrue(until(lambda: len(claims) >= 2))
         self.assertEqual(worker.snapshot().connection, 'live')
+        connected = worker.snapshot().last_checked_at
         worker.notifications.signal(False)
         self.assertEqual(worker.snapshot().connection, 'reconnecting')
         self.assertTrue(until(lambda: len(claims) >= 4))
         self.assertTrue(until(lambda: worker.snapshot().connection == 'backup'))
+        backup = worker.snapshot()
+        self.assertGreater(backup.last_checked_at, connected)
+        self.assertEqual(backup.check_result, 'empty')
+        self.assertFalse(worker.notification_online)
         self.assertIn('备用', worker.notification_status)
         old = len(claims)
         worker.notifications.signal()
         self.assertTrue(until(lambda: len(claims) > old))
+        self.assertTrue(until(lambda: worker.snapshot().last_checked_at > backup.last_checked_at))
         time.sleep(0.025)
         resumed = len(claims)
         time.sleep(0.18)
@@ -596,6 +654,8 @@ class WorkerTriggerTests(unittest.TestCase):
 
         worker = self.start_worker(request)
         self.assertTrue(until(lambda: worker.snapshot().connection == 'invalid'))
+        self.assertEqual(worker.snapshot().check_result, 'failed')
+        self.assertIsNone(worker.snapshot().last_checked_at)
         self.assertFalse(worker.request_check())
         self.assertIsNone(worker.notifications.generation)
         time.sleep(0.12)
