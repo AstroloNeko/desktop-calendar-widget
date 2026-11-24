@@ -55,6 +55,17 @@ def receipt_message(result):
     return f"{label}（{len(rows)} 项）\n" + '\n'.join(details)
 
 
+def wechat_delete_review(operation):
+    rows = operation['preview']['before']
+    lines = [f"请核对以下 {len(rows)} 个待删除事项。"]
+    lines.extend(f"{i}. {row['date']} {row['time'] or ''} · {row['title']} · ID {row['id']}"
+                 for i, row in enumerate(rows, 1))
+    action = '删除这批' if operation['stage'] == 'reviewing_batch' else '最终确认删除'
+    lines.append(f'核对后回复“{action}”，或回复“取消”。')
+    review = '\n'.join(lines)
+    return review if len(review.encode('utf-8')) <= 1900 else None
+
+
 def envelope(session_id=None, request_id=None, **fields):
     result = fields.pop('operation_result', None)
     message = fields.pop('assistant_message', '') or (receipt_message(result) if result else '')

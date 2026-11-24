@@ -5,6 +5,7 @@ Production credentials default to DPAPI; alternative protectors must be explicit
 """
 from copy import deepcopy
 from pathlib import Path
+import sqlite3
 import time
 import threading
 
@@ -19,15 +20,25 @@ from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP
 from desktop_calendar.assistant.calendar_chat_tools import ChatError
 from calendar_executor import SerialExecutor
 from desktop_calendar.assistant.llm_provider import AIConfiguration, DeepSeekProvider
+from desktop_calendar.remote_cloud import NOTIFICATION_CONTRACT, Binding, activate_binding, remote_scope
+from desktop_calendar.remote_history import describe_history
+from desktop_calendar.remote_presentation import RemoteTrayConfig
+from desktop_calendar.remote_service import JOBS, RemoteStatus, RemoteWorker
+from desktop_calendar.remote_transport import normalize_url, valid_token
 
 
 class CalendarRuntime:
     """Caller supplies ownership, refresh ports and existing desktop history."""
     def __init__(self, store, history, dispatch, *, configuration=None, journal=None,
                  provider=None, clock=time.time, refresh=lambda change: None,
-                 habit_refresh=lambda: None, writable=lambda: True, repository=None):
+                 habit_refresh=lambda: None, writable=lambda: True, repository=None,
+                 remote_contract=NOTIFICATION_CONTRACT, on_remote_status_change=None):
         self.state = 'starting'
         self.http = None
+        self.remote = None
+        self.remote_contract = remote_contract
+        self.remote_tray_config = RemoteTrayConfig()
+        self.on_remote_status_change = on_remote_status_change
         self.dispatch = dispatch
         if repository is not None and repository is not store.repository:
             raise ValueError('Repository must be the Store-owned adapter; inject its factory when creating Store.')
@@ -61,6 +72,8 @@ class CalendarRuntime:
         if self.state == 'stopped':
             return
         self.state = 'stopping'
+        if self.remote:
+            self.remote.stop()
         self.service.stopped = True
         if self.http:
             self.http.stop(wait_requests=wait, timeout=timeout)
@@ -71,6 +84,76 @@ class CalendarRuntime:
             self.service.lock.release()
         # Journal opens/closes a SQLite connection per operation; no retained handle.
         self.state = 'stopped'
+
+    def apply_remote(self):
+        if self.state != 'running':
+            raise ChatError('service_stopped', '运行时已停止。')
+        config = self.configuration.load()
+        self.remote_tray_config = RemoteTrayConfig.from_settings(config)
+        if self.remote is None and config.get('remote_enabled') is True:
+            # Keep MsgId deduplication across calendar restore epochs.
+            try:
+                ledger = ChatJournal(self.configuration.folder / 'wechat-jobs.sqlite3', self.configuration.protector)
+            except sqlite3.Error:
+                raise ChatError('service_unavailable', '远程服务台账暂不可用，请检查本机配置目录。') from None
+            self.remote = RemoteWorker(self.service, ledger, contract=self.remote_contract,
+                                       on_status_change=self.on_remote_status_change)
+        if self.remote:
+            self.remote.configure(config)
+        if self.on_remote_status_change:
+            self.on_remote_status_change()
+
+    def remote_tray_status(self):
+        config = self.remote_tray_config
+        state = self.remote.snapshot() if self.remote else RemoteStatus('unavailable' if config.enabled else 'disabled')
+        return config.tray_status(state)
+
+    def request_remote_binding(self, url, code):
+        if self.state != 'running':
+            raise ChatError('service_stopped', '运行时已停止。')
+        return activate_binding(url, code)
+
+    def recent_remote_history(self, config, processing_id=''):
+        url, token = config.get('remote_url'), config.get('remote_token')
+        if not url or not valid_token(token):
+            return ()
+        scope = remote_scope(normalize_url(url), token, config.get('remote_account', ''),
+                             config.get('remote_legacy_credential', ''))
+        records = ChatJournal.read_recent(self.configuration.folder / 'wechat-jobs.sqlite3',
+                                          self.configuration.protector, JOBS, scope, 20, time_field='received_at')
+        return describe_history(records, self.journal, processing_id)
+
+    def save_remote_binding(self, url, binding):
+        if not isinstance(binding, Binding):
+            raise ValueError('绑定响应格式无效。')
+        config = {**self.configuration.load(), 'remote_url': normalize_url(url), 'remote_token': binding.worker_token,
+                  'remote_account': binding.account_id, 'remote_enabled': False}
+        # The activated code may already be consumed even if the window is closing.
+        return self._save_remote_disabled(config)
+
+    def clear_remote_binding(self):
+        config = {**self.configuration.load(), 'remote_url': '', 'remote_token': '',
+                  'remote_account': '', 'remote_enabled': False}
+        return self._save_remote_disabled(config)
+
+    def clear_ai_settings(self):
+        config = self.configuration.load()
+        defaults = self.configuration.defaults()
+        for key in ('endpoint', 'model', 'api_key', 'timeout', 'temperature', 'consent', 'http_enabled', 'port', 'token'):
+            config[key] = defaults[key]
+        config['remote_enabled'] = False
+        self._save_remote_disabled(config)
+        self.apply_http()
+        return self.configuration.load()
+
+    def _save_remote_disabled(self, config):
+        self.configuration.save(config)
+        self.remote_tray_config = RemoteTrayConfig.from_settings(config)
+        if self.remote:
+            self.remote.configure(config)
+        if self.on_remote_status_change:
+            self.on_remote_status_change()
+        return config
 
 
 class _OwnedService:

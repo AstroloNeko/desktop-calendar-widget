@@ -5,7 +5,7 @@ import re
 
 from calendar_core import RoutineItem, COLORS, normalize_reminder_time
 from habit_schedule import validate_schedule_input, schedule_label
-from desktop_calendar.assistant.calendar_chat_tools import fail, iso_day
+from desktop_calendar.assistant.calendar_chat_tools import fail, iso_day, reference_today
 from desktop_calendar.assistant.calendar_chat_protocol import fingerprint
 
 
@@ -44,7 +44,7 @@ def prepare_habit(store, values, identifier, message, previous=None):
     requested = set(values)
     if previous:
         values = {**asdict(previous), **values}
-    today = date.today()
+    today = reference_today(date.today)
     cadence = re.search(r'每(?:隔[一二三四五六七八九十\d]+)?(?:个)?(天|日|周|星期|月|年)', message)
     period_change = previous is None or bool(requested & {'frequency', 'interval', 'weekdays', 'month_day', 'year_month'})
     if cadence and period_change:

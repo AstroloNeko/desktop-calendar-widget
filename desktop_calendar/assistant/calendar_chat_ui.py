@@ -1,9 +1,11 @@
 """Desktop adapter. Remote work/service locks never block Tk's main thread."""
+from datetime import datetime
 from pathlib import Path
 import secrets
+import sqlite3
 import threading
 import tkinter as tk
-from tkinter import font as tkfont, ttk
+from tkinter import font as tkfont, messagebox, ttk
 
 from tk_dispatcher import TkDispatcher
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError, envelope
@@ -12,6 +14,9 @@ from desktop_calendar.reminders.reminder_ui import reminder_button
 from desktop_calendar.ui.themed_controls import (RoundedCardShell, SettingsScroll, form_button,
                                                   form_entry, themed_check)
 from desktop_calendar.updates.update_dialog import dialog_geometry
+from desktop_calendar.remote_presentation import CONNECTION_LABELS, RemoteTrayConfig, model_status
+from desktop_calendar.remote_service import RemoteStatus, test_connection
+from desktop_calendar.remote_transport import SAFETY_CHECK_MINUTES, StatusError, Unavailable, normalize_url
 from calendar_runtime import CalendarRuntime
 
 
@@ -25,9 +30,8 @@ class ChatRuntime:
         journal = ChatJournal(session.journal_path, self.configuration.protector) if session else None
         self.core = CalendarRuntime(app.store, app.event_commands, TkDispatcher(app),
             configuration=self.configuration, journal=journal, refresh=app._refresh_event_change,
-            writable=lambda: not app.lifecycle.exiting and not app.update_busy and not app._lifecycle_operation_depth
-            and (app._active_modal_window() is None or app._active_modal_window() is self.window),
-            habit_refresh=self.refresh_habits)
+            writable=self.calendar_writable,
+            habit_refresh=self.refresh_habits, on_remote_status_change=self.queue_tray_status)
         self.journal, self.gateway, self.service = self.core.journal, self.core.gateway, self.core.service
         self.jobs = threading.BoundedSemaphore(4)
         self.error = None
@@ -35,6 +39,14 @@ class ChatRuntime:
             self.apply_http()
         except ChatError as error:
             self.error = str(error)
+        try:
+            self.core.apply_remote()
+        except (OSError, ValueError):
+            self.error = '私人远程服务未启动，请检查 AI 设置。'
+            self.queue_tray_status()
+
+    def queue_tray_status(self):
+        self.app._call_main(lambda: publish_remote_tray(self.app, self.core.remote_tray_status()))
 
     def refresh_habits(self):
         self.app.invalidate_reminders()
@@ -43,9 +55,23 @@ class ChatRuntime:
         if manager and manager.winfo_exists():
             manager.refresh()
 
+    def calendar_writable(self):
+        app = self.app
+        if app.lifecycle.exiting or app.update_busy or app._lifecycle_operation_depth:
+            return False
+        modal = app._active_modal_window()
+        return (modal is None or modal is self.window
+                or isinstance(modal, AISettings) and modal.runtime is self)
+
     def apply_http(self):
         try:
             self.core.apply_http()
+        finally:
+            self.http = self.core.http
+
+    def clear_ai_settings(self):
+        try:
+            return self.core.clear_ai_settings()
         finally:
             self.http = self.core.http
 
@@ -100,18 +126,42 @@ def open_chat(app):
     runtime.window = ChatDialog(app, runtime)
 
 
+def open_ai_settings(app):
+    blocker = app._active_modal_window()
+    if blocker:
+        if isinstance(blocker, AISettings):
+            blocker.tabs.select(blocker.remote_tab)
+        app._focus_lifecycle_owner(blocker)
+        return
+    runtime = chat_runtime_for(app)
+    if runtime is not None:
+        return AISettings(app=app, runtime=runtime, show_remote=True)
+
+
+def publish_remote_tray(app, status):
+    if status == getattr(app, '_remote_tray_status', (None, '')):
+        return
+    app._remote_tray_status = status
+    tray = getattr(app, 'tray_icon', None)
+    if tray:
+        tray.update_status(*status)
+
+
 def start_chat_if_enabled(app):
-    """Only explicitly enabled HTTP resumes at startup; no model request or implicit opt-in."""
+    """Resume explicitly enabled adapters after desktop startup."""
     if getattr(app, 'chat_runtime', None) is not None or app.lifecycle.exiting or app.lifecycle.stopped:
         return  # A user may open AI before the delayed startup callback fires.
     folder = app.store.data_file.parent / 'ai-assistant'
     if not (folder / 'configuration.dpapi').exists():
         return
     try:
-        if AIConfiguration(folder).load().get('http_enabled'):
+        config = AIConfiguration(folder).load()
+        if config.get('http_enabled') or config.get('remote_enabled') is True:
             app.chat_runtime = ChatRuntime(app)
             if app.chat_runtime.error:
                 app._show_feedback(app.chat_runtime.error)
+        else:
+            publish_remote_tray(app, RemoteTrayConfig.from_settings(config).tray_status(RemoteStatus()))
     except (OSError, ValueError):
         app._show_feedback('AI本机API未启动；日历仍可用，请检查AI设置。')
 
@@ -555,26 +605,41 @@ class EmbeddedChat(_ChatWidgets, tk.Frame):
         super().destroy()
 
 
+WECHAT_HELP = (
+    ('首次绑定', '关注私人服务器对应的微信公众号，发送“绑定 + 管理员提供的邀请码”。'
+               '收到服务器地址和一次性激活码后，在本页填写并绑定，再启用服务。'),
+    ('重新绑定', '向微信公众号发送“重新获取激活码”，在本页填写新激活码。绑定成功后，旧设备的访问密钥会失效。'),
+    ('日常使用', '直接用自然语言创建、修改、删除或查询日历事项。需要确认时，按微信回复继续操作。'
+               '电脑关机或月历未运行时，消息会在云端等待。等待超过一分钟可能收到提醒。'
+               '长时间离线后任务仍可继续处理，微信回执可能因客服消息时限而无法送达。'),
+)
 class AISettings(tk.Toplevel):
-    def __init__(self, chat):
-        owner = chat.winfo_toplevel()
+    def __init__(self, chat=None, *, app=None, runtime=None, show_remote=False):
+        owner = chat.winfo_toplevel() if chat else app
         super().__init__(owner)
         self.withdraw()
-        self.chat, self.app = chat, chat.app
-        self.configuration = chat.runtime.configuration
+        self.chat, self.app = chat, chat.app if chat else app
+        self.runtime = chat.runtime if chat else runtime
+        self.configuration = self.runtime.configuration
         self.old = self.configuration.load()
         theme, dp, font = self.app.theme, self.app.dpi.px, self.app.search_font
-        self.title('AI 设置与隐私')
+        self.title('AI 助理设置')
         bg = theme.panel_background
         self.configure(bg=bg)
         width, height, x, y = dialog_geometry(self.app.dpi.work_area(), self.app.dpi.dpi,
             (owner.winfo_rootx(), owner.winfo_rooty(), owner.winfo_width(), owner.winfo_height()),
-            preferred=(480, 485))
+            preferred=(550, 640))
         self.geometry(f'{width}x{height}{x:+d}{y:+d}')
         self.minsize(min(width, dp(320)), min(height, dp(260)))
         self.inputs = {}
         self.fields = {}
         self.status = tk.StringVar(self)
+        self.binding_busy = False
+        self.pending_binding = None
+        self.rebinding = False
+        self.history_rows = ()
+        self.history_scope = self.history_key = None
+        self.history_loading = False
         self.actions = actions = tk.Frame(self, bg=bg)
         actions.pack(side='bottom', fill='x', padx=dp(16), pady=dp(10))
         self.save_button, save = form_button(actions, self.app, '保存', self.save, primary=True)
@@ -586,9 +651,26 @@ class AISettings(tk.Toplevel):
         status.pack(side='bottom', fill='x', padx=dp(16))
         tk.Frame(self, height=dp(1), bg=theme.divider).pack(side='bottom', fill='x')
 
-        self.form = form = SettingsScroll(self, self.app)
-        form.pack(fill='both', expand=True, padx=dp(16))
-        content = form.content
+        style = ttk.Style(self)
+        style.configure('CalendarAI.TNotebook', background=bg, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure('CalendarAI.TNotebook.Tab', font=(font, 9), padding=(dp(12), dp(6)))
+        style.map('CalendarAI.TNotebook.Tab', background=[('selected', theme.accent_soft), ('!selected', bg)],
+                  foreground=[('selected', theme.text_primary), ('!selected', theme.text_secondary)])
+        self.tabs = ttk.Notebook(self, style='CalendarAI.TNotebook')
+        self.tabs.pack(fill='both', expand=True, padx=dp(16), pady=(dp(7), 0))
+        forms = []
+
+        def add_tab(title):
+            page = tk.Frame(self.tabs, bg=bg)
+            self.tabs.add(page, text=title)
+            scroll = SettingsScroll(page, self.app)
+            scroll.pack(fill='both', expand=True)
+            forms.append(scroll)
+            return page, scroll
+
+        self.ai_tab, ai_form = add_tab('AI 设置')
+        self.remote_tab, remote_form = add_tab('微信远控')
+        form, content = ai_form, ai_form.content
         wrapped = [status]
 
         def section(parent, title, detail):
@@ -599,15 +681,17 @@ class AISettings(tk.Toplevel):
             note.pack(fill='x', pady=(0, dp(5)))
             wrapped.append(note)
 
-        def field(parent, key, caption):
+        def field(parent, key, caption, *, widget_key=None):
             tk.Label(parent, text=caption, bg=bg, fg=theme.text_primary, font=(font, 9),
                      anchor='w').pack(fill='x', pady=(0, dp(3)))
-            value = tk.StringVar(value='' if key == 'api_key' else str(self.old[key]))
-            self.inputs[key] = value
-            entry, control = form_entry(parent, self.app, value, show='*' if key == 'api_key' else '')
-            self.fields[key] = entry
+            secret = key in ('api_key', 'remote_token', 'activation_code')
+            if key not in self.inputs:
+                self.inputs[key] = tk.StringVar(self, '' if secret else str(self.old[key]))
+            value = self.inputs[key]
+            entry, control = form_entry(parent, self.app, value, show='*' if secret else '')
+            self.fields[widget_key or key] = entry
             control.pack(fill='x', pady=(0, dp(7)), ipady=0 if theme.rounded_widget_shells else dp(4))
-            entry.bind('<FocusIn>', lambda _e: form.reveal(control), add='+')
+            entry.bind('<FocusIn>', lambda _e, scroll=form: scroll.reveal(control), add='+')
 
         def option(parent, text, variable):
             check = themed_check(parent, theme, dp, text=text, variable=variable,
@@ -615,8 +699,9 @@ class AISettings(tk.Toplevel):
                                  activebackground=bg, activeforeground=theme.text_primary,
                                  font=(font, 9), anchor='w', justify='left', cursor='hand2')
             check.pack(fill='x', pady=(0, dp(6)))
-            check.bind('<FocusIn>', lambda _e: form.reveal(check), add='+')
+            check.bind('<FocusIn>', lambda _e, scroll=form: scroll.reveal(check), add='+')
             wrapped.append(check)
+            return check
 
         self.consent = tk.BooleanVar(value=self.old['consent'])
         self.http = tk.BooleanVar(value=self.old['http_enabled'])
@@ -633,7 +718,7 @@ class AISettings(tk.Toplevel):
         field(content, 'api_key', 'API Key（留空保留已有密钥）')
         option(content, '我同意将上述信息发给已配置的远程模型', self.consent)
 
-        tk.Frame(content, height=dp(1), bg=theme.divider).pack(fill='x', pady=(dp(4), 0))
+        tk.Frame(content, height=dp(1), bg=theme.divider).pack(fill='x', pady=(dp(6), 0))
         section(content, '本机 API', '仅监听 127.0.0.1，连接必须使用 Bearer Token。')
         option(content, '启用本机 HTTP API', self.http)
         local = tk.Frame(content, bg=bg)
@@ -643,13 +728,126 @@ class AISettings(tk.Toplevel):
         field(port, 'port', '端口')
         self.copy_button, copy = form_button(local, self.app, '复制本机 Token', self.copy_token)
         copy.pack(side='left', anchor='s', padx=(dp(10), 0), pady=(0, dp(7)))
-        self.copy_button.bind('<FocusIn>', lambda _e: form.reveal(copy), add='+')
+        self.copy_button.bind('<FocusIn>', lambda _e, scroll=form: scroll.reveal(copy), add='+')
+        self.clear_ai_button, clear_ai = form_button(content, self.app, '清除 AI 助理设置', self.clear_ai_settings, quiet=True)
+        clear_ai.pack(anchor='w', pady=(0, dp(4)))
+        self.clear_ai_button.bind('<FocusIn>', lambda _e: ai_form.reveal(clear_ai), add='+')
+
+        form, content = remote_form, remote_form.content
+        self.remote_enabled = tk.BooleanVar(value=self.old['remote_enabled'])
+        self.remote_enable_check = option(content, '启用私人远程服务', self.remote_enabled)
+        self.remote_status = tk.StringVar(self)
+        self.connection_detail = tk.StringVar(self)
+        self.binding_state = tk.StringVar(self)
+        self.ai_state = tk.StringVar(self)
+        self.latest_result = tk.StringVar(self)
+        status_bg = theme.input_background
+        status_card = (RoundedCardShell(content, theme, dp, status_bg, surface=bg, outline=theme.input_border,
+                                        cursor='arrow') if theme.rounded_widget_shells else
+                       tk.Frame(content, bg=status_bg, highlightthickness=dp(1), highlightbackground=theme.input_border))
+        status_card.pack(fill='x', pady=(dp(3), dp(8)))
+        details = tk.Frame(status_card, bg=status_bg)
+        details.pack(fill='x', padx=dp(11), pady=dp(8))
+        self.connection_label = tk.Label(details, textvariable=self.remote_status, bg=status_bg,
+                                         fg=theme.text_primary, font=(font, 12, 'bold'), anchor='w')
+        self.connection_label.pack(fill='x')
+        detail = tk.Label(details, textvariable=self.connection_detail, bg=status_bg,
+                          fg=theme.text_secondary, font=(font, 8), anchor='w', justify='left')
+        detail.pack(fill='x', pady=(dp(2), dp(6)))
+        wrapped.append(detail)
+        for label, variable in (('微信账号', self.binding_state), ('AI 助理', self.ai_state), ('最近处理', self.latest_result)):
+            row = tk.Frame(details, bg=status_bg)
+            row.pack(fill='x', pady=dp(1))
+            tk.Label(row, text=label, bg=status_bg, fg=theme.text_secondary, font=(font, 9)).pack(side='left')
+            tk.Label(row, textvariable=variable, bg=status_bg, fg=theme.text_primary, font=(font, 9)).pack(side='right')
+        actions = tk.Frame(details, bg=status_bg)
+        actions.pack(fill='x', pady=(dp(6), 0))
+        self.manual_check_button, manual_check = form_button(actions, self.app, '手动检查', self.check_remote_jobs)
+        manual_check.pack(side='left', padx=(0, dp(6)))
+        self.manual_check_button.bind('<FocusIn>', lambda _e: form.reveal(manual_check), add='+')
+        self.rebind_button, rebind = form_button(actions, self.app, '重新绑定', self.start_rebinding)
+        rebind.pack(side='left')
+        self.rebind_button.bind('<FocusIn>', lambda _e: form.reveal(rebind), add='+')
+        self.copy_rebinding_button, self.copy_rebinding_control = form_button(
+            details, self.app, '复制「重新获取激活码」', self.copy_rebinding_command, quiet=True)
+
+        self.remote_mode = tk.StringVar(self, 'auto' if self.old['remote_account'] or not self.old['remote_token'] else 'manual')
+        self.auto_remote = tk.Frame(content, bg=bg)
+        field(self.auto_remote, 'remote_url', '服务器地址（HTTPS 根地址）')
+        field(self.auto_remote, 'activation_code', '客户端激活码')
+        self.bind_button, bind = form_button(self.auto_remote, self.app, '绑定', self.bind_remote)
+        bind.pack(anchor='w', pady=(0, dp(4)))
+        self.bind_button.bind('<FocusIn>', lambda _e: form.reveal(bind), add='+')
+        self.remote_mode_anchor = tk.Frame(content, bg=bg)
+        self.remote_mode_anchor.pack(fill='x')
+
+        history = self.add_fold(content, '最近远程处理', form, expanded=True)
+        history_row = tk.Frame(history, bg=bg)
+        history_row.pack(fill='x', pady=(0, dp(3)))
+        self.history_view = tk.Text(history_row, height=9, width=1, wrap='word', state='disabled',
+                                    bg=theme.input_background, fg=theme.text_primary, font=(font, 9),
+                                    padx=dp(8), pady=dp(5), bd=0, highlightthickness=dp(1),
+                                    highlightbackground=theme.input_border)
+        bar = ttk.Scrollbar(history_row, orient='vertical', command=self.history_view.yview)
+        bar.pack(side='right', fill='y')
+        self.history_view.configure(yscrollcommand=bar.set)
+        self.history_view.pack(side='left', expand=True, fill='x')
+        self.history_view.tag_configure('secondary', foreground=theme.text_secondary, spacing3=dp(3))
+        self.history_view.bind('<MouseWheel>', self.scroll_history)
+        self.paint_history()
+        tk.Label(history, text='最近 20 条本机记录', bg=bg, fg=theme.text_secondary,
+                 font=(font, 8), anchor='w').pack(fill='x', pady=(0, dp(5)))
+        help_body = self.add_fold(content, '微信绑定与使用说明', form)
+        for title, description in WECHAT_HELP:
+            section(help_body, title, description)
+
+        advanced = self.add_fold(content, '高级连接设置', form)
+        field(advanced, 'remote_url', '服务器地址（HTTPS 根地址）', widget_key='advanced_url')
+        modes = tk.Frame(advanced, bg=bg)
+        modes.pack(fill='x', pady=(0, dp(4)))
+        self.remote_mode_controls = []
+        for mode, label in (('auto', '自动绑定（推荐）'), ('manual', '手动配置')):
+            control = tk.Radiobutton(modes, text=label, value=mode, variable=self.remote_mode,
+                                     command=self.show_remote_mode, bg=bg, fg=theme.text_primary,
+                                     activebackground=bg, activeforeground=theme.text_primary,
+                                     selectcolor=theme.input_background, font=(font, 9))
+            control.pack(side='left')
+            control.bind('<FocusIn>', lambda _e: form.reveal(modes), add='+')
+            self.remote_mode_controls.append(control)
+        self.manual_remote = tk.Frame(advanced, bg=bg)
+        field(self.manual_remote, 'remote_token', 'Worker Token（同一地址留空保留已有密钥）')
+        safety_row = self.safety_row = tk.Frame(advanced, bg=bg)
+        safety_row.pack(fill='x', pady=(0, dp(6)))
+        tk.Label(safety_row, text='在线兜底检查', bg=bg, fg=theme.text_primary,
+                 font=(font, 9)).pack(side='left')
+        self.safety_check = ttk.Combobox(safety_row, state='readonly', font=(font, 9), width=10,
+                                         values=tuple(f'{minutes} 分钟' if minutes else '关闭'
+                                                      for minutes in SAFETY_CHECK_MINUTES))
+        minutes = self.old['remote_safety_check_minutes']
+        self.safety_check.current(SAFETY_CHECK_MINUTES.index(minutes) if minutes in SAFETY_CHECK_MINUTES else 0)
+        self.safety_check.pack(side='right')
+        self.safety_check.bind('<FocusIn>', lambda _e: form.reveal(safety_row), add='+')
+        remote_actions = tk.Frame(advanced, bg=bg)
+        remote_actions.pack(fill='x', pady=(0, dp(4)))
+        self.test_remote_button, test = form_button(remote_actions, self.app, '测试连接', self.check_remote_connection)
+        test.pack(side='left')
+        self.test_remote_button.bind('<FocusIn>', lambda _e: form.reveal(test), add='+')
+        self.clear_remote_button, clear_remote = form_button(remote_actions, self.app, '清除绑定信息',
+                                                             self.clear_remote_binding, quiet=True)
+        clear_remote.pack(side='left', padx=(dp(6), 0))
+        self.clear_remote_button.bind('<FocusIn>', lambda _e: form.reveal(clear_remote), add='+')
+        self.show_remote_mode()
+        self.tabs.bind('<<NotebookTabChanged>>', self.refresh_remote_panel, add='+')
+        if show_remote:
+            self.tabs.select(self.remote_tab)
+        self.watch_remote_status()
         for key in ('timeout', 'port'):
             self.fields[key].configure(width=11)
         def wrap(event):
             for widget in wrapped:
                 widget.configure(wraplength=max(dp(80), event.width - dp(20)))
-        form.canvas.bind('<Configure>', wrap, add='+')
+        for scroll in forms:
+            scroll.canvas.bind('<Configure>', wrap, add='+')
         for widget in wrapped:
             widget.configure(wraplength=max(dp(80), width-dp(60)))
         self.protocol('WM_DELETE_WINDOW', self.close)
@@ -666,25 +864,338 @@ class AISettings(tk.Toplevel):
         else:
             self.status.set('请先保存设置以生成Token。')
 
-    def save(self):
+    def watch_remote_status(self):
+        self.refresh_remote_panel()
+        self.remote_status_poll = self.after(1000, self.watch_remote_status)
+
+    def refresh_remote_panel(self, _event=None):
+        if self.tabs.select() == str(self.remote_tab):
+            worker = self.runtime.core.remote
+            snapshot = worker.snapshot() if worker else RemoteStatus('unavailable' if self.old['remote_enabled'] else 'disabled')
+            self.refresh_history(snapshot)
+            self.render_remote_status(snapshot)
+
+    def show_remote_mode(self):
+        self.auto_remote.pack_forget()
+        self.manual_remote.pack_forget()
+        if self.remote_mode.get() == 'manual':
+            self.manual_remote.pack(fill='x', before=self.safety_row)
+        elif self.rebinding or not self.old['remote_token'] or self.pending_binding:
+            self.auto_remote.pack(fill='x', before=self.remote_mode_anchor)
+
+    def add_fold(self, parent, title, scroll, *, expanded=False):
+        section = tk.Frame(parent, bg=parent.cget('bg'))
+        section.pack(fill='x', pady=(0, self.app.dpi.px(5)))
+        body = tk.Frame(section, bg=section.cget('bg'))
+
+        def toggle():
+            nonlocal expanded
+            expanded = not expanded
+            button.configure(text=('▾  ' if expanded else '▸  ') + title)
+            if expanded:
+                body.pack(fill='x')
+            else:
+                body.pack_forget()
+
+        button, control = form_button(section, self.app, ('▾  ' if expanded else '▸  ') + title, toggle, quiet=True)
+        control.pack(anchor='w')
+        button.bind('<FocusIn>', lambda _e: scroll.reveal(control), add='+')
+        if expanded:
+            body.pack(fill='x')
+        if title == '高级连接设置':
+            self.advanced_toggle = button
+        return body
+
+    def start_rebinding(self):
+        if self.binding_busy or self.pending_binding:
+            return
+        self.rebinding = True
+        self.remote_mode.set('auto')
+        if self.old['remote_url']:
+            self.inputs['remote_url'].set(self.old['remote_url'])
+        self.inputs['activation_code'].set('')
+        self.show_remote_mode()
+        self.fields['activation_code'].focus_set()
+
+    def copy_rebinding_command(self):
+        self.clipboard_clear()
+        self.clipboard_append('重新获取激活码')
+        self.status.set('已复制。请粘贴到微信公众号。')
+
+    def render_remote_status(self, snapshot):
+        state = snapshot.connection
+        invalid = state == 'invalid'
+        available = state not in ('disabled', 'invalid')
+        busy = self.binding_busy or self.pending_binding is not None
+        self.manual_check_button.configure(state='normal' if available and not busy and self.runtime.core.remote else 'disabled')
+        self.rebind_button.configure(text='重新绑定' if self.old['remote_token'] else '开始绑定',
+                                     state='disabled' if busy else 'normal')
+        if invalid:
+            if not self.copy_rebinding_control.winfo_manager():
+                self.copy_rebinding_control.pack(anchor='w')
+        else:
+            self.copy_rebinding_control.pack_forget()
+        title, detail = CONNECTION_LABELS[state]
+        self.remote_status.set(title)
+        theme = self.app.theme
+        self.connection_label.configure(fg=theme.quick_success if state in ('live', 'backup') else
+                                        theme.event_type_urgent if invalid else theme.text_primary)
+        if snapshot.processing_id:
+            detail += ' 正在处理微信消息。'
+        if state == 'live' and snapshot.request_failed:
+            detail += ' 任务接口暂不可用，正在重试。'
+        self.connection_detail.set(detail)
+        self.binding_state.set('已失效' if invalid else '已绑定到本机' if self.old['remote_account'] else
+                               '已配置手动连接' if self.old['remote_token'] else '尚未绑定')
+        finished = (row for row in self.history_rows if row.result not in ('正在处理', '已接收，等待处理'))
+        latest = max(finished, key=lambda row: row.processed_at or row.received_at, default=None)
+        recent = snapshot.completion
+        if latest and (not recent or latest.processed_at >= recent.processed_at):
+            recent = latest
+        self.ai_state.set(model_status(bool(self.old['api_key']), self.old['consent'],
+                                       recent.model_unavailable if recent else False))
+        self.latest_result.set(f'{self.history_time(latest.processed_at)} · {latest.result}' if latest and latest.processed_at
+                               else latest.result if latest else '暂无')
+
+    @staticmethod
+    def history_time(timestamp):
+        return datetime.fromtimestamp(timestamp).strftime('%m-%d %H:%M')
+
+    def refresh_history(self, snapshot):
+        scope = tuple(self.old[key] for key in ('remote_url', 'remote_token', 'remote_account', 'remote_legacy_credential'))
+        if self.history_scope != scope:
+            self.history_scope = scope
+            self.history_rows = ()
+            self.history_key = None
+            self.paint_history()
+        key = (scope, snapshot.history_revision, snapshot.processing_id)
+        if self.history_loading or key == self.history_key:
+            return
+        self.history_key, self.history_loading = key, True
+        config = {**self.old}
+
+        def finish(rows):
+            if not self.winfo_exists():
+                return
+            self.history_loading = False
+            if self.history_key == key and self.history_scope == scope:
+                self.history_rows = rows or ()
+                self.paint_history(unavailable=rows is None)
+
+        def run():
+            try:
+                rows = self.runtime.core.recent_remote_history(config, snapshot.processing_id)
+            except (OSError, ValueError, sqlite3.Error):
+                rows = None
+            self.app._call_main(lambda: finish(rows))
+
+        threading.Thread(target=run, daemon=True, name='calendar-remote-history').start()
+
+    def paint_history(self, unavailable=False):
+        view = self.history_view
+        top = view.yview()[0]
+        view.configure(state='normal')
+        view.delete('1.0', 'end')
+        if not self.history_rows:
+            view.insert('end', '本机记录暂不可读取。' if unavailable else '暂无本机处理记录。', 'secondary')
+        for row in self.history_rows:
+            view.insert('end', f'{self.history_time(row.received_at)}  ·  {row.result}\n')
+            delivery = ' · '.join(filter(None, (row.upload, row.notification)))
+            view.insert('end', f'{delivery}\n', 'secondary')
+        view.configure(state='disabled')
+        view.yview_moveto(top)
+
+    def scroll_history(self, event):
+        self.history_view.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+        return 'break'
+
+    def bind_remote(self):
+        if self.binding_busy:
+            return
+        core = self.runtime.core
+        if self.pending_binding:
+            url, binding = self.pending_binding
+            code = None
+        else:
+            try:
+                url = normalize_url(self.inputs['remote_url'].get().strip())
+                code = self.inputs['activation_code'].get().strip()
+                if not code:
+                    raise ValueError('请填写客户端激活码。')
+            except ValueError as error:
+                self.status.set(str(error))
+                return
+            binding = None
+        self.binding_busy = True
+        self.update_binding_controls()
+        self.status.set('正在保存绑定…' if binding else '正在绑定…')
+
+        def finish(config, pending, message):
+            if not self.winfo_exists():
+                return
+            self.binding_busy = False
+            self.pending_binding = pending
+            self.update_binding_controls()
+            self.status.set(message)
+            if config is None:
+                return
+            self.old = config
+            self.rebinding = False
+            self.remote_enabled.set(False)
+            self.inputs['activation_code'].set('')
+            self.inputs['remote_token'].set('')
+            self.inputs['remote_url'].set(config['remote_url'])
+            self.show_remote_mode()
+            self.refresh_remote_panel()
+
+        def run():
+            config, pending = None, None
+            try:
+                activated = binding or core.request_remote_binding(url, code)
+            except ValueError as error:
+                message = str(error)
+            except (Unavailable, StatusError, OSError):
+                message = '绑定未收到有效响应，请核对绑定状态。'
+            else:
+                try:
+                    config = core.save_remote_binding(url, activated)
+                except (OSError, ValueError):
+                    pending = (url, activated)
+                    message = '服务器已完成激活。本机保存失败，请点击“重试本地保存”。'
+                else:
+                    message = '已保存绑定。启用远程服务后即可接收任务。'
+            self.app._call_main(lambda: finish(config, pending, message))
+
+        # Let an in-flight activation persist its Token even during normal application shutdown.
+        threading.Thread(target=run, daemon=False, name='calendar-wechat-bind').start()
+
+    def update_binding_controls(self):
+        locked = self.binding_busy or self.pending_binding is not None
+        state = 'disabled' if locked else 'normal'
+        for control in (self.save_button, self.remote_enable_check, self.fields['remote_url'], self.fields['advanced_url'],
+                        self.fields['activation_code'], *self.remote_mode_controls):
+            control.configure(state=state)
+        self.bind_button.configure(state='disabled' if self.binding_busy else 'normal',
+                                   text='重试本地保存' if self.pending_binding else '绑定')
+        self.cancel_button.configure(state='disabled' if self.binding_busy else 'normal')
+        self.clear_remote_button.configure(state='disabled' if self.binding_busy else 'normal')
+        self.clear_ai_button.configure(state=state)
+
+    def clear_remote_binding(self):
+        if self.binding_busy:
+            return
+        if not messagebox.askyesno('清除绑定信息', '清除本机的远程服务器地址、账户和 Worker Token，并停止接单？',
+                                   parent=self, default='no'):
+            return
         try:
-            config = {**self.old, **{key: value.get().strip() for key, value in self.inputs.items()},
-                      'consent': self.consent.get(), 'http_enabled': self.http.get()}
+            self.old = self.runtime.core.clear_remote_binding()
+        except (OSError, ValueError):
+            self.status.set('无法清除本机绑定信息，请检查配置目录。')
+            return
+        self.pending_binding = None
+        self.rebinding = False
+        self.update_binding_controls()
+        self.remote_enabled.set(False)
+        for key in ('remote_url', 'remote_token', 'activation_code'):
+            self.inputs[key].set('')
+        self.remote_mode.set('auto')
+        self.show_remote_mode()
+        self.refresh_remote_panel()
+        self.status.set('本机绑定已清除，远程服务已关闭。')
+
+    def clear_ai_settings(self):
+        if self.binding_busy or self.pending_binding:
+            return
+        if not messagebox.askyesno('清除 AI 助理设置', '清除模型密钥和授权，重置模型与本机 API 设置，并暂停远程接单？',
+                                   parent=self, default='no'):
+            return
+        try:
+            self.old = self.runtime.clear_ai_settings()
+        except (OSError, ValueError):
+            self.status.set('无法重置 AI 助理设置，请检查配置目录。')
+            return
+        for key in ('endpoint', 'model', 'timeout', 'port'):
+            self.inputs[key].set(str(self.old[key]))
+        self.inputs['api_key'].set('')
+        self.consent.set(False)
+        self.http.set(False)
+        self.remote_enabled.set(False)
+        self.refresh_remote_panel()
+        self.status.set('AI 助理设置已重置，远程接单已暂停。')
+
+    def check_remote_connection(self):
+        try:
+            url = normalize_url(self.inputs['remote_url'].get().strip())
+        except ValueError as error:
+            self.status.set(str(error))
+            return
+        self.test_remote_button.configure(state='disabled')
+        self.status.set('正在检查公共健康接口…')
+
+        def finish(message):
+            if self.winfo_exists():
+                self.status.set(message)
+                self.test_remote_button.configure(state='normal')
+
+        def run():
+            try:
+                healthy = test_connection(url)
+            except (StatusError, Unavailable):
+                healthy = False
+            message = '公共健康检查通过。' if healthy else '公共健康检查失败。'
+            self.app._call_main(lambda: finish(message + ' 本次检查未验证 Worker 身份。'))
+
+        threading.Thread(target=run, daemon=True, name='calendar-wechat-health').start()
+
+    def check_remote_jobs(self):
+        if self.binding_busy or self.pending_binding:
+            return
+        worker = self.runtime.core.remote
+        if self.old['remote_enabled'] and worker and worker.request_check():
+            self.status.set('已按保存的配置请求检查远程任务。')
+        else:
+            self.status.set('请先启用远程服务并保存。')
+
+    def save(self):
+        if self.binding_busy or self.pending_binding:
+            return
+        try:
+            config = {**self.old, **{key: value.get().strip() for key, value in self.inputs.items() if key != 'activation_code'},
+                      'consent': self.consent.get(), 'http_enabled': self.http.get(),
+                      'remote_enabled': self.remote_enabled.get(),
+                      'remote_safety_check_minutes': SAFETY_CHECK_MINUTES[max(0, self.safety_check.current())]}
             config['api_key'] = config['api_key'] or self.old['api_key']
+            if config['remote_url']:
+                config['remote_url'] = normalize_url(config['remote_url'])
+            same_url = config['remote_url'] == self.old['remote_url']
+            if self.remote_mode.get() == 'auto':
+                bound = same_url and self.old['remote_token']
+                if config['remote_enabled'] and not bound:
+                    raise ValueError('请先绑定当前服务器，或切换到手动配置。')
+                config['remote_token'] = self.old['remote_token'] if same_url else ''
+            elif same_url and not config['remote_token']:
+                config['remote_token'] = self.old['remote_token']
+            if not same_url or config['remote_token'] != self.old['remote_token']:
+                config['remote_account'] = ''
             config['timeout'], config['port'] = int(config['timeout']), int(config['port'])
             self.configuration.save(config)
-            self.chat.runtime.apply_http()
+            self.runtime.core.apply_remote()
+            self.runtime.apply_http()
         except (OSError, ValueError) as error:
             self.status.set(str(error))
             return
-        self.chat.status.set('设置已保存；必要的聊天及查询数据会发送给已配置模型。')
+        if self.chat:
+            self.chat.status.set('设置已保存。')
         self.close()
 
     def close(self):
+        if self.binding_busy:
+            return
+        self.after_cancel(self.remote_status_poll)
         if self.grab_current() is self:
             self.grab_release()
         self.destroy()
-        if self.chat.winfo_exists():
+        if self.chat and self.chat.winfo_exists():
             if not self.chat._embedded:
                 self.chat.grab_set()
             self.chat.input.focus_set()

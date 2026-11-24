@@ -1,5 +1,6 @@
 """Sole AI calendar boundary. All Store access runs through the supplied dispatcher."""
 from dataclasses import asdict, replace
+from contextvars import copy_context
 from datetime import date
 from tk_dispatcher import TkDispatcher  # Compatibility export; implementation is desktop-only.
 
@@ -9,17 +10,21 @@ from event_commands import BatchPreview
 from calendar_event_service import CalendarEventService, OperationContext
 from event_search import EventSearchIndex, capture_search_store
 from desktop_calendar.assistant.calendar_chat_protocol import fail, fingerprint as fingerprint
-from desktop_calendar.assistant.calendar_chat_tools import iso_day, validate_call
+from desktop_calendar.assistant.calendar_chat_tools import iso_day, reference_today, validate_call
 from desktop_calendar.assistant.calendar_habit_gateway import prepare_habit
 from desktop_calendar.assistant.operation_engine import deletion_outcome, execute as execute_plan, recovered
 
 
 class CalendarActionGateway:
     def __init__(self, store, commands, dispatch=lambda fn: fn(), refresh=lambda change: None, writable=lambda: True, habit_refresh=lambda: None):
-        self.store, self.commands, self.dispatch, self.refresh, self.writable = store, commands, dispatch, refresh, writable
+        self.store, self.commands, self._dispatch, self.refresh, self.writable = store, commands, dispatch, refresh, writable
         self.habit_refresh = habit_refresh
         self.repository = store.repository
         self.events = CalendarEventService(commands, OperationContext(source='calendar-chat'))
+
+    def dispatch(self, function):
+        context = copy_context()
+        return self._dispatch(lambda: context.run(function))
 
     def query(self, arguments):
         validate_call('query_events', arguments)
@@ -72,7 +77,7 @@ class CalendarActionGateway:
         return self.dispatch(read)
 
     def _query(self, args):
-        today = date.today()
+        today = reference_today(date.today)
         start = iso_day(args.get('start', today.replace(day=1).isoformat()))
         end = iso_day(args.get('end', start.isoformat()))
         global_keyword = bool(args.get('keyword')) and 'start' not in args and 'end' not in args

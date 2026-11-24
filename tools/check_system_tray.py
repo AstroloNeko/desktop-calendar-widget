@@ -220,6 +220,82 @@ def repeated_start_stop():
     print("10 actual Shell service start/stops, idempotence, missing-icon fallback: PASS", flush=True)
 
 
+def badge_screenshots(directory):
+    from app import enable_dpi_awareness
+    from tools.check_habit_schedules import capture_own_window
+    from tray_badge import BADGE_COLORS, TrayBadgeRenderer
+
+    enable_dpi_awareness()
+    directory.mkdir(parents=True, exist_ok=True)
+    assets = Path(__file__).resolve().parents[1] / 'assets'
+    tray = TrayIcon('桌面月历', assets / 'calendar.ico', lambda _action: None)
+    window = tk.Tk()
+    window.title('桌面月历托盘角标')
+    window.configure(bg='#F2F3F5')
+    photos = []
+    cases = (('green', '实时在线'), ('yellow', '正在重新连接'),
+             ('red', '绑定已失效，请重新绑定'), ('gray', '远程服务已关闭'))
+
+    def add_case(parent, title, color, icon):
+        size = tray._icon_size
+        row = tk.Frame(parent, bg='#F2F3F5')
+        row.pack(fill='x', padx=14, pady=5)
+        tk.Label(row, text=title, width=23, anchor='w', bg='#F2F3F5', fg='#182131',
+                 font=('Segoe UI', 10)).pack(side='left')
+        for bg in (0xFAFAFA, 0x232731):
+            shade = f'#{bg:06X}'
+            panel = tk.Frame(row, bg=shade, padx=10, pady=8)
+            panel.pack(side='left', padx=(4, 0))
+            with renderer.bitmap(size) as (bitmap, pixels):
+                pixels[:] = [0xFF000000 | bg] * (size * size)
+                renderer.draw(bitmap, icon, size)
+                assert any(pixel & 0xFFFFFF == BADGE_COLORS[color] for pixel in pixels)
+                raster = bytes(channel for pixel in pixels for channel
+                               in ((pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255))
+            photo = tk.PhotoImage(master=window, data=f'P6\n{size} {size}\n255\n'.encode() + raster, format='PPM')
+            zoom = photo.zoom(2)
+            photos.extend((photo, zoom))
+            tk.Label(panel, image=photo, bg=shade, bd=0).pack(side='left', padx=(0, 10))
+            tk.Label(panel, image=zoom, bg=shade, bd=0).pack(side='left')
+
+    try:
+        assert tray.start(), tray.error
+        renderer = TrayBadgeRenderer(tray._api.user)
+        captured = []
+        for color, title in cases:
+            tray.update_status(color, f'微信远控：{title}')
+            wait(window, lambda: tray._applied_status[0] == color, f'Shell applied {color}')
+            assert registered(tray._hwnd)
+            assert title in tray._nid.szTip
+            icon = tray._nid.hIcon
+            assert icon and icon != tray._icon
+            captured.append((title, color, icon))
+            row = tk.Frame(window, bg='#F2F3F5')
+            row.pack()
+            add_case(row, title, color, icon)
+            pump(window, .12)
+            capture_own_window(window, directory / f'tray-{color}.png')
+            row.destroy()
+        for title, color, icon in captured:
+            add_case(window, title, color, icon)
+        pump(window, .12)
+        capture_own_window(window, directory / 'tray-badges.png')
+        known = dict(tray._badge_icons)
+        for _ in range(4):
+            for title, color, _icon in captured:
+                tray.update_status(color, f'微信远控：{title}')
+                wait(window, lambda: tray._applied_status[0] == color, f'cached {color}')
+        assert tray._badge_icons == known
+        tray.update_status(None, '')
+        wait(window, lambda: tray._applied_status[0] is None, 'restored original tray icon')
+        assert tray._nid.hIcon == tray._icon
+        print(f'Four registered badge icons, two background colors, {tray._icon_size}px native size; cached reuse: PASS')
+    finally:
+        assert tray.stop()
+        assert not tray._badge_icons
+        window.destroy()
+
+
 def packaged_checks(executable):
     """Normal app.py bootloader/EXE, not a test entrypoint or injected runtime."""
     from tools.check_update_compatibility import process_path, windows, wait_until
@@ -358,8 +434,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=Path, help="Normal app.py PyInstaller QA executable")
     parser.add_argument("--sqlite", action="store_true", help="Use isolated production SQLite startup")
+    parser.add_argument("--badge-screenshots", type=Path, help="Capture the actual HICONs in a Windows preview")
     args = parser.parse_args()
-    if args.exe:
+    if args.badge_screenshots:
+        badge_screenshots(args.badge_screenshots)
+    elif args.exe:
         packaged_checks(args.exe)
     else:
         source_checks(sqlite=args.sqlite)

@@ -67,7 +67,8 @@ class ChatTests(unittest.TestCase):
 
     def send(self, replies, message='测试，明确设置：标题、时间、提醒、日期、DDL紧急性质、持续天数、跳过非工作日、末日DDL、分类、颜色、备注、完成状态', request_id=None):
         self.provider.replies = list(replies)
-        return self.service.send_message(self.sid, message, request_id or ('request-'+str(len(self.provider.messages))+str(threading.get_ident())))
+        return self.service.send_message(self.sid, message, request_id or ('request-'+str(len(self.provider.messages))+str(threading.get_ident())),
+                                         reference_now=getattr(self, 'reference_now', None))
 
     def pending(self, args=None):
         return self.send([tool('preview_create', args or {'title': '报告', 'date': '2026-11-20', 'event_type': 'ddl'})],

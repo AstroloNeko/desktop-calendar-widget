@@ -11,8 +11,10 @@ from desktop_calendar.assistant import calendar_batch_delete
 from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
 from desktop_calendar.assistant.calendar_chat_intent import requested_fields
 from desktop_calendar.assistant.calendar_chat_model import MAX_REPAIRS, MAX_ROUNDS as MAX_ROUNDS, run_model_turn
-from desktop_calendar.assistant.calendar_chat_protocol import OWNER, ChatError, envelope, fail, fingerprint, receipt_message
-from desktop_calendar.assistant.calendar_chat_tools import PROPOSAL_TOOLS, TASK_TOOLS, request_context, validate_call
+from desktop_calendar.assistant.calendar_chat_protocol import OWNER, ChatError, envelope, fail, fingerprint, receipt_message, wechat_delete_review
+from desktop_calendar.assistant.calendar_chat_tools import (
+    PROPOSAL_TOOLS, TASK_TOOLS, reference_today, request_context, request_reference, validate_call,
+)
 from desktop_calendar.assistant.calendar_task_plan import recover_task, run_task
 from desktop_calendar.assistant.operation_engine import compile_target_members, deletion_outcome, event_action, event_result, resolve_target
 from desktop_calendar.assistant.operation_plan import (
@@ -134,7 +136,8 @@ class CalendarChatService:
     def _pending_status(self, session, owner):
         return self.journal.get('operation', session['pending'], owner)['status'] if session['pending'] else None
 
-    def confirm_operation(self, session_id, operation_id, owner=OWNER, source='desktop', revision=None, *, automatic=False):
+    def confirm_operation(self, session_id, operation_id, owner=OWNER, source='desktop', revision=None, *,
+                          automatic=False, trigger_request_id=None):
         with self.lock:
             if self.stopped:
                 fail('AI服务已停止。', 'service_stopped')
@@ -145,6 +148,8 @@ class CalendarChatService:
                 self._operation(session_id, operation_id, owner, resume_ready=True)
             if op['status'] != 'pending':
                 return self.get_operation_result(session_id, operation_id, owner)
+            if trigger_request_id:
+                op['execution_request_id'] = trigger_request_id
             if op['preview'].get('object_type')=='batch_delete':
                 return calendar_batch_delete.confirm(self,op,owner,revision,automatic)
             event_plan = op['preview'].get('object_type', 'event') in ('event', 'event_batch') and op['preview']['after'] is not None
@@ -269,7 +274,7 @@ class CalendarChatService:
             return self._resolve_target(plan,session,owner,request_id,source)
         if name == 'propose_events':
             if args['action'] == 'create' and not preview_only:
-                days = session.get('member_dates') or independent_dates(message, date.today())
+                days = session.get('member_dates') or independent_dates(message, reference_today(date.today))
                 if days and not creation_quantity(message, days):
                     response = self._tool(name,args,session,owner,request_id,source,message,diagnostic,
                                           preview_only=True)
@@ -297,7 +302,7 @@ class CalendarChatService:
         args = deepcopy(args)
         if name in ('preview_create', 'batch_create_events'):
             members = args['items'] if name == 'batch_create_events' else [args]
-            days = session.get('member_dates') or independent_dates(message, date.today())
+            days = session.get('member_dates') or independent_dates(message, reference_today(date.today))
             check_creation_members(members, message, days)
         if name=='delete_events_batch':
             if not session.get('delete_intent'):
@@ -377,7 +382,7 @@ class CalendarChatService:
         if name == 'clarify':
             plan = args.get('create_plan')
             if plan:
-                days = session.get('member_dates') or independent_dates(message, date.today())
+                days = session.get('member_dates') or independent_dates(message, reference_today(date.today))
                 if days and not creation_quantity(message, days):
                     return self._tool('propose_events',plan,session,owner,request_id,source,message,diagnostic)
                 tool, proposal = compile_proposal(plan)
@@ -385,7 +390,7 @@ class CalendarChatService:
                 check_creation_members([item['fields'] for item in plan['items']], message, days)
                 session['awaiting_create'] = dict(plan=plan, message=message, days=days, expires=self.clock()+900)
             session['clarification'] = args['question']
-            session['clarified_request'] = dict(text=message, anchor=session.get('clarification_anchor', date.today().isoformat()),
+            session['clarified_request'] = dict(text=message, anchor=session.get('clarification_anchor', reference_today(date.today).isoformat()),
                                                 expires=self.clock()+900)
             return envelope(sid, request_id, status='clarification_required', assistant_message=args['question'], habit_candidates=session.get('habit_candidates', []))
         if name == 'query_events':
@@ -477,8 +482,33 @@ class CalendarChatService:
         return envelope(sid, request_id, status='confirmation_required', pending_operation=op,
                         assistant_message='已生成本地操作预览，尚未写入日历。请检查后确认或取消。')
 
-    def send_message(self, session_id, message, request_id, owner=OWNER, source='desktop'):
+    def recover_message(self, session_id, request_id, owner):
+        """Read a known request's response or reconcile durable effects without executing a plan."""
         with self.lock:
+            key = fingerprint([owner, request_id])
+            try:
+                response = self.journal.get('request', key, owner).get('response')
+            except ChatError:
+                return None
+            if response and response.get('error_code') != 'execution_uncertain' and response['status'] != 'uncertain':
+                return response
+            for op in self.journal.all('operation', owner):
+                if op['session_id'] == session_id and request_id in (op['request_id'], op.get('execution_request_id')):
+                    result = self.get_operation_result(session_id, op['operation_id'], owner)
+                    if result['status'] in ('succeeded', 'committed_unverified'):
+                        return result
+            for task in self.journal.all('task', owner):
+                if task['session_id'] == session_id and request_id in (task['request_id'], task.get('attempt_request_id')):
+                    task = recover_task(self, task, owner, resume_ready=False)
+                    if task['status'] in ('completed', 'committed_unverified'):
+                        return envelope(session_id, request_id,
+                                        status='succeeded' if task['status'] == 'completed' else task['status'],
+                                        task=task, operation_result=task['result'], error_code=task.get('error_code'),
+                                        error_message=task.get('error_message'))
+            return None
+
+    def send_message(self, session_id, message, request_id, owner=OWNER, source='desktop', *, reference_now=None):
+        with self.lock, request_reference(reference_now):
             if self.stopped:
                 fail('AI服务已停止。', 'service_stopped')
             if not isinstance(message, str) or not 1 <= len(message.strip()) <= 4000:
@@ -488,7 +518,8 @@ class CalendarChatService:
             self.journal.check_capacity()
             session = self.get_session(session_id, owner)
             key = fingerprint([owner, request_id])
-            content_hash = fingerprint([session_id, message])
+            content_hash = fingerprint([session_id, message] if reference_now is None else
+                                       [session_id, message, reference_now.isoformat()])
             try:
                 receipt = self.journal.get('request', key, owner)
             except ChatError:
@@ -534,10 +565,22 @@ class CalendarChatService:
                 elif message.strip() in ('取消', '取消操作') and (session.pop('event_input', None) or session.pop('awaiting_target', None)):
                     session.pop('awaiting_fields', None)
                     response = envelope(session_id, request_id, status='cancelled', assistant_message='已取消待选择的修改。')
+                elif source == 'wechat' and message.strip() in ('删除这批', '最终确认删除'):
+                    visible = session.get('visible_preview', {})
+                    stage = 'reviewing_batch' if message.strip() == '删除这批' else 'awaiting_final_confirmation'
+                    operation = self.journal.get('operation', session['pending'], owner) if pending_status == 'pending' else {}
+                    if (pending_status == 'pending' and visible.get('source') == source and
+                            visible.get('kind') == 'batch_delete' and visible.get('id') == session['pending'] and
+                            operation.get('stage') == stage and wechat_delete_review(operation)):
+                        response = self.confirm_operation(session_id, session['pending'], owner, source,
+                                                          visible['revision'], trigger_request_id=request_id)
+                    else:
+                        response = envelope(session_id, request_id, assistant_message='当前没有处于此阶段的批量删除清单。')
                 elif message.strip() in ('确认', '确认执行') and not session.get('awaiting_create'):
                     visible = session.get('visible_preview', {})
                     if pending_status == 'pending' and visible.get('source') == source and visible.get('kind') != 'batch_delete' and visible.get('id') == session['pending']:
-                        response = self.confirm_operation(session_id, session['pending'], owner, source, visible['revision'])
+                        response = self.confirm_operation(session_id, session['pending'], owner, source,
+                                                          visible['revision'], trigger_request_id=request_id)
                     else:
                         response = envelope(session_id, request_id, assistant_message='当前没有可用这条回复确认的预览。')
                 elif message.strip() in ('取消', '取消操作') and session['pending']:
@@ -548,7 +591,8 @@ class CalendarChatService:
                     op = response.get('pending_operation')
                     if self.auto_execute and response['status'] == 'confirmation_required' and op and not op.get('requires_confirmation') and op['preview']['after'] is not None:
                         self.journal.put('session',session_id,owner,session)
-                        response = self.confirm_operation(session_id, op['operation_id'], owner, source, op['revision'], automatic=True)
+                        response = self.confirm_operation(session_id, op['operation_id'], owner, source, op['revision'],
+                                                          automatic=True, trigger_request_id=request_id)
             except ChatError as error:
                 # A failed planning request must not clear the previous target/pending card.
                 friendly = str(error)
@@ -580,7 +624,9 @@ class CalendarChatService:
             self.journal.put('diagnostic', key, owner, diagnostic)
             shown = response.get('pending_operation')
             session['visible_preview'] = (dict(id=shown['operation_id'], revision=shown['revision'], source=source, kind=shown['preview'].get('object_type'))
-                                          if shown and shown['status']=='pending' and response['status']=='confirmation_required' else {})
+                                          if shown and shown['status']=='pending' and (response['status']=='confirmation_required'
+                                          or source == 'wechat' and response['status']=='pending' and
+                                          shown['preview'].get('object_type')=='batch_delete') else {})
             response.update(request_id=request_id, session_id=session_id)
             session['messages'].append({'message_id': secrets.token_urlsafe(12), 'request_id': request_id,
                                         'role': 'assistant', 'content': response['assistant_message'] or response.get('error_message') or response['status'], 'at': self.clock()})
@@ -618,6 +664,8 @@ class CalendarChatService:
         nudge = reply in ('添加一下','添加','帮我添加一下')
         creation_question = reply.rstrip('？?') in ('刚才添加了吗','添加好了吗','添加了吗')
         assent = re.fullmatch(r'对的(?:[，, ]*对的)?|对|是的|就这样|没错', reply)
+        if source == 'wechat' and (draft or prior) and reply == '可以':
+            assent = True
         quantity = creation_quantity_reply(reply)
         independent = re.fullmatch(r'(?:是|要|建|创建)?[两二三四五六七八九十\d]+(?:个|条)(?:独立|单独)(?:的)?(?:实验|事项|任务|日程)?[。！ ]*', message.strip())
         if draft and draft.get('operation_id') and (assent or nudge or quantity or reply in ('确认','确认执行') or creation_question):
@@ -637,7 +685,8 @@ class CalendarChatService:
                 session['member_dates'] = draft['days']
                 return self._tool('propose_events',plan,session,owner,request_id,source,
                                   draft['message']+'。'+reply,diagnostic)
-            return self.confirm_operation(session['session_id'],operation['operation_id'],owner,source,draft['revision'])
+            return self.confirm_operation(session['session_id'], operation['operation_id'], owner, source,
+                                          draft['revision'], trigger_request_id=request_id)
         if draft and (assent or nudge or reply in ('确认','确认执行') or
                       (independent and member_count(message)==len(draft['plan']['items']))):
             if draft['expires'] < self.clock():
@@ -784,7 +833,8 @@ class CalendarChatService:
             if 'deleted' in continuation and session.get('delete_intent'):
                 return self._tool('preview_delete',{'event_id':session['selected']},session,owner,request_id,source,
                     message=message,continuation=('deleted',))
-        context = request_context()
+        anchor = session.get('clarification_anchor')
+        context = request_context(day=date.fromisoformat(anchor)) if anchor and source == 'wechat' else request_context()
         pending = self._operation(session['session_id'], session['pending'], owner) if session['pending'] else None
         pending_context = None
         if pending and pending['status'] == 'pending' and pending['preview']['after'] is not None and pending['preview'].get('object_type') not in ('habit','event_batch'):
@@ -849,5 +899,9 @@ class CalendarChatService:
             return envelope(session['session_id'], request_id, status='clarification_required',
                             assistant_message='尚未执行任何日历操作。请提供明确日期、事项或选择候选；也可以调整描述后重试。')
 
+        if anchor and source == 'wechat':
+            with request_reference(datetime.fromisoformat(context['now'])):
+                return run_model_turn(self.provider, state, session['messages'], diagnostic, dispatch=dispatch_tool,
+                                      on_no_tools=on_no_tools, stopped=lambda: self.stopped)
         return run_model_turn(self.provider, state, session['messages'], diagnostic, dispatch=dispatch_tool,
                               on_no_tools=on_no_tools, stopped=lambda: self.stopped)

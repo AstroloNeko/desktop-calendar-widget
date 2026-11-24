@@ -1,6 +1,6 @@
 """Regression for tool batches vs single-event writes and intent-scoped patches."""
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import json
 from unittest.mock import patch
 import unittest
@@ -22,6 +22,7 @@ def batch(*calls):
 
 
 class OrchestrationTests(unittest.TestCase):
+    reference_now = datetime(2026, 11, 19, tzinfo=timezone.utc)
     setUp = fixture.ChatTests.setUp
     send = fixture.ChatTests.send
     select = fixture.ChatTests.select

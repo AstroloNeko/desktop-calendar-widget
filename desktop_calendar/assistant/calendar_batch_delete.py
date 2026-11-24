@@ -4,6 +4,7 @@ import secrets
 from datetime import date
 
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError, envelope, fail, fingerprint
+from desktop_calendar.assistant.calendar_chat_tools import reference_today
 from desktop_calendar.assistant.operation_engine import event_result, execute as execute_plan
 
 
@@ -81,7 +82,7 @@ def handle_message(service, session, message, owner, request_id):
     old_filters = (session.get('delete_scope') or {}).get('filters')
     if interval:
         try:
-            bounds = _interval(interval,date.today())
+            bounds = _interval(interval,reference_today(date.today))
             if len(list(_RANGE.finditer(text))) != 1:
                 raise ValueError()
         except ValueError:

@@ -16,18 +16,21 @@ import subprocess
 import tempfile
 import time
 import urllib.request
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Store
-from desktop_calendar.assistant.calendar_chat_ui import open_chat, AISettings
+from desktop_calendar.assistant.calendar_chat_ui import open_ai_settings, open_chat, AISettings
 from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP
 from dpi_utils import dpi_for_window
 from tools.check_interactions import cleanup, pump
 from tools.check_habit_schedules import capture_own_window
 from desktop_calendar.assistant.llm_provider import AIConfiguration
+from desktop_calendar.remote_cloud import Binding
+from desktop_calendar.remote_history import HistoryRow
+from desktop_calendar.remote_service import RemoteStatus
 from win_integration import SingleInstance
 
 
@@ -179,6 +182,14 @@ def main():
             app.report_callback_exception = lambda *parts: errors.append(str(parts))
             try:
                 pump(app, .2)
+                direct = open_ai_settings(app)
+                pump(app, .08)
+                assert direct.tabs.select() == str(direct.remote_tab)
+                assert app.chat_runtime.window is None
+                assert app.chat_runtime.core.remote is None
+                open_ai_settings(app)
+                assert app._active_modal_window() is direct
+                direct.close()
                 for theme in ('modern', 'aero', 'paper', 'frutiger'):
                     app.set_theme(theme)
                     for view in ('compact', 'global'):
@@ -194,6 +205,134 @@ def main():
                         assert app.grab_current() is settings
                         assert settings.inputs['api_key'].get() == ''
                         assert not settings.consent.get()
+                        assert settings.title() == 'AI 助理设置'
+                        assert tuple(settings.tabs.tab(page, 'text') for page in settings.tabs.tabs()) == ('AI 设置', '微信远控')
+                        assert settings.tabs.select() == str(settings.ai_tab)
+                        assert settings.fields['model'].winfo_ismapped()
+                        assert settings.fields['port'].winfo_ismapped()
+                        assert settings.copy_button.winfo_ismapped()
+                        settings.inputs['model'].set('provisional-model')
+                        settings.inputs['port'].set('22000')
+                        settings.tabs.select(settings.remote_tab)
+                        pump(app, .06)
+                        settings.tabs.select(settings.ai_tab)
+                        pump(app, .04)
+                        assert settings.inputs['model'].get() == 'provisional-model'
+                        assert settings.inputs['port'].get() == '22000'
+                        settings.tabs.select(settings.remote_tab)
+                        pump(app, .04)
+                        assert runtime.core.remote is None
+                        assert not settings.remote_enabled.get()
+                        assert settings.inputs['remote_url'].get() == ''
+                        assert settings.fields['remote_token'].cget('show') == '*'
+                        assert '已关闭' in settings.remote_status.get()
+                        assert settings.binding_state.get() == '尚未绑定'
+                        assert settings.safety_check.get() == '关闭'
+                        assert settings.manual_check_button.cget('state') == 'disabled'
+                        assert runtime.gateway.writable()
+                        settings.remote_mode.set('auto')
+                        settings.show_remote_mode()
+                        pump(app, .04)
+                        assert settings.auto_remote.winfo_ismapped()
+                        assert settings.fields['activation_code'].cget('show') == '*'
+                        assert settings.fields['activation_code'].cget('state') == 'normal'
+                        assert settings.bind_button.cget('text') == '绑定'
+                        assert settings.bind_button.cget('state') == 'normal'
+                        if theme == 'modern' and view == 'compact':
+                            saved = settings.old
+                            worker = Mock()
+                            worker.snapshot.return_value = RemoteStatus('live')
+                            worker.request_check.return_value = True
+                            with patch.object(runtime.core, 'remote', worker):
+                                settings.old = {**saved, 'remote_enabled': True}
+                                wait(app, lambda: settings.manual_check_button.cget('state') == 'normal',
+                                     'manual remote check available')
+                                settings.manual_check_button.invoke()
+                                worker.request_check.assert_called_once()
+                                assert '已按保存的配置' in settings.status.get()
+                            settings.old = saved
+                            settings.inputs['remote_url'].set('https://example.invalid')
+                            settings.inputs['activation_code'].set('synthetic-code')
+                            save_binding = runtime.core.save_remote_binding
+                            binding = Binding('synthetic-user', 'synthetic-worker-token')
+                            with patch.object(runtime.core, 'request_remote_binding', return_value=binding) as activate, \
+                                    patch.object(runtime.core, 'save_remote_binding', side_effect=OSError('fixture')):
+                                settings.bind_button.invoke()
+                                settings.close()
+                                assert settings.winfo_exists()
+                                wait(app, lambda: settings.pending_binding is not None, 'activation local save failure')
+                                assert settings.bind_button.cget('text') == '重试本地保存'
+                                activate.assert_called_once_with('https://example.invalid', 'synthetic-code')
+                            with patch.object(runtime.core, 'request_remote_binding') as activate, \
+                                    patch.object(runtime.core, 'save_remote_binding', wraps=save_binding):
+                                settings.bind_button.invoke()
+                                wait(app, lambda: '已保存绑定' in settings.status.get(), 'save activated credential')
+                                activate.assert_not_called()
+                            assert settings.binding_state.get() == '已绑定到本机'
+                            assert not settings.auto_remote.winfo_ismapped()
+                            assert not settings.remote_enabled.get()
+                            assert settings.inputs['activation_code'].get() == ''
+                            bound = settings.old
+                            timestamp = time.time()
+                            rows = (
+                                HistoryRow(timestamp, timestamp, '已创建 1 项', '回执已上传', '微信已发送'),
+                                HistoryRow(timestamp - 120, timestamp - 119, '查询完成', '回执已上传', '微信已发送'),
+                                HistoryRow(timestamp - 240, timestamp - 237, '当时等待确认', '回执已上传', '微信通知失败'),
+                                HistoryRow(timestamp - 360, timestamp - 359, '已修改 1 项', '回执待上传', ''),
+                            )
+                            with patch.object(runtime.core, 'remote', worker), \
+                                    patch.object(runtime.core, 'recent_remote_history', return_value=rows):
+                                settings.old = {**bound, 'remote_enabled': True, 'api_key': 'synthetic-model-key', 'consent': True}
+                                settings.remote_enabled.set(True)
+                                worker.snapshot.return_value = RemoteStatus('live', history_revision=10)
+                                settings.refresh_remote_panel()
+                                wait(app, lambda: '当时等待确认' in settings.history_view.get('1.0', 'end'), 'recent history visible')
+                                settings.refresh_remote_panel()
+                                assert settings.remote_status.get() == '实时在线'
+                                if not getattr(sys, 'frozen', False):
+                                    destination = Path(__file__).resolve().parents[1]/'build/calendar-chat-qa'
+                                    destination.mkdir(parents=True, exist_ok=True)
+                                    settings.status.set('')
+                                    pump(app, .08)
+                                    capture_own_window(settings, destination/'wechat-settings.png')
+                                worker.snapshot.return_value = RemoteStatus('invalid', history_revision=10)
+                                settings.refresh_remote_panel()
+                                assert '已失效' in settings.remote_status.get()
+                                assert settings.binding_state.get() == '已失效'
+                                assert settings.manual_check_button.cget('state') == 'disabled'
+                                settings.copy_rebinding_button.invoke()
+                                assert settings.clipboard_get() == '重新获取激活码'
+                                settings.inputs['remote_url'].set('https://unsaved.invalid')
+                                settings.rebind_button.invoke()
+                                assert settings.inputs['remote_url'].get() == bound['remote_url']
+                                assert not settings.inputs['activation_code'].get()
+                                pump(app, .1)
+                                assert settings.auto_remote.winfo_ismapped()
+                                if not getattr(sys, 'frozen', False):
+                                    capture_own_window(settings, destination/'wechat-rebind.png')
+                            settings.old = bound
+                            confirm = 'desktop_calendar.assistant.calendar_chat_ui.messagebox.askyesno'
+                            with patch(confirm, side_effect=(False, True, True)):
+                                settings.clear_remote_binding()
+                                assert runtime.configuration.load()['remote_account'] == 'synthetic-user'
+                                runtime.configuration.save({**runtime.configuration.load(), 'api_key': 'synthetic-model-key'})
+                                settings.clear_ai_settings()
+                                assert runtime.configuration.load()['api_key'] == ''
+                                assert runtime.configuration.load()['remote_account'] == 'synthetic-user'
+                                settings.clear_remote_binding()
+                                assert settings.inputs['remote_url'].get() == ''
+                                assert runtime.configuration.load()['remote_token'] == ''
+                        settings.remote_mode.set('manual')
+                        settings.show_remote_mode()
+                        settings.advanced_toggle.invoke()
+                        pump(app, .04)
+                        assert settings.manual_remote.winfo_ismapped()
+                        with patch('desktop_calendar.assistant.calendar_chat_ui.test_connection', return_value=True) as health:
+                            settings.inputs['remote_url'].set('https://example.invalid')
+                            settings.check_remote_connection()
+                            wait(app, lambda: '本次检查未验证' in settings.status.get(), 'remote health-only check')
+                            health.assert_called_once_with('https://example.invalid')
+                            assert runtime.core.remote is None
                         settings.close()
                         assert app.grab_current() is chat
                         before = len(store.events)

@@ -1,5 +1,6 @@
 """Synthetic properties, automatic single-event policy and category assignment."""
 from dataclasses import asdict
+from datetime import datetime, timezone
 import unittest
 import test_calendar_chat as fixture
 from calendar_core import EventCategory, COLORS
@@ -7,6 +8,7 @@ from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
 
 
 class AttributeTests(unittest.TestCase):
+    reference_now = datetime(2026, 11, 19, tzinfo=timezone.utc)
     setUp = fixture.ChatTests.setUp
     send = fixture.ChatTests.send
     select = fixture.ChatTests.select

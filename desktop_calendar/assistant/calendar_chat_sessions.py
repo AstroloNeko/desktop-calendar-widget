@@ -4,11 +4,12 @@ Every payload is protected for the current Windows user. SQLite FULL-sync WAL
 is the intent/result journal; it is never an alternative calendar database.
 """
 import json
+from heapq import nlargest
 import secrets
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError
@@ -72,6 +73,17 @@ class ChatJournal:
         with self.lock, self.connect() as db:
             rows = db.execute('SELECT id FROM records WHERE kind=? AND owner=?', (kind, owner)).fetchall()
         return [self.get(kind, row[0], owner) for row in rows]
+
+    @staticmethod
+    def read_recent(path, protector, kind, owner, limit, *, time_field):
+        path = Path(path)
+        if not path.is_file():
+            return []
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+            rows = db.execute('SELECT payload FROM records WHERE kind=? AND owner=? ORDER BY rowid DESC',
+                              (kind, owner))
+            decoded = (json.loads(protector.decrypt(row[0]).decode('utf-8')) for row in rows)
+            return nlargest(limit, decoded, key=lambda record: record[time_field])
 
     def create_session(self, owner):
         if len(self.all('session', owner)) >= 50:

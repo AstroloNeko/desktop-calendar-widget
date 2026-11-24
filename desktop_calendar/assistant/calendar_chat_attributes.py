@@ -3,7 +3,7 @@ import re
 from datetime import date
 
 from calendar_core import COLORS
-from desktop_calendar.assistant.calendar_chat_tools import fail
+from desktop_calendar.assistant.calendar_chat_tools import fail, reference_today
 from desktop_calendar.assistant.calendar_chat_intent import requested_fields, scope_patch
 
 
@@ -16,11 +16,12 @@ def adapt_attributes(values, message, creating, categories, continuation=()):
     # In a patch that date can belong to the old target rather than the new value.
     md = re.search(r'(?<![\d-])(\d{1,2})(?:[./]|月)(\d{1,2})(?:日|号)?', instruction)
     if creating and 'date' in scoped and md and not re.search(r'\d{4}[-年/.]|明年|去年|下个月|上个月', instruction):
+        today = reference_today(date.today)
         try:
-            expected = date(date.today().year, int(md[1]), int(md[2]))
+            expected = date(today.year, int(md[1]), int(md[2]))
         except ValueError:
             fail('指定的月日不存在，请明确日期。', 'clarification_required')
-        if expected < date.today():
+        if expected < today:
             fail('该月日在今年已过去，请明确年份或确认是否补记过去事项。', 'clarification_required')
         scoped['date'] = expected.isoformat()
     basis = values.get('category_basis')

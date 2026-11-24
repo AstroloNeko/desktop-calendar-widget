@@ -60,7 +60,7 @@ from global_hotkey import saved_global_shortcuts
 from keyboard_shortcuts import (EDITORS, TEXT_WIDGETS, bind_editor_shortcuts, bind_history_shortcuts,
                                 parse_local, saved_local_shortcuts)
 from global_hotkey_ui import open_hotkey_settings
-from desktop_calendar.assistant.calendar_chat_ui import open_chat, start_chat_if_enabled
+from desktop_calendar.assistant.calendar_chat_ui import open_ai_settings, open_chat, start_chat_if_enabled
 from app_lifecycle import ApplicationLifecycleMixin
 from desktop_calendar.reminders.reminder_ui import NativeReminderMixin
 from win_integration import (
@@ -7115,6 +7115,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                          command=lambda: self._queue_context_menu_action(menu, lambda: open_hotkey_settings(self)))
         menu.add_command(label="AI 私人助理…", accelerator=saved_global_shortcuts(self.store.settings)["assistant"],
                          command=lambda: self._queue_context_menu_action(menu, self._open_assistant))
+        menu.add_command(label="AI 助理设置…",
+                         command=lambda: self._queue_context_menu_action(menu, lambda: open_ai_settings(self)))
         menu.add_command(label="提醒计划…",
                          command=lambda: self._queue_context_menu_action(menu, self.open_reminder_plans))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
@@ -7181,6 +7183,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.tray_actions.put,
             hotkey=saved_global_shortcuts(self.store.settings),
         )
+        status = getattr(self, "_remote_tray_status", None)
+        if status:
+            self.tray_icon.update_status(*status)
         if not self.tray_icon.start() and self.tray_icon.error:
             log_exception(
                 RuntimeError,

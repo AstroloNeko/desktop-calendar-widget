@@ -9,7 +9,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from desktop_calendar.assistant.calendar_chat_protocol import ChatError
+from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fingerprint
+from desktop_calendar.remote_cloud import valid_account
+from desktop_calendar.remote_transport import SAFETY_CHECK_MINUTES, normalize_url, valid_token
 
 
 class UserProtection:
@@ -53,14 +55,26 @@ class AIConfiguration:
         self.protector = protector or UserProtection()
         self.path = self.folder / 'configuration.dpapi'
 
+    @staticmethod
+    def defaults():
+        return dict(endpoint='https://api.deepseek.com', model='deepseek-chat', api_key='', timeout=30,
+                    temperature=0.1, consent=False, http_enabled=False, port=18746, token='',
+                    remote_enabled=False, remote_url='', remote_token='', remote_account='', remote_legacy_credential='',
+                    remote_safety_check_minutes=0, remote_was_configured=False)
+
     def load(self):
+        defaults = self.defaults()
         if not self.path.exists():
-            return dict(endpoint='https://api.deepseek.com', model='deepseek-chat', api_key='', timeout=30,
-                        temperature=0.1, consent=False, http_enabled=False, port=18746, token='')
+            return defaults
         config = json.loads(self.protector.decrypt(self.path.read_bytes()).decode('utf-8'))
         if type(config) is not dict or config.get('version', 1) != 1:
             raise ValueError('AI配置版本不兼容；没有重置配置。')
-        return config
+        if 'remote_legacy_credential' not in config and config.get('remote_url') and valid_token(config.get('remote_token')):
+            # Only the original B3 credential can open the server-only ledger namespace.
+            config['remote_legacy_credential'] = fingerprint([normalize_url(config['remote_url']), config['remote_token']])
+        config['remote_was_configured'] = bool(config.get('remote_was_configured') or config.get('remote_url')
+                                               or config.get('remote_legacy_credential'))
+        return {**defaults, **config}
 
     def save(self, config):
         url = urllib.parse.urlsplit(config['endpoint'])
@@ -77,6 +91,26 @@ class AIConfiguration:
             raise ChatError('invalid_arguments', '启用选项必须为布尔值。')
         if not isinstance(config.get('api_key'), str) or len(config['api_key']) > 2048:
             raise ChatError('invalid_arguments', '密钥格式不正确。')
+        config.setdefault('remote_enabled', False)
+        config.setdefault('remote_url', '')
+        config.setdefault('remote_token', '')
+        config.setdefault('remote_account', '')
+        minutes = config.setdefault('remote_safety_check_minutes', 0)
+        if type(minutes) is not int or minutes not in SAFETY_CHECK_MINUTES:
+            raise ValueError('远程服务兜底检查间隔无效。')
+        previous = self.load()
+        config['remote_legacy_credential'] = previous['remote_legacy_credential']
+        if config['remote_url']:
+            config['remote_url'] = normalize_url(config['remote_url'])
+        if (type(config['remote_enabled']) is not bool or
+                config['remote_account'] != '' and not valid_account(config['remote_account']) or
+                config['remote_token'] != '' and not valid_token(config['remote_token'])):
+            raise ValueError('私人远程服务配置无效。')
+        if config['remote_account'] and not (config['remote_url'] and config['remote_token']):
+            raise ValueError('绑定信息缺少服务器地址或 Worker Token。')
+        if config['remote_enabled'] and not (config['remote_url'] and config['remote_token']):
+            raise ValueError('启用私人远程服务需要填写服务器地址和 Worker Token。')
+        config['remote_was_configured'] = bool(previous['remote_was_configured'] or config['remote_url'])
         config['version'] = 1
         config['token'] = config.get('token') or secrets.token_urlsafe(32)
         config['temperature'] = 0.1

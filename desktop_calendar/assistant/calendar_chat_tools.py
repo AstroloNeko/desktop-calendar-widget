@@ -1,5 +1,7 @@
 """Closed tool contract. No dynamic method dispatch or permissive Event coercion."""
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 
 
@@ -177,8 +179,29 @@ def iso_day(value):
         fail("日期不存在。")
 
 
-def request_context(now=None):
-    now = now or datetime.now().astimezone()
+_reference_now = ContextVar('calendar_request_reference', default=None)
+
+
+@contextmanager
+def request_reference(now):
+    if now is not None and (not isinstance(now, datetime) or now.utcoffset() is None):
+        fail('请求时间必须包含时区。')
+    token = _reference_now.set(now)
+    try:
+        yield
+    finally:
+        _reference_now.reset(token)
+
+
+def reference_today(fallback=None):
+    now = _reference_now.get()
+    return now.date() if now is not None else (fallback or date.today)()
+
+
+def request_context(now=None, *, day=None):
+    now = now or _reference_now.get() or datetime.now().astimezone()
+    if day is not None:
+        now = datetime.combine(day, now.timetz())
     today = now.date()
     monday = today - timedelta(days=today.weekday())
     return {"now": now.isoformat(), "today": today.isoformat(), "tomorrow": (today+timedelta(days=1)).isoformat(),

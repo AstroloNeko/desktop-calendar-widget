@@ -12,6 +12,7 @@ from pathlib import Path
 import threading
 import uuid
 from global_hotkey import GlobalHotkeys
+from tray_badge import BADGE_COLORS, TrayBadgeRenderer
 
 IS_WINDOWS = os.name == "nt"
 WPARAM_T, LPARAM_T = ctypes.c_size_t, ctypes.c_ssize_t
@@ -85,6 +86,7 @@ class TrayIcon:
     WM_HOTKEY = 0x312
     HOTKEY_CONFIG = 0x0400 + 28
     CALLBACK_MESSAGE = 0x0400 + 27
+    STATUS_UPDATE = 0x0400 + 29
     WM_COMMAND, WM_DESTROY, WM_CLOSE, WM_NULL = 0x111, 2, 0x10, 0
     WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_CONTEXTMENU = 0x202, 0x203, 0x205, 0x7B
     NIN_KEYSELECT = 0x401
@@ -107,6 +109,62 @@ class TrayIcon:
         self.hotkey_error = None
         self._hotkey_value, self._hotkey_binding = hotkey, None
         self._hotkey_requests = queue.Queue()
+        self._status_lock = threading.Lock()
+        self._status_posted = False
+        self._desired_status = self._applied_status = (None, self.tooltip)
+        self._badge_icons = {}
+        self._badge_renderer = None
+        self._icon_size = 16
+
+    def update_status(self, color, description):
+        if color is not None and color not in BADGE_COLORS:
+            raise ValueError("未知的托盘角标颜色。")
+        tip = f"{self.tooltip}\n{description}" if description else self.tooltip
+        tip = tip.encode('utf-16-le')[:254].decode('utf-16-le', errors='ignore')
+        with self._status_lock:
+            status = color, tip
+            if self._stopping.is_set() or status == self._desired_status:
+                return
+            self._desired_status = status
+            if self._api and self._hwnd and not self._status_posted:
+                self._status_posted = bool(self._api.user.PostMessageW(self._hwnd, self.STATUS_UPDATE, 0, 0))
+
+    def _apply_status(self, *, before_registration=False):
+        with self._status_lock:
+            self._status_posted = False
+            color, tip = self._desired_status
+        if self._stopping.is_set() or not self._nid or (not before_registration and not self.is_available):
+            return
+        old_color, old_tip = self._applied_status
+        icon, flags = self._nid.hIcon, 0
+        if color != old_color:
+            try:
+                icon = self._icon_for_status(color)
+            except OSError:
+                color = old_color  # Keep the registered icon usable if composition fails.
+            else:
+                flags |= self.NIF_ICON
+        if tip != old_tip:
+            flags |= self.NIF_TIP | self.NIF_SHOWTIP
+        if not flags:
+            return
+        if not before_registration:
+            update = NOTIFYICONDATAW()
+            update.cbSize, update.hWnd, update.uID = ctypes.sizeof(update), self._nid.hWnd, self._nid.uID
+            update.uFlags, update.hIcon, update.szTip = flags, icon, tip
+            if not self._api.shell.Shell_NotifyIconW(self.NIM_MODIFY, ctypes.byref(update)):
+                return
+        self._nid.hIcon, self._nid.szTip = icon, tip
+        self._applied_status = color, tip
+
+    def _icon_for_status(self, color):
+        if color is None:
+            return self._icon
+        if color not in self._badge_icons:
+            if self._badge_renderer is None:
+                self._badge_renderer = TrayBadgeRenderer(self._api.user)
+            self._badge_icons[color] = self._badge_renderer.create(self._icon, self._icon_size, color)
+        return self._badge_icons[color]
 
     def configure_hotkey(self, operation, value=None):
         """Bounded cross-thread RPC; only the helper thread touches registration."""
@@ -233,12 +291,16 @@ class TrayIcon:
         if message == self.HOTKEY_CONFIG:
             self._configure_hotkey_requests()
             return 0
+        if message == self.STATUS_UPDATE:
+            self._apply_status()
+            return 0
         if message == self.WM_HOTKEY:
             action = self._hotkey_binding and self._hotkey_binding.action(int(wparam), int(lparam))
             if action:
                 self._emit(action)
             return 0
         if message == self._taskbar_created and self._taskbar_created:
+            self._apply_status(before_registration=True)
             self._register_icon()
             return 0
         if message == self.CALLBACK_MESSAGE:
@@ -292,7 +354,7 @@ class TrayIcon:
                                              0, 0, 0, 0, None, None, instance, None)
             if not self._hwnd:
                 raise OSError("CreateWindowExW failed")
-            size = max(16, user.GetSystemMetrics(49))
+            size = self._icon_size = max(16, user.GetSystemMetrics(49))
             self._icon = user.LoadImageW(None, str(self.icon_path), 1, size, size, 0x10)
             owns_icon = bool(self._icon)
             if not self._icon:
@@ -305,6 +367,7 @@ class TrayIcon:
             self._nid.uFlags = self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP | self.NIF_SHOWTIP
             self._nid.uCallbackMessage, self._nid.hIcon = self.CALLBACK_MESSAGE, self._icon
             self._nid.szTip = self.tooltip
+            self._apply_status(before_registration=True)
             if not self._register_icon():
                 return
             self._hotkey_binding = GlobalHotkeys(user, self._hwnd)
@@ -336,6 +399,9 @@ class TrayIcon:
                     self._api.user.DestroyWindow(self._hwnd)
                 if self._icon and owns_icon:
                     self._api.user.DestroyIcon(self._icon)
+                for icon in self._badge_icons.values():
+                    self._api.user.DestroyIcon(icon)
+                self._badge_icons.clear()
                 if registered:
                     self._api.user.UnregisterClassW(self._class_name, instance)
             self._hwnd = None

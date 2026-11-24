@@ -37,6 +37,7 @@ function Invoke-PythonBuild {
 }
 
 Set-Location $projectDir
+Invoke-PythonBuild -Arguments @("-c", "import requests") -FailureMessage "Install requirements-remote.txt before building DesktopCalendar"
 New-Item -ItemType Directory -Path (Join-Path $buildDir "spec") -Force | Out-Null
 
 # Build the small in-box WinRT transport with the existing Windows SDK/MSVC.

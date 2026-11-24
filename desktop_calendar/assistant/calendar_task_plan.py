@@ -9,7 +9,7 @@ from desktop_calendar.assistant.operation_engine import event_result, execute as
 from desktop_calendar.assistant.operation_plan import member_count
 from calendar_core import COLORS
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fail, fingerprint
-from desktop_calendar.assistant.calendar_chat_tools import TASK_TOOLS as TASK_TOOLS
+from desktop_calendar.assistant.calendar_chat_tools import TASK_TOOLS as TASK_TOOLS, reference_today
 from event_input import build_event_candidate
 from event_commands import BatchPreview
 from calendar_event_service import EventOperationError
@@ -51,7 +51,7 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
         fixed_colors = []
         items = args.get('items') or [{'event_id':i,'changes':{'done':args['done']}} for i in args['event_ids']]
         if name=='batch_create_events' and re.search(r'(往后|未来|往后面)三天',message) and re.search(r'各|每天',message):
-            expected=[(date.today()+timedelta(days=i)).isoformat() for i in (1,2,3)]
+            expected=[(reference_today(date.today)+timedelta(days=i)).isoformat() for i in (1,2,3)]
             if sorted(item['date'] for item in items)!=expected:
                 fail('未来三天应从明天开始，每天各一个，请重新规划日期。','clarification_required')
         ids = []
@@ -144,12 +144,12 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
     return task
 
 
-def recover_task(service, task, owner):
+def recover_task(service, task, owner, *, resume_ready=True):
     """Resume authorized ready plans; reconcile executing plans by observation only."""
     if task['status']=='ready' and service.clock() > task.get('expires', float('inf')):
         task.update(status='expired', error_code='operation_expired')
         service.journal.transition('task', task['task_id'], owner, {'status':'ready'}, task)
-    if task['status']=='ready' and 'before_hashes' in task:
+    if resume_ready and task['status']=='ready' and 'before_hashes' in task:
         def resume():
             gateway = service.gateway
             if not gateway.writable():
