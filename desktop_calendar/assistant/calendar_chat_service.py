@@ -11,7 +11,10 @@ from desktop_calendar.assistant import calendar_batch_delete
 from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
 from desktop_calendar.assistant.calendar_chat_intent import requested_fields
 from desktop_calendar.assistant.calendar_chat_model import MAX_REPAIRS, MAX_ROUNDS as MAX_ROUNDS, run_model_turn
-from desktop_calendar.assistant.calendar_chat_protocol import OWNER, ChatError, envelope, fail, fingerprint, receipt_message, wechat_delete_review
+from desktop_calendar.assistant.calendar_chat_protocol import (
+    OWNER, SPECIFIC_DELETE_STAGE, ChatError, affirmative_reply, envelope, fail, fingerprint,
+    receipt_message, wechat_delete_review,
+)
 from desktop_calendar.assistant.calendar_chat_tools import (
     PROPOSAL_TOOLS, TASK_TOOLS, reference_today, request_context, request_reference, validate_call,
 )
@@ -152,6 +155,8 @@ class CalendarChatService:
                 op['execution_request_id'] = trigger_request_id
             if op['preview'].get('object_type')=='batch_delete':
                 return calendar_batch_delete.confirm(self,op,owner,revision,automatic)
+            if event_action(op) == 'delete' and automatic:
+                fail('删除必须由用户明确确认。', 'operation_conflict')
             event_plan = op['preview'].get('object_type', 'event') in ('event', 'event_batch') and op['preview']['after'] is not None
             op['status'] = 'ready' if event_plan else 'confirmed'
             if automatic:
@@ -221,7 +226,8 @@ class CalendarChatService:
             self.journal.put('session', session_id, owner, session)
             return envelope(session_id, assistant_message='已选择该事项，请继续描述修改内容。')
 
-    def _resolve_target(self, plan, session, owner, request_id, source, chosen=None, chosen_revision=None):
+    def _resolve_target(self, plan, session, owner, request_id, source, chosen=None, chosen_revision=None, *,
+                        delete_request=None):
         validate_target_plan(plan)
         sid = session['session_id']
         target = plan['target']
@@ -237,7 +243,8 @@ class CalendarChatService:
         session.pop('delete_scope',None)
         session.pop('batch_delete_intent',None)
         def ask(question):
-            session['awaiting_target'] = dict(plan=plan,revision=secrets.token_urlsafe(16),expires=self.clock()+900)
+            session['awaiting_target'] = dict(plan=plan,revision=secrets.token_urlsafe(16),expires=self.clock()+900,
+                                              delete_request=delete_request)
             return envelope(sid,request_id,status='clarification_required',assistant_message=question)
 
         rows, question = resolve_target(self.gateway,target,chosen)
@@ -250,12 +257,16 @@ class CalendarChatService:
             revision = secrets.token_urlsafe(16)
             ids = [row['id'] for row in rows]
             session['event_input'] = dict(plan=plan,ids=ids,revision=revision,expires=self.clock()+900,
-                                          event_revisions=self.gateway.event_revisions(ids))
+                                          event_revisions=self.gateway.event_revisions(ids), delete_request=delete_request)
             return envelope(sid,request_id,status='clarification_required',candidates=rows,selection_revision=revision,
                             assistant_message='有多个匹配事项，请选择要操作的一项。')
         if plan['action']=='delete':
             self._bind_delete_scope(session,dict(events=rows,total=len(rows),truncated=False),target)
-            return calendar_batch_delete.prepare(self,session,session['delete_scope']['ids'],owner,request_id)
+            if chosen_revision is not None and session['delete_scope']['hashes'].get(chosen) != chosen_revision:
+                fail('所选事项已变化，请重新查询。','operation_conflict')
+            specific = (target['titles'] or chosen) and calendar_batch_delete.specific_targets(rows, delete_request, chosen=chosen)
+            return calendar_batch_delete.prepare(self,session,session['delete_scope']['ids'],owner,request_id,
+                                                 specific=specific)
         name,args = compile_target_members(self.gateway,plan,rows)
         return self._tool(name,args,session,owner,request_id,source,structured=True,
                           preview_only=plan.get('preview_only',False), expected_before=chosen_revision)
@@ -271,7 +282,7 @@ class CalendarChatService:
             if not patch:
                 fail('请提供要修订的目标条件。')
             plan['target'].update(patch)
-            return self._resolve_target(plan,session,owner,request_id,source)
+            return self._resolve_target(plan,session,owner,request_id,source,delete_request=draft.get('delete_request'))
         if name == 'propose_events':
             if args['action'] == 'create' and not preview_only:
                 days = session.get('member_dates') or independent_dates(message, reference_today(date.today))
@@ -292,7 +303,8 @@ class CalendarChatService:
                     fail('查询请求不能提交修改或删除计划。','clarification_required')
                 if re.search(r'先预览|不要执行|先别执行|先确认',message):
                     args = dict(args,preview_only=True)
-                return self._resolve_target(args,session,owner,request_id,source)
+                return self._resolve_target(args,session,owner,request_id,source,
+                                            delete_request=message if args['action']=='delete' else None)
             preview_only = preview_only or args.get('preview_only', False)
             name, args = compile_proposal(args)
             structured = name in ('preview_create', 'batch_create_events', 'preview_update', 'batch_update_events')
@@ -310,6 +322,8 @@ class CalendarChatService:
             return calendar_batch_delete.prepare(self,session,args['event_ids'],owner,request_id)
         if name=='preview_delete' and session.get('batch_delete_intent') and session.get('delete_scope'):
             return calendar_batch_delete.prepare(self,session,session['delete_scope']['ids'],owner,request_id)
+        if name == 'preview_delete' and (session.get('strict_delete_intent') or calendar_batch_delete.broad_scope(message)):
+            fail('请先核对范围内的完整清单，再确认删除。', 'clarification_required')
         if name in TASK_TOOLS:
             if re.search(r'有什么安排|有哪些任务|查询|查一下|查看', message) and not re.search(r'然后|再把|并把',message):
                 fail('查询不会提交批量写入。', 'clarification_required')
@@ -466,6 +480,8 @@ class CalendarChatService:
                               status='pending', expires=self.clock()+900)
         old_revision = op.get('revision')
         op.update(preview=preview, status='pending', revision=secrets.token_urlsafe(24))
+        if name == 'preview_delete':
+            op.update(specific_delete=True, requires_confirmation=True)
         if preview_only or re.search(r'先预览|不要执行|先别执行|先确认', message):
             op['requires_confirmation'] = True
         if previous:
@@ -548,6 +564,11 @@ class CalendarChatService:
             pending_status = self._pending_status(session, owner)
             diagnostic = dict(request_ref=key[:16], batches=[], target_known=bool(session['selected']),
                               pending_before=pending_status == 'pending', pending_status_before=pending_status)
+            reply = message.strip().rstrip('。！!').strip()
+            pending = self.journal.get('operation', session['pending'], owner) if pending_status == 'pending' else None
+            deleting = pending is not None and event_action(pending) == 'delete'
+            delete_reply = reply in ('删除', '确认删除', '删吧', '确定删除', '删除这批', '最终确认删除')
+            delete_reply = delete_reply or deleting and (reply in ('确认','确认执行','确定','可以') or affirmative_reply(reply))
             conversation = message.strip() not in ('确认', '确认执行', '取消', '取消操作')
             working = deepcopy(session)
             try:
@@ -565,17 +586,11 @@ class CalendarChatService:
                 elif message.strip() in ('取消', '取消操作') and (session.pop('event_input', None) or session.pop('awaiting_target', None)):
                     session.pop('awaiting_fields', None)
                     response = envelope(session_id, request_id, status='cancelled', assistant_message='已取消待选择的修改。')
-                elif source == 'wechat' and message.strip() in ('删除这批', '最终确认删除'):
-                    visible = session.get('visible_preview', {})
-                    stage = 'reviewing_batch' if message.strip() == '删除这批' else 'awaiting_final_confirmation'
-                    operation = self.journal.get('operation', session['pending'], owner) if pending_status == 'pending' else {}
-                    if (pending_status == 'pending' and visible.get('source') == source and
-                            visible.get('kind') == 'batch_delete' and visible.get('id') == session['pending'] and
-                            operation.get('stage') == stage and wechat_delete_review(operation)):
-                        response = self.confirm_operation(session_id, session['pending'], owner, source,
-                                                          visible['revision'], trigger_request_id=request_id)
-                    else:
-                        response = envelope(session_id, request_id, assistant_message='当前没有处于此阶段的批量删除清单。')
+                elif deleting and reply in ('不删', '不删除', '别删', '别删除', '不要删', '不要删除', '不删了', '算了'):
+                    response = self.cancel_operation(session_id, session['pending'], owner, source)
+                elif delete_reply:
+                    response = self._confirm_delete_reply(session, pending if deleting else None, reply,
+                                                          owner, source, request_id)
                 elif message.strip() in ('确认', '确认执行') and not session.get('awaiting_create'):
                     visible = session.get('visible_preview', {})
                     if pending_status == 'pending' and visible.get('source') == source and visible.get('kind') != 'batch_delete' and visible.get('id') == session['pending']:
@@ -625,7 +640,7 @@ class CalendarChatService:
             shown = response.get('pending_operation')
             session['visible_preview'] = (dict(id=shown['operation_id'], revision=shown['revision'], source=source, kind=shown['preview'].get('object_type'))
                                           if shown and shown['status']=='pending' and (response['status']=='confirmation_required'
-                                          or source == 'wechat' and response['status']=='pending' and
+                                          or response['status']=='pending' and
                                           shown['preview'].get('object_type')=='batch_delete') else {})
             response.update(request_id=request_id, session_id=session_id)
             session['messages'].append({'message_id': secrets.token_urlsafe(12), 'request_id': request_id,
@@ -655,6 +670,28 @@ class CalendarChatService:
             ids=[r['id'] for r in rows],total=result['total'],truncated=result.get('truncated',False),
             hashes=hashes,filters=args,expires=self.clock()+900)
 
+    def _confirm_delete_reply(self, session, operation, reply, owner, source, request_id):
+        sid = session['session_id']
+        if operation is None:
+            return envelope(sid, request_id, assistant_message='当前没有待确认的删除清单。')
+        if operation['status'] != 'pending':
+            return self.get_operation_result(sid, operation['operation_id'], owner)
+        visible = session.get('visible_preview', {})
+        kind = operation['preview'].get('object_type')
+        specific = operation.get('stage') == SPECIFIC_DELETE_STAGE or operation.get('specific_delete') is True
+        expected = {'reviewing_batch': '删除这批', 'awaiting_final_confirmation': '最终确认删除'}.get(operation.get('stage'))
+        allowed = (specific and reply not in ('删除这批', '最终确认删除') or
+                   expected is not None and reply == expected or
+                   kind != 'batch_delete' and reply in ('确认', '确认执行'))
+        if (allowed and visible == dict(id=operation['operation_id'], revision=operation['revision'], source=source, kind=kind)
+                and (source != 'wechat' or wechat_delete_review(operation))):
+            return self.confirm_operation(sid, operation['operation_id'], owner, source, visible['revision'],
+                                          trigger_request_id=request_id)
+        if kind == 'batch_delete':
+            return calendar_batch_delete.response(operation)
+        return envelope(sid, request_id, status='confirmation_required', pending_operation=operation,
+                        assistant_message='请先核对当前待删除事项，再确认或取消。')
+
     def _conversation(self, session, message, request_id, owner, source, diagnostic):
         session.pop('member_dates', None)
         session.pop('clarification_anchor', None)
@@ -663,7 +700,7 @@ class CalendarChatService:
         reply = message.strip(' ，,。！!')
         nudge = reply in ('添加一下','添加','帮我添加一下')
         creation_question = reply.rstrip('？?') in ('刚才添加了吗','添加好了吗','添加了吗')
-        assent = re.fullmatch(r'对的(?:[，, ]*对的)?|对|是的|就这样|没错', reply)
+        assent = affirmative_reply(reply)
         if source == 'wechat' and (draft or prior) and reply == '可以':
             assent = True
         quantity = creation_quantity_reply(reply)
@@ -751,7 +788,8 @@ class CalendarChatService:
                         plan.pop('color_policy',None)
                         plan.setdefault('fields',{}).update(color=color,color_mode='override')
                     return self._resolve_target(plan,session,owner,request_id,source,chosen,
-                                                waiting.get('event_revisions',{}).get(chosen))
+                                                waiting.get('event_revisions',{}).get(chosen),
+                                                delete_request=waiting.get('delete_request'))
                 session['selected'] = chosen
                 args = dict(waiting['args'], event_id=chosen)
                 fields = session.pop('awaiting_fields', [])
@@ -790,6 +828,8 @@ class CalendarChatService:
                     session,owner,request_id,source,message=message,diagnostic=diagnostic)
         if re.search(r'删除|删了|删掉|永久删除',message):
             session['delete_intent'] = True
+            if calendar_batch_delete.broad_scope(message):
+                session['strict_delete_intent'] = True
         if session.get('selected_kind') == 'habit' and re.search(r'删除|打卡|标记完成', message) and not re.search(r'新建|新增|创建|查询|查找', message):
             return envelope(session['session_id'], request_id, status='clarification_required',
                             assistant_message='本阶段不支持AI删除或打卡习惯，请在习惯清单中操作。')

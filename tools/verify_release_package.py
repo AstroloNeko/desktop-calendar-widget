@@ -74,8 +74,11 @@ def main():
             for module in ("habit_schedule", "habit_ui", "bulk_ui", "event_selection", "data_backup",
                            "event_commands", "desktop_calendar.ui.ui_theme", "dpi_utils", "win_integration",
                            "data_compat", "desktop_calendar.updates.update_state",
-                           "desktop_calendar.updates.release_notes", "desktop_calendar.updates.release_notes_ui"):
+                           "desktop_calendar.updates.release_notes", "desktop_calendar.updates.release_notes_ui",
+                           "requests", "certifi", "desktop_calendar.remote_notifications"):
                 assert module in pyz.toc, module
+            ca_bundle = app / "_internal/certifi/cacert.pem"
+            assert ca_bundle.is_file() and b"-----BEGIN CERTIFICATE-----" in ca_bundle.read_bytes()
             constants = pyz.extract("desktop_calendar.ui.ui_theme").co_consts
             assert all(theme in constants for theme in ("modern", "aero", "paper", "frutiger", "slate"))
         if name == "DesktopCalendarRepair.exe":

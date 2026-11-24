@@ -1,9 +1,9 @@
-"""Two-stage reviewed deletion. All calendar access stays on gateway dispatcher."""
+"""Reviewed deletion. All calendar access stays on the gateway dispatcher."""
 import re
 import secrets
 from datetime import date
 
-from desktop_calendar.assistant.calendar_chat_protocol import ChatError, envelope, fail, fingerprint
+from desktop_calendar.assistant.calendar_chat_protocol import SPECIFIC_DELETE_STAGE, ChatError, envelope, fail, fingerprint
 from desktop_calendar.assistant.calendar_chat_tools import reference_today
 from desktop_calendar.assistant.operation_engine import event_result, execute as execute_plan
 
@@ -13,11 +13,30 @@ _RANGE = re.compile(r'(?<![\d/-])' + _ENDPOINT + r'\s*(?:到|至|[-~～—])\s*'
 _COMMAND = re.compile(r'(?:全部|全都|都|全)?(?:删除|删掉|删了|移除)(?:掉|了)?[。！!\s]*$')
 _ALL = {'事项','事情','安排','日程','任务','不管是什么事情','不管是什么事项','不管什么事情'}
 _RECENT_DAYS = re.compile(r'^(?:(?:请|帮我|把|将)\s*)*(?:最近|近)\s*(?:[一二两三四五六七八九十\d]+|几)\s*天(?:内|里)?(?:的)?\s*')
+_BROAD_SCOPE = re.compile(
+    r'全部|所有|全选|全删|全删除|全都|通通|统统|删光|清空|清除|批量|整个|整[天周月年]|'
+    r'(?:安排|事项|日程|任务|事件)(?:一律|都|全)(?:给我)?(?:删|移除)|'
+    r'这几天|这些天|最近|每天|一键|\b(?:all|clear|wipe|purge|every)\b', re.I)
+_GENERIC_TITLES = _ALL | {'日历', '日历事项', '事件', '计划', '实验安排'}
+
+
+def broad_scope(message):
+    return bool(_BROAD_SCOPE.search(message))
+
+
+def specific_targets(rows, request, *, chosen=None):
+    if not request or broad_scope(request) or len(rows) > 5:
+        return False
+    if chosen:
+        return len(rows) == 1 and rows[0]['id'] == chosen
+    titles = [row['title'].strip() for row in rows]
+    return len(set(titles)) == len(titles) and all(
+        title and title not in _GENERIC_TITLES and title in request for title in titles)
 
 
 def clear_delete_intent(session):
     """Clear deletion-specific conversation state after leaving the flow."""
-    for key in ('batch_delete_intent', 'delete_title', 'delete_range', 'delete_scope', 'delete_intent'):
+    for key in ('batch_delete_intent', 'delete_title', 'delete_range', 'delete_scope', 'delete_intent', 'strict_delete_intent'):
         session.pop(key, None)
 
 
@@ -156,7 +175,7 @@ def handle_message(service, session, message, owner, request_id):
     return result
 
 
-def prepare(service, session, ids, owner, request_id):
+def prepare(service, session, ids, owner, request_id, *, specific=False):
     scope=session.get('delete_scope')
     if scope and (scope.get('truncated') or scope.get('total',0)>10):
         fail('当前实际匹配'+str(scope['total'])+'项，超过批量删除上限10项；请缩小日期或标题范围，不会截断或自动拆批删除。','clarification_required')
@@ -182,7 +201,8 @@ def prepare(service, session, ids, owner, request_id):
         return [service.gateway.detail(i) for i in ids]
     rows=service.gateway.dispatch(capture)
     op=dict(operation_id=secrets.token_urlsafe(24),session_id=session['session_id'],request_id=request_id,
-        status='pending',stage='reviewing_batch',revision=secrets.token_urlsafe(24),expires=service.clock()+900,
+        status='pending',stage=SPECIFIC_DELETE_STAGE if specific and len(ids)<=5 else 'reviewing_batch',
+        revision=secrets.token_urlsafe(24),expires=service.clock()+900,
         requires_confirmation=True,preview=dict(object_type='batch_delete',event_id=ids[0],event_ids=ids,
         before=rows,after=None,hashes=scope['hashes'],dates=sorted({r['date'] for r in rows}),
         description='批量删除'+str(len(ids))+'个事项',clarification_id=scope['clarification_id']))
@@ -194,7 +214,11 @@ def prepare(service, session, ids, owner, request_id):
 
 
 def response(op):
-    message='请核对完整清单，先选择“删除这N项”，再进行最终确认。' if op['stage']=='reviewing_batch' else '请再次核对清单，然后点击“最终确认删除”。'
+    message = {
+        SPECIFIC_DELETE_STAGE: '请核对待删除事项，然后确认删除或取消。',
+        'reviewing_batch': '请核对完整清单，先选择“删除这N项”，再进行最终确认。',
+        'awaiting_final_confirmation': '请再次核对清单，然后点击“最终确认删除”。',
+    }.get(op['stage'], '')
     if op['status']=='succeeded':
         message=''
     elif op['status']!='pending':
@@ -205,10 +229,10 @@ def response(op):
 
 
 def confirm(service, op, owner, revision, automatic):
-    if op.get('stage') not in ('reviewing_batch','awaiting_final_confirmation'):
+    if op.get('stage') not in (SPECIFIC_DELETE_STAGE,'reviewing_batch','awaiting_final_confirmation'):
         fail('删除确认阶段无效，请重新生成清单。','operation_conflict')
     if automatic or revision is None or revision!=op['revision']:
-        fail('批量删除必须使用当前清单上的确认按钮，不能跳过两级确认。','operation_conflict')
+        fail('删除必须明确确认当前版本的清单。','operation_conflict')
     def execute():
         if not service.gateway.writable():
             fail('请先关闭编辑器或等待当前操作完成。','execution_failed')
@@ -232,8 +256,8 @@ def confirm(service, op, owner, revision, automatic):
     except ChatError:
         raise
     except Exception:
-        return dict(session_id=op['session_id'],status='uncertain',operation_id=op['operation_id'],error_code='execution_uncertain',
-            error_message='无法确认批量删除结果，请查询操作状态；不会自动重试删除。')
+        return envelope(op['session_id'], status='uncertain', operation_id=op['operation_id'], error_code='execution_uncertain',
+                        error_message='无法确认删除结果，请查询操作状态；不会自动重试删除。')
     try:
         service._audit(op,owner,'batch-delete-confirm')
     except OSError:

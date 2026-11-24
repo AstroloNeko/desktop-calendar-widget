@@ -14,6 +14,7 @@ from event_input import build_event_candidate
 from event_commands import BatchPreview
 from calendar_event_service import EventOperationError
 from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
+from desktop_calendar.assistant.calendar_chat_intent import requested_fields
 
 
 def run_task(service, name, args, session, owner, request_id, source, message, *, structured=False, preview_only=False):
@@ -96,6 +97,7 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
                          action={'batch_create_events':'create','batch_set_completion':'complete'}.get(name,'update'),
                          event_ids=task['event_ids'], after=task['expected'], before=None,
                          before_hashes=task['before_hashes'],
+                         requested_fields=sorted(requested_fields(message, name=='batch_create_events')),
                          summaries=[gateway._detail(entry.event()) for entry in entries])
             op = dict(operation_id=task_id, session_id=session['session_id'], request_id=request_id,
                       preview=batch, status='pending', requires_confirmation=True, revision=secrets.token_urlsafe(24),

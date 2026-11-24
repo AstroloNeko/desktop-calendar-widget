@@ -25,7 +25,7 @@ def build_messages(state, history):
                '明确多个独立Event使用一个propose_events工具，最多10项，宿主原子保存；不可分成多个单事项提案。'
                '连续与分日仍有数量歧义时，可优先推荐一个跨日事项，用clarify附完整create_plan，只问是否认可这一个方案。'
                '已明确修改值但有多个同名候选时，直接提交含target和完整fields的propose_events。宿主返回可选择的候选并保留Patch；不要用query后纯文字clarify代替。'
-               '按条件删改直接调用 propose_events 的 target，不猜 ID；日期不确定时提交无日期的 target；回答 awaiting_target 时用 revise_event_target；用户全部表示当前完整集合，不是单选；必须两级本地确认，不能自动删除。'
+               '按条件删改直接调用 propose_events 的 target，不猜 ID；日期不确定时提交无日期的 target；回答 awaiting_target 时用 revise_event_target；用户全部表示当前完整集合，不是单选；宿主决定删除确认级别，模型不能确认或自动删除。'
                '往后/未来三天各一个表示从明天起三天，连续三天一个任务不是三个独立Event。随机不同颜色传distinct_colors=true，本地固定抽取。'
                '第二天/第二个/最后一个和前面那批优先用recent_task日期顺序和稳定ID，不重新模糊搜索。'
                '用户明确要求再创建一个相同事项时，若缺原事项字段，先用已知ID调用get_event。复制原事项的类型及其他业务字段，提交新的create计划。'

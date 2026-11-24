@@ -131,8 +131,50 @@ class RemoteServiceTests(unittest.TestCase):
         self.assertTrue(receipt['ok'])
         self.assertEqual(record['operation_ids'], [receipt['operation_id']])
         self.assertEqual({event.title: event.event_type for event in self.events()}, {'组会': 'general', '交报告': 'ddl'})
+        self.assertIn('DDL', receipt['reply_text'])
+        self.assertNotIn('#', receipt['reply_text'])
+        self.assertNotIn('不提醒', receipt['reply_text'])
         self.assertTrue(self.executor(lambda: self.store.repository.receipt(receipt['operation_id'])))
         self.refresh.assert_called_once()
+
+    def test_delete_transcript_one_confirmation_isolation_and_redelivery(self):
+        self.process(job('seed-delete', '明天上午10点开组会'),
+                     [tool('preview_create', dict(title='组会', date='2026-01-01', time='10:00'))])
+        event_id = self.events()[0].id
+        plan = tool('propose_events', dict(action='delete', target=dict(
+            start='2026-01-01', end='2026-01-01', titles=['组会'], quantity='one')))
+        pending = self.process(job('delete-review', '明天组会删了'), [plan])
+        reply = json.loads(pending['receipt'])
+        self.assertIsNone(reply['operation_id'])
+        self.assertIn('组会 · 10:00', reply['reply_text'])
+        self.assertIn('确认删除', reply['reply_text'])
+        self.assertNotIn(event_id, reply['reply_text'])
+        foreign = self.process(job('foreign-confirm', '确认删除', sender='another-sender'))
+        self.assertNotEqual(foreign['session_id'], pending['session_id'])
+        self.assertEqual(len(self.events()), 1)
+        confirmation = job('delete-confirm', '删除')
+        deleted = self.process(confirmation)
+        duplicate = self.process(confirmation)
+        result = json.loads(deleted['receipt'])
+        self.assertEqual(deleted['receipt'], duplicate['receipt'])
+        self.assertIn('已删除 1 项', result['reply_text'])
+        self.assertNotIn(event_id, result['reply_text'])
+        self.assertTrue(self.executor(lambda: self.store.repository.receipt(result['operation_id'])))
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.refresh.call_count, 2)
+
+    def test_wechat_keeps_explicit_fields_and_reports_unverified_effects(self):
+        plan = tool('propose_events', dict(action='create', items=[dict(fields=dict(
+            title='色彩验收', date='2026-01-01', time='10:00', color='#223344', reminder=15))]))
+        record = self.process(job('explicit-options', '明天上午10点创建色彩验收，颜色#223344，提前15分钟提醒'), [plan])
+        reply = json.loads(record['receipt'])['reply_text']
+        self.assertIn('#223344', reply)
+        self.assertIn('提前 15 分钟提醒', reply)
+        result = dict(action='delete', deleted=False, committed=True, goal_satisfied=False)
+        body, _ = make_receipt(dict(status='committed_unverified', operation_result=result,
+                                    error_message='删除已提交，但目标效果核验未通过。'))
+        self.assertNotIn('已删除', json.loads(body)['reply_text'])
+        self.assertFalse(json.loads(body)['ok'])
 
     def test_pending_and_confirmation_isolated_and_keep_original_dates(self):
         plan = tool('propose_events', {'action': 'create', 'items': [

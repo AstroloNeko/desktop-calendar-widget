@@ -10,7 +10,9 @@ import threading
 import time
 from typing import Optional
 
-from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fingerprint, wechat_delete_review
+from desktop_calendar.assistant.calendar_chat_intent import requested_fields
+from desktop_calendar.assistant.calendar_chat_protocol import ChatError, event_line, fingerprint, receipt_message, wechat_delete_review
+from desktop_calendar.assistant.operation_engine import event_action
 from desktop_calendar.remote_cloud import remote_scope, valid_account
 from desktop_calendar.remote_history import describe_response
 from desktop_calendar.remote_notifications import AUTH_REJECTED, NotificationListener
@@ -81,7 +83,7 @@ def message_time(job):
     raise ValueError('缺少有效的微信消息发送时间。')
 
 
-def make_receipt(response):
+def make_receipt(response, request_text=''):
     status = response['status']
     op = response.get('pending_operation') or {}
     task = response.get('task') or {}
@@ -93,8 +95,13 @@ def make_receipt(response):
     prompt = response.get('assistant_message') if ok else response.get('error_message') or response.get('assistant_message')
     rows = response.get('candidates') or response.get('habit_candidates') or []
     instruction = ''
+    if status in ('ok', 'succeeded', 'completed') and result.get('goal_satisfied') is True and result.get('action') in (
+            'create', 'update', 'complete', 'delete'):
+        explicit = requested_fields(request_text) | set(
+            preview.get('field_provenance', {}).get('explicit', preview.get('requested_fields', ())))
+        prompt = receipt_message(result, concise=True, explicit=explicit) or prompt
     if op.get('status') == 'pending' and status in ('confirmation_required', 'pending'):
-        if preview.get('object_type') == 'batch_delete':
+        if preview.get('before') and event_action(op) == 'delete':
             rows = []
             prompt = wechat_delete_review(op) or '删除清单过长，请回复“取消”，缩小范围后再预览。'
         else:
@@ -110,6 +117,9 @@ def make_receipt(response):
             instruction = '核对后回复“确认”或“取消”。'
     lines = [prompt or ('本条消息已处理。' if ok else '本条消息未完成，请核查日历。')]
     for index, row in enumerate(rows, 1):
+        if row.get('date') and row.get('title') and not row.get('schedule'):
+            lines.append(f'{index}. {event_line(row)}')
+            continue
         date = row.get('date') or row.get('start', '')[:10]
         if row.get('end') and row['end'] != date:
             date += ' 至 ' + row['end']
@@ -497,7 +507,7 @@ class RemoteWorker:
                     self.processing_id = ''
 
     def _set_receipt(self, record, response):
-        body, ids = make_receipt(response)
+        body, ids = make_receipt(response, record.get('text', ''))
         record.update(state='ready', receipt=body, operation_ids=ids)
         record.update(history_result=describe_response(response), processed_at=time.time(),
                       model_unavailable=response.get('error_code') == 'model_unavailable')

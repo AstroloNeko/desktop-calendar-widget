@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import font as tkfont, messagebox, ttk
 
 from tk_dispatcher import TkDispatcher
-from desktop_calendar.assistant.calendar_chat_protocol import ChatError, envelope
+from desktop_calendar.assistant.calendar_chat_protocol import ChatError, envelope, event_line
 from desktop_calendar.assistant.llm_provider import AIConfiguration
 from desktop_calendar.reminders.reminder_ui import reminder_button
 from desktop_calendar.ui.themed_controls import (RoundedCardShell, SettingsScroll, form_button,
@@ -441,8 +441,13 @@ class _ChatWidgets:
         self.operation = response.get('pending_operation')
         pending = self.operation and self.operation['status'] == 'pending'
         self.confirm_button.configure(state='normal' if pending else 'disabled')
-        self.confirm_button.configure(text=('删除这'+str(len(self.operation['preview']['event_ids']))+'项' if self.operation.get('stage')=='reviewing_batch' else '最终确认删除')
-            if pending and self.operation['preview'].get('object_type')=='batch_delete' else '确认执行')
+        confirm_label = '确认执行'
+        if pending and self.operation['preview'].get('after') is None and self.operation['preview'].get('before'):
+            confirm_label = {
+                'reviewing_batch': f"删除这{len(self.operation['preview'].get('event_ids', []))}项",
+                'awaiting_final_confirmation': '最终确认删除',
+            }.get(self.operation.get('stage'), '确认删除')
+        self.confirm_button.configure(text=confirm_label)
         self.cancel_button.configure(state='normal' if pending else 'disabled')
         preview_start = None
         if self.operation and self.operation['status'] == 'pending':
@@ -476,8 +481,10 @@ class _ChatWidgets:
         if operation['preview'].get('object_type')=='batch_delete':
             rows=operation['preview']['before']
             self.append('待删除完整清单 · '+str(len(rows))+'项\n'+'\n'.join(
-                r['date']+' '+(r['time'] or '')+' · '+r['title']+' · ID '+r['id'] for r in rows), 'delete')
-            self.append('尚未删除。'+('请核对后选择删除这些事项。' if operation['stage']=='reviewing_batch' else '下一次点击将最终删除整批事项，可一次撤销。'), 'delete')
+                f"{i}. {event_line(row)}" for i, row in enumerate(rows, 1)), 'delete')
+            hint = {'reviewing_batch': '请核对后选择删除这些事项。',
+                    'awaiting_final_confirmation': '下一次点击将最终删除整批事项，可一次撤销。'}
+            self.append('尚未删除。'+hint.get(operation['stage'], '核对后即可确认删除，可一次撤销。'), 'delete')
             return
         if operation['preview'].get('object_type') == 'habit':
             if operation['status'] == 'pending':

@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 
 from calendar_event_service import EventOperationError
-from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fail
+from desktop_calendar.assistant.calendar_chat_protocol import SPECIFIC_DELETE_STAGE, ChatError, fail
 from desktop_calendar.assistant.operation_plan import compile_proposal
 
 
@@ -102,8 +102,10 @@ def execute(gateway, journal, kind, record, owner, command, expected=None, color
     deleting = expected is None
     batch_delete = deleting and record['preview'].get('object_type') == 'batch_delete'
     if batch_delete:
-        before['stage'] = 'awaiting_final_confirmation'
-        authorized = record['status'] == 'pending' and record.get('stage') == before['stage']
+        before['stage'] = record.get('stage')
+        authorized = record['status'] == 'pending' and (
+            before['stage'] == 'awaiting_final_confirmation' or
+            before['stage'] == SPECIFIC_DELETE_STAGE and 1 <= len(deletion_ids(record)) <= 5)
     else:
         authorized = record['status'] == ('confirmed' if deleting else 'ready')
     if not authorized:

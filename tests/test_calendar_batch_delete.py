@@ -38,6 +38,70 @@ class BatchDeleteTests(TestCase):
     def confirm(self,op):
         return self.service.confirm_operation(self.sid,op['operation_id'],revision=op['revision'])
 
+    def target(self, titles, quantity='one'):
+        return fixture.tool('propose_events', dict(action='delete', target=dict(
+            start='2026-11-15', end='2026-11-17', titles=titles, quantity=quantity)))
+
+    def test_specific_events_use_one_confirmation_and_undo(self):
+        initial = list('ABCDEF')
+        for message, titles, affirmations in (
+                ('删除组会', ['组会'], ('删除', '确认删除', '删吧', '确定', '可以', '是的')),
+                ('删除组会和细胞实验', ['组会', '细胞实验'], ('确认删除',))):
+            for affirmative in affirmations:
+                with self.subTest(message=message, confirmation=affirmative):
+                    self.assertEqual(self.say(message, [self.target(titles, 'all_matches')])['pending_operation']['stage'],
+                                     'reviewing_specific')
+                    self.assertEqual([e.id for e in self.store.events], initial)
+                    result = self.say(affirmative)
+                    self.assertEqual(result['status'], 'succeeded')
+                    self.assertEqual(result['operation_result']['count'], len(titles))
+                    self.commands.undo()
+                    self.assertEqual([e.id for e in self.store.events], initial)
+
+    def test_range_large_and_legacy_previews_keep_strict_confirmation(self):
+        for utterance, plan in (
+                ('清空这几天的全部事项', self.target([], 'all_matches')),
+                ('删除组会、细胞实验和WB实验', self.target(['组会', '细胞实验', 'WB实验'], 'all_matches')),
+                ('组会和这个范围的事项都删掉', self.target(['组会']))):
+            with self.subTest(utterance=utterance):
+                preview = self.say(utterance, [plan])['pending_operation']
+                self.assertEqual(preview['stage'], 'reviewing_batch')
+                self.assertEqual(self.say('可以')['pending_operation']['stage'], 'reviewing_batch')
+                self.assertEqual(self.say('删除这批')['pending_operation']['stage'], 'awaiting_final_confirmation')
+                self.assertEqual(self.say('是的')['pending_operation']['stage'], 'awaiting_final_confirmation')
+                self.assertEqual(len(self.store.events), 6)
+                self.service.cancel_operation(self.sid, preview['operation_id'])
+        pending = self.say('删除组会', [self.target(['组会'])])['pending_operation']
+        pending['stage'] = 'reviewing_batch'  # v0.12-era persisted stage with the same visible revision.
+        self.journal.put('operation', pending['operation_id'], OWNER, pending)
+        self.assertEqual(self.say('删除')['pending_operation']['stage'], 'reviewing_batch')
+        self.assertEqual(len(self.store.events), 6)
+
+    def test_revised_target_or_nonaffirmative_cannot_delete(self):
+        op = self.say('删除组会', [self.target(['组会'])])['pending_operation']
+        self.assertNotEqual(self.say('可以，但等我看一下')['status'], 'succeeded')
+        self.assertEqual(self.say('不要删除')['status'], 'cancelled')
+        self.assertNotEqual(self.say('确定')['status'], 'succeeded')
+        self.assertEqual(len(self.store.events), 6)
+        fresh = self.say('删除组会', [self.target(['组会'])])['pending_operation']
+        self.commands.update('F', title='更新后的组会')
+        result = self.say('删吧')
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['error_code'], 'operation_conflict')
+        self.assertNotEqual(op['operation_id'], fresh['operation_id'])
+        self.assertTrue(self.store.event_by_id('F'))
+
+    def test_chosen_candidate_is_specific_and_rechecked(self):
+        chosen = self.say('删除WB实验', [self.target(['WB实验'])])['candidates'][0]['id']
+        self.commands.update(chosen, notes='候选选择后变更')
+        self.assertEqual(self.say('1')['error_code'], 'operation_conflict')
+        self.say('删除WB实验', [self.target(['WB实验'])])
+        pending = self.say('1')['pending_operation']
+        self.assertEqual(pending['stage'], 'reviewing_specific')
+        self.assertEqual(pending['preview']['event_ids'], [chosen])
+        self.assertEqual(self.say('确认删除')['status'], 'succeeded')
+        self.assertIsNone(self.store.event_by_id(chosen))
+
     def use_sqlite(self, *, reopen=False):
         seed = [] if reopen else self.store.events
         if reopen:
