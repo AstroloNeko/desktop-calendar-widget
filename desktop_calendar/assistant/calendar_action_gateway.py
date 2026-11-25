@@ -9,7 +9,7 @@ from event_input import build_event_candidate, EventInputError
 from event_commands import BatchPreview
 from calendar_event_service import CalendarEventService, OperationContext
 from event_search import EventSearchIndex, capture_search_store
-from desktop_calendar.assistant.calendar_chat_protocol import fail, fingerprint as fingerprint
+from desktop_calendar.assistant.calendar_chat_protocol import fail, fingerprint as fingerprint, require_calendar_write
 from desktop_calendar.assistant.calendar_chat_tools import iso_day, reference_today, validate_call
 from desktop_calendar.assistant.calendar_habit_gateway import prepare_habit
 from desktop_calendar.assistant.operation_engine import deletion_outcome, execute as execute_plan, recovered
@@ -231,6 +231,7 @@ class CalendarActionGateway:
             item = RoutineItem(**preview['after'])
             operation['status'] = 'executing'
             journal.put('operation', operation['operation_id'], owner, operation)
+            require_calendar_write()
             try:
                 from calendar_mutation_service import mutation_service
                 change = mutation_service(self.commands).upsert_routine(item).change

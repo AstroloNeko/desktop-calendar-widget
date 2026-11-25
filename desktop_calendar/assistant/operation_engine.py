@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 
 from calendar_event_service import EventOperationError
-from desktop_calendar.assistant.calendar_chat_protocol import SPECIFIC_DELETE_STAGE, ChatError, fail
+from desktop_calendar.assistant.calendar_chat_protocol import SPECIFIC_DELETE_STAGE, ChatError, fail, require_calendar_write
 from desktop_calendar.assistant.operation_plan import compile_proposal
 
 
@@ -110,6 +110,7 @@ def execute(gateway, journal, kind, record, owner, command, expected=None, color
         authorized = record['status'] == ('confirmed' if deleting else 'ready')
     if not authorized:
         raise ChatError('operation_conflict', '计划尚未取得执行授权。')
+    require_calendar_write()
     record.update(status='executing', expected_colors=colors, execution_protocol=1)
     if batch_delete:
         record['stage'] = 'executing'
@@ -118,6 +119,14 @@ def execute(gateway, journal, kind, record, owner, command, expected=None, color
     except ChatError as exc:
         if exc.code == 'operation_conflict':
             raise ChatError('claim_conflict', '已有执行器领取当前计划。') from exc
+        raise
+    try:
+        require_calendar_write()
+    except ChatError as error:
+        record.update(status='failed', error_code=error.code, error_message=str(error))
+        if batch_delete:
+            record['stage'] = 'failed'
+        journal.put(kind, identifier, owner, record)
         raise
     try:
         outcome = gateway.events.commit(command, operation_id=identifier)

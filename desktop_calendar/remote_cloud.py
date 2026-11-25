@@ -24,6 +24,10 @@ def remote_scope(url, token, account='', legacy_credential=''):
     return fingerprint(url) if credential == legacy_credential else fingerprint(['wechat-manual', credential])
 
 
+class AccountMismatch(ValueError):
+    """The authenticated server identified another account for this Worker Token."""
+
+
 @dataclass(frozen=True)
 class Binding:
     account_id: str = field(repr=False)
@@ -40,6 +44,7 @@ class NotificationSession:
     id_token: str = field(repr=False)
     expires_at: float
     refresh_at: float = None
+    account_id: str = field(default='', repr=False)
 
     def __post_init__(self):
         try:
@@ -86,13 +91,13 @@ class FirebaseNotificationContract:
     def notification_session(self, client, token, expected_account=''):
         data = client.request('/api/notifications/session', token, b'{}')
         account = data.get('user_id')
+        if expected_account and account != expected_account:
+            raise AccountMismatch('通知账户与本机绑定账户不符。')
         if (data.get('provider') != 'firebase_rtdb_sse' or not valid_account(account)
                 or any(char in '.$#[]/' for char in account)
                 or data.get('wakeup_path') != f'/wakeups/{account}/version'
                 or data.get('id_token') == token):
             raise ValueError('通知会话格式无效。')
-        if expected_account and account != expected_account:
-            raise ValueError('通知账户与本机绑定账户不符。')
         origin = firebase_origin(data.get('database_url'))
         ttl = _notification_seconds(data.get('expires_in'))
         refresh_before = _notification_seconds(data.get('recommended_refresh_before_seconds'))
@@ -108,7 +113,7 @@ class FirebaseNotificationContract:
         now = time.monotonic()
         refresh_after = remaining - (refresh_before if remaining > refresh_before else remaining / 2)
         stream_url = f"{origin}/wakeups/{quote(account, safe='')}/version.json"
-        return NotificationSession(stream_url, data.get('id_token'), now + remaining, now + refresh_after)
+        return NotificationSession(stream_url, data.get('id_token'), now + remaining, now + refresh_after, account)
 
 
 NOTIFICATION_CONTRACT = FirebaseNotificationContract()

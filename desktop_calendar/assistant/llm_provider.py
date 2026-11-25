@@ -102,6 +102,12 @@ class AIConfiguration:
         config['remote_legacy_credential'] = previous['remote_legacy_credential']
         if config['remote_url']:
             config['remote_url'] = normalize_url(config['remote_url'])
+        if (previous['remote_account'] and previous['remote_url'] and
+                (normalize_url(previous['remote_url']), previous['remote_token']) ==
+                (config['remote_url'], config['remote_token'])):
+            if config['remote_account'] not in ('', previous['remote_account']):
+                raise ValueError('当前连接凭据已绑定其他账号，请重新绑定。')
+            config['remote_account'] = previous['remote_account']
         if (type(config['remote_enabled']) is not bool or
                 config['remote_account'] != '' and not valid_account(config['remote_account']) or
                 config['remote_token'] != '' and not valid_token(config['remote_token'])):

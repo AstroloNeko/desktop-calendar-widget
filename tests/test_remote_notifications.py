@@ -10,8 +10,10 @@ from unittest.mock import Mock, call, patch
 
 from desktop_calendar.assistant.calendar_chat_protocol import fingerprint
 from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
-from desktop_calendar.remote_cloud import Binding, FirebaseNotificationContract, NotificationSession, remote_scope
-from desktop_calendar.remote_notifications import NotificationListener, sse_events, stream_notifications
+from desktop_calendar.remote_cloud import AccountMismatch, Binding, FirebaseNotificationContract, NotificationSession, remote_scope
+from desktop_calendar.remote_notifications import (
+    ACCOUNT_MISMATCH, AUTH_REJECTED, NotificationListener, VerifiedAccount, sse_events, stream_notifications,
+)
 from desktop_calendar.remote_service import JOBS, RemoteWorker, claim_checked_at
 from desktop_calendar.remote_transport import CLAIM_PATH, StatusError, Unavailable
 import test_remote_service as fixture
@@ -22,8 +24,8 @@ STREAM_URL = 'https://unit-test-default-rtdb.firebaseio.com/notices/test-account
 SHORT_TOKEN = 'synthetic-short-lived-id-token'
 
 
-def credential():
-    return NotificationSession(STREAM_URL, SHORT_TOKEN, time.monotonic() + 60)
+def credential(account='owner-one'):
+    return NotificationSession(STREAM_URL, SHORT_TOKEN, time.monotonic() + 60, account_id=account)
 
 
 def sse(name, payload):
@@ -186,7 +188,7 @@ class SSETests(unittest.TestCase):
         release_old = threading.Event()
         changed = Mock()
         contract = Mock()
-        contract.notification_session.side_effect = lambda client, token, account: credential()
+        contract.notification_session.side_effect = lambda client, token, account: credential(account or 'owner-one')
 
         def stream(credentials, stop, ready, wake):
             connection.append(stop)
@@ -223,6 +225,26 @@ class SSETests(unittest.TestCase):
 class PairingAndScopeTests(unittest.TestCase):
     setUp = fixture.RemoteServiceTests.setUp
     worker_for_steps = fixture.RemoteServiceTests.worker_for_steps
+
+    def test_manual_token_rotation_keeps_expected_account_until_explicit_rebinding(self):
+        original = {**self.configuration.load(), **fixture.BOUND_CONFIG, 'remote_enabled': False}
+        self.configuration.save(original)
+        self.runtime.save_settings({**original, 'remote_token': 'rotated-manual-secret', 'remote_account': ''})
+        self.assertEqual(self.configuration.load()['remote_account'], 'owner-one')
+        self.runtime.save_remote_binding(fixture.URL, Binding('owner-two', 'explicit-activation-secret'))
+        self.assertEqual(self.configuration.load()['remote_account'], 'owner-two')
+
+    def test_failed_apply_after_saving_replacement_revokes_previous_worker(self):
+        original = {**self.configuration.load(), **fixture.BOUND_CONFIG}
+        self.configuration.save(original)
+        self.runtime.remote = self.worker
+        self.assertTrue(self.worker.request_check())
+        with patch.object(self.runtime, 'apply_remote', side_effect=OSError('cannot read saved config')):
+            with self.assertRaises(OSError):
+                self.runtime.save_settings({**original, 'remote_token': 'replacement-manual-token'})
+        self.assertEqual(self.configuration.load()['remote_token'], 'replacement-manual-token')
+        self.assertFalse(self.worker.request_check())
+        self.assertEqual(self.worker.snapshot().connection, 'disabled')
 
     def test_deployed_activation_persists_user_id(self):
         self.assertIsInstance(self.runtime.remote_contract, FirebaseNotificationContract)
@@ -300,9 +322,9 @@ class PairingAndScopeTests(unittest.TestCase):
         self.configuration.save({**self.configuration.load(), **fixture.CONFIG, 'remote_account': 'user-one',
                                  'model': 'custom-model', 'api_key': 'synthetic-model-secret',
                                  'consent': True, 'http_enabled': True, 'token': 'synthetic-local-token'})
-        self.runtime.remote = Mock()
+        self.runtime.remote = Mock(condition=threading.Condition())
         ledger_scope = remote_scope(fixture.URL, fixture.CONFIG['remote_token'], 'user-one')
-        row = self.worker._intake(fixture.job('keep-me', '明天记录测试日程'), ledger_scope, fixture.URL)
+        row = self.worker._intake(fixture.job('keep-me', '明天记录测试日程'), ledger_scope)
         session = self.service.new_session()['session_id']
         self.runtime.clear_remote_binding()
         saved = self.configuration.load()
@@ -322,7 +344,7 @@ class PairingAndScopeTests(unittest.TestCase):
                                  'endpoint': 'https://model.example.invalid', 'model': 'custom-model',
                                  'api_key': 'synthetic-model-secret', 'timeout': 15,
                                  'consent': True, 'http_enabled': True, 'port': 22000, 'token': 'synthetic-local-token'})
-        self.runtime.remote = Mock()
+        self.runtime.remote = Mock(condition=threading.Condition())
         local_http = self.runtime.http = Mock()
         session = self.service.new_session()['session_id']
         saved = self.runtime.clear_ai_settings()
@@ -380,17 +402,17 @@ class PairingAndScopeTests(unittest.TestCase):
         for number in (23, *range(23)):
             journal.put(JOBS, f'test-{number}', scope, dict(id=f'test-{number}', received_at=number,
                         state='submitted', receipt='{"ok":true,"operation_id":"opaque","reply_text":"synthetic-private"}',
-                        notify_status='sent'))
+                        notify_status='sent', verified_scope=scope))
         journal.put(JOBS, 'different-owner', other, dict(id='different-owner', received_at=100,
-                    state='uncertain'))
+                    state='uncertain', verified_scope=other))
         journal.put(JOBS, 'different-server', different_server, dict(id='different-server', received_at=101,
-                    state='received'))
+                    state='received', verified_scope=different_server))
         owner, request_id = 'synthetic-owner', 'synthetic-request'
         self.runtime.journal.put('request', fingerprint([owner, request_id]), owner,
                                 {'response': {'status': 'confirmation_required'}})
         journal.put(JOBS, 'test-23', scope, dict(id='test-23', received_at=23, state='submitted',
                     owner=owner, request_id=request_id, agent_journal=str(self.runtime.journal.path.resolve()),
-                    notify_status='failed'))
+                    notify_status='failed', verified_scope=scope))
         with patch('desktop_calendar.remote_service.Client') as network:
             rows = self.runtime.recent_remote_history(config)
             self.assertEqual(len(rows), 20)
@@ -406,6 +428,17 @@ class PairingAndScopeTests(unittest.TestCase):
                 {**config, 'remote_url': different_url})[0].result, '已接收，等待处理')
             network.assert_not_called()
 
+    def test_history_does_not_expose_result_of_unverified_legacy_record(self):
+        config = {**fixture.CONFIG, 'remote_account': 'owner-one'}
+        journal = ChatJournal(self.folder / 'wechat-jobs.sqlite3', self.protection)
+        for number, state in enumerate(('ready', 'submitted')):
+            journal.put(JOBS, state, fixture.SERVER, dict(id=state, state=state, received_at=number,
+                        processed_at=99, history_result='其他账号的旧结果', notify_status='sent'))
+        rows = self.runtime.recent_remote_history(config)
+        self.assertEqual([row.result for row in rows], ['旧任务缺少账号核验记录'] * 2)
+        self.assertEqual([row.notification for row in rows], ['', ''])
+        self.assertEqual(rows[1].upload, '回执已保留，暂停上传')
+
     def test_recent_result_distinguishes_queries_writes_upload_and_model_failure(self):
         config = {**fixture.CONFIG, 'remote_account': 'owner-one'}
         scope = remote_scope(fixture.URL, fixture.CONFIG['remote_token'], 'owner-one')
@@ -418,7 +451,7 @@ class PairingAndScopeTests(unittest.TestCase):
             ({'status': 'failed', 'error_code': 'model_unavailable'}, '处理失败'),
         )
         for number, (response, expected) in enumerate(cases, 1):
-            record = {'id': str(number), 'received_at': number}
+            record = {'id': str(number), 'received_at': number, 'verified_scope': scope}
             self.worker._set_receipt(record, response)
             journal.put(JOBS, record['id'], scope, record)
             row = self.runtime.recent_remote_history(config)[0]
@@ -477,6 +510,14 @@ class NotificationContractTests(unittest.TestCase):
                 contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
             self.assertEqual(error.exception.status, status)
 
+    def test_successful_session_response_without_bound_identity_is_authorization_failure(self):
+        client = Mock()
+        for malformed in (None, '', {'unexpected': 'owner-one'}):
+            with self.subTest(account=malformed):
+                client.request.return_value = self.document(user_id=malformed)
+                with self.assertRaises(AccountMismatch):
+                    FirebaseNotificationContract().notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
+
 
 class MockNotifications:
     def __init__(self, contract, client_factory, changed):
@@ -485,12 +526,266 @@ class MockNotifications:
 
     def configure(self, generation, *address):
         self.generation = generation if address else None
+        if address and address[2]:
+            self.changed(generation, VerifiedAccount(address[2]))
 
     def stop(self):
         self.generation = None
 
     def signal(self, online=True):
         self.changed(self.generation, online)
+
+
+class WorkerIdentityTests(unittest.TestCase):
+    setUp = fixture.RemoteServiceTests.setUp
+    worker_for_steps = fixture.RemoteServiceTests.worker_for_steps
+    events = fixture.RemoteServiceTests.events
+
+    def start(self, request, *, stream=None, account='owner-one', token=None):
+        client = Mock()
+        client.request.side_effect = request
+        stream = stream or Mock(return_value=False)
+        worker = RemoteWorker(self.service, self.ledger, client_factory=lambda _url: client,
+                              contract=FirebaseNotificationContract(), interval=.02, fallback_grace=.04,
+                              notification_factory=lambda *args: NotificationListener(*args, stream=stream, retry=(.02,.02)))
+        def stop():
+            worker.stop()
+            for thread in (worker.thread, worker.notifications.thread):
+                if thread:
+                    thread.join(3)
+                    self.assertFalse(thread.is_alive())
+        self.addCleanup(stop)
+        worker.configure({**fixture.CONFIG, 'remote_account': account,
+                          'remote_token': token or fixture.CONFIG['remote_token']})
+        return worker, client, stream
+
+    def test_delayed_identity_holds_first_claim_and_then_allows_it(self):
+        waiting, resume, claim = (threading.Event() for _ in range(3))
+        def request(path, token, body=None):
+            if path == '/api/notifications/session':
+                waiting.set()
+                resume.wait(3)
+                return NotificationContractTests.document()
+            self.assertEqual(path, CLAIM_PATH)
+            claim.set()
+            return {'job': None}
+        worker, _, _ = self.start(request)
+        self.addCleanup(resume.set)
+        self.assertTrue(waiting.wait(1))
+        self.assertFalse(claim.wait(.14))
+        self.assertFalse(worker.request_check())
+        self.assertEqual(self.provider.messages, [])
+        self.assertEqual(self.events(), [])
+        resume.set()
+        self.assertTrue(claim.wait(2))
+
+    def test_mismatched_account_never_starts_claim_agent_or_upload(self):
+        scope = remote_scope(fixture.URL, fixture.CONFIG['remote_token'], 'owner-one')
+        record = self.worker._intake(fixture.job('old-receipt', '添加之前的事项'), scope)
+        self.worker._set_receipt(record, {'status': 'ok', 'assistant_message': '旧账号回执'})
+        self.worker._save(scope, record)
+        received = self.worker._intake(fixture.job('old-received', '明天记录测试事项'), scope)
+        self.provider.replies = [tool('preview_create', {'title':'测试事项','date':'2026-01-01'})]
+        requested = threading.Event()
+        def request(path, token, body=None):
+            if path == '/api/notifications/session':
+                requested.set()
+                return NotificationContractTests.document(user_id='owner-two', wakeup_path='/wakeups/owner-two/version')
+            return {'job': None} if path == CLAIM_PATH else fixture.completion(body)
+        worker, client, stream = self.start(request)
+        self.assertTrue(requested.wait(1))
+        self.assertTrue(until(lambda: worker.snapshot().connection == 'mismatch'))
+        with worker.condition:
+            worker.offline_since -= 46
+            worker.condition.notify_all()
+        time.sleep(.10)
+        self.assertEqual([call.args[0] for call in client.request.call_args_list], ['/api/notifications/session'])
+        self.assertFalse(worker.request_check())
+        stream.assert_not_called()
+        self.assertEqual(self.provider.messages, [])
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.ledger.get(JOBS, record['id'], scope)['state'], 'ready')
+        self.assertEqual(self.ledger.get(JOBS, received['id'], scope)['state'], 'received')
+        sid = self.service.new_session()['session_id']
+        local = self.service.send_message(sid, '添加测试事项', 'local-after-mismatch')
+        self.assertEqual(local['status'], 'succeeded')
+        self.assertEqual([event.title for event in self.events()], ['测试事项'])
+
+    def test_old_asynchronous_session_and_callbacks_cannot_change_new_rejection(self):
+        waiting, release = threading.Event(), threading.Event()
+        def request(path, token, body=None):
+            if path != '/api/notifications/session':
+                self.fail(f'Unexpected Worker request: {path}')
+            if token == fixture.CONFIG['remote_token']:
+                waiting.set()
+                release.wait(3)
+            return NotificationContractTests.document()
+        worker, client, stream = self.start(request)
+        self.addCleanup(release.set)
+        self.assertTrue(waiting.wait(1))
+        old = worker.generation
+        worker.configure({**fixture.CONFIG, 'remote_account': 'owner-two', 'remote_token': 'other-synthetic-token'})
+        worker._notification(old, VerifiedAccount('owner-one'))
+        worker._notification(old, True)
+        self.assertFalse(worker.request_check())
+        release.set()
+        self.assertTrue(until(lambda: worker.snapshot().connection == 'mismatch'))
+        for generation in (old, worker.generation):
+            worker._notification(generation, VerifiedAccount('owner-two'))
+            worker._notification(generation, True)
+        self.assertEqual(worker.snapshot().connection, 'mismatch')
+        self.assertFalse(worker.request_check())
+        self.assertEqual(len(client.request.call_args_list), 2)
+        stream.assert_not_called()
+
+    def test_same_account_rotation_uploads_only_previously_verified_receipt(self):
+        verified = self.worker._intake(fixture.job('verified-old','添加测试事项'), fixture.SERVER)
+        unknown = self.worker._intake(fixture.job('unproven-old','添加测试事项'), fixture.SERVER)
+        unknown.pop('verified_scope')
+        for record in (verified, unknown):
+            self.worker._set_receipt(record, {'status': 'ok', 'assistant_message': '已记录'})
+            self.worker._save(fixture.SERVER, record)
+        waiting, release = threading.Event(), threading.Event()
+        def request(path, token, body=None):
+            if path == '/api/notifications/session':
+                waiting.set()
+                release.wait(3)
+                return NotificationContractTests.document()
+            if path == CLAIM_PATH:
+                return {'job': None}
+            return fixture.completion(body, duplicate=True)
+        worker, client, _ = self.start(request, token='new-same-account-token')
+        self.addCleanup(release.set)
+        self.assertTrue(waiting.wait(1))
+        self.assertFalse(worker.request_check())
+        self.assertEqual(len(client.request.call_args_list), 1)
+        release.set()
+        self.assertTrue(until(lambda: self.ledger.get(JOBS, verified['id'], fixture.SERVER)['state'] == 'submitted'))
+        completions = [call.args for call in client.request.call_args_list if call.args[0].endswith('/complete')]
+        self.assertEqual(completions, [('/api/jobs/verified-old/complete', 'new-same-account-token', verified['receipt'].encode())])
+        self.assertEqual(self.ledger.get(JOBS, unknown['id'], fixture.SERVER)['state'], 'ready')
+
+    def test_revocation_during_planning_prevents_calendar_write(self):
+        self.check_revoked_write('planning')
+
+    def test_revocation_after_journal_reservation_prevents_calendar_write(self):
+        self.check_revoked_write('reserved')
+
+    def test_revocation_inside_sqlite_commit_keeps_original_account_receipt(self):
+        self.check_revoked_write('committing')
+
+    def test_claim_returned_after_revocation_is_not_admitted_to_agent(self):
+        entered, resume, revoke = (threading.Event() for _ in range(3))
+        def stream(_credentials, stopped, ready, _wake):
+            ready()
+            return revoke.wait(3) and not stopped.is_set()
+        def request(path, token, body=None):
+            if path == '/api/notifications/session':
+                return (NotificationContractTests.document(user_id='owner-two', wakeup_path='/wakeups/owner-two/version')
+                        if revoke.is_set() else NotificationContractTests.document())
+            self.assertEqual(path, CLAIM_PATH)
+            entered.set()
+            resume.wait(3)
+            return {'job': fixture.job('late-claim', '明天增加测试事项')}
+        worker, client, _ = self.start(request, stream=stream)
+        self.addCleanup(resume.set)
+        self.addCleanup(revoke.set)
+        self.assertTrue(entered.wait(1))
+        revoke.set()
+        self.assertTrue(until(lambda: worker.snapshot().connection == 'mismatch'))
+        resume.set()
+        from desktop_calendar.remote_service import CLAIM_INCIDENT
+        self.assertTrue(until(lambda: bool(self.ledger.all(CLAIM_INCIDENT, fixture.SERVER))))
+        self.assertEqual(self.ledger.all(JOBS, fixture.SERVER), [])
+        self.assertEqual(self.provider.messages, [])
+        self.assertEqual(self.events(), [])
+        self.assertFalse(any(call.args[0].endswith('/complete') for call in client.request.call_args_list))
+
+    def test_late_complete_cannot_mark_original_receipt_submitted(self):
+        row = self.worker._intake(fixture.job('late-complete', '测试事项'), fixture.SERVER)
+        self.worker._set_receipt(row, {'status':'ok', 'assistant_message':'测试回执'})
+        self.worker._save(fixture.SERVER, row)
+        entered, resume, finished = (threading.Event() for _ in range(3))
+        def request(path, token, body=None):
+            if path == '/api/notifications/session':
+                return NotificationContractTests.document()
+            self.assertTrue(path.endswith('/complete'))
+            entered.set()
+            resume.wait(3)
+            return fixture.completion(body)
+        upload = RemoteWorker._upload
+        def observe_upload(*args):
+            try:
+                return upload(*args)
+            finally:
+                finished.set()
+        with patch.object(RemoteWorker, '_upload', new=observe_upload):
+            worker, _, _ = self.start(request)
+            self.addCleanup(resume.set)
+            self.assertTrue(entered.wait(1))
+            worker._notification(worker.generation, ACCOUNT_MISMATCH)
+            resume.set()
+            self.assertTrue(finished.wait(1))
+            self.assertEqual(worker.snapshot().connection, 'mismatch')
+            self.assertEqual(self.ledger.get(JOBS, row['id'], fixture.SERVER), row)
+
+    def check_revoked_write(self, phase):
+        entered, resume, revoke = (threading.Event() for _ in range(3))
+        msg_id = 'change-auth-' + phase
+        message = fixture.job(msg_id, '明天记录测试事项')
+        record_id = fingerprint([fixture.SERVER, msg_id])
+        operation = tool('preview_create', {'title':'测试事项','date':'2026-01-01'})
+        def stream(_credentials, stopped, ready, _wake):
+            ready()
+            return revoke.wait(3) and not stopped.is_set()
+        def request(path, token, body=None):
+            if path == '/api/notifications/session':
+                if revoke.is_set():
+                    return NotificationContractTests.document(user_id='owner-two', wakeup_path='/wakeups/owner-two/version')
+                return NotificationContractTests.document()
+            if path == CLAIM_PATH:
+                return {'job': message}
+            self.fail(f'Unexpected receipt upload: {path}')
+        def block(original):
+            def run(*args, **kwargs):
+                if phase == 'reserved':
+                    result = original(*args, **kwargs)
+                    if args[-1].get('status') != 'executing':
+                        return result
+                entered.set()
+                if not resume.wait(3):
+                    raise RuntimeError('timed out waiting for test authorization result')
+                return result if phase == 'reserved' else original(*args, **kwargs)
+            return run
+        self.provider.replies = [operation]
+        target, name = {'committing': (self.service.gateway.events, 'commit'),
+                        'reserved': (self.service.journal, 'transition'),
+                        'planning': (self.provider, 'complete')}[phase]
+        original = getattr(target, name)
+        with patch.object(target, name, side_effect=block(original)) as blocked:
+            worker, client, _ = self.start(request, stream=stream)
+            try:
+                self.assertTrue(entered.wait(2))
+                revoke.set()
+                self.assertTrue(until(lambda: worker.snapshot().connection == 'mismatch'))
+                resume.set()
+                self.assertTrue(until(lambda: any(
+                    row['id'] == record_id and row['state'] == 'ready' for row in self.ledger.all(JOBS, fixture.SERVER))))
+                row = self.ledger.get(JOBS, record_id, fixture.SERVER)
+                receipt = json.loads(row['receipt'])
+                self.assertFalse(any(call.args[0].endswith('/complete') for call in client.request.call_args_list))
+                self.assertEqual(len(self.events()), int(phase == 'committing'))
+                self.assertEqual(receipt['ok'], phase == 'committing')
+                if phase == 'committing':
+                    self.assertTrue(self.executor(lambda: self.store.repository.receipt(receipt['operation_id'])))
+                else:
+                    self.assertEqual(receipt['error'], 'remote_authorization_changed')
+                self.assertTrue(blocked.called)
+            finally:
+                revoke.set()
+                resume.set()
+                worker.stop()
+                worker.thread.join(3)
 
 
 class WorkerTriggerTests(unittest.TestCase):
@@ -504,7 +799,7 @@ class WorkerTriggerTests(unittest.TestCase):
         worker = RemoteWorker(self.service, self.ledger, client_factory=lambda _url: client,
                               contract=Mock(), notification_factory=MockNotifications, interval=interval,
                               fallback_grace=grace, safety_interval=safety)
-        worker.configure({**fixture.CONFIG, 'remote_safety_check_minutes': minutes})
+        worker.configure({**fixture.BOUND_CONFIG, 'remote_safety_check_minutes': minutes})
         self.addCleanup(lambda: self.stop_worker(worker))
         return worker
 
@@ -601,10 +896,10 @@ class WorkerTriggerTests(unittest.TestCase):
         self.assertEqual(len(self.ledger.all(JOBS, worker.config[2])), 1)
 
         generation = worker.generation
-        worker.configure({**fixture.CONFIG, 'remote_safety_check_minutes': 30})
+        worker.configure({**fixture.BOUND_CONFIG, 'remote_safety_check_minutes': 30})
         self.assertEqual(worker.generation, generation)
         self.assertTrue(until(lambda: len(claims) == 5))
-        worker.configure(fixture.CONFIG)
+        worker.configure(fixture.BOUND_CONFIG)
         time.sleep(0.2)
         self.assertEqual(len(claims), 5)
         worker.configure({'remote_enabled': False})
@@ -660,7 +955,7 @@ class WorkerTriggerTests(unittest.TestCase):
         self.assertIsNone(worker.notifications.generation)
         time.sleep(0.12)
         self.assertEqual(claims, [fixture.CONFIG['remote_token']])
-        worker.configure({**fixture.CONFIG, 'remote_token': 'replacement-synthetic-token'})
+        worker.configure({**fixture.BOUND_CONFIG, 'remote_token': 'replacement-synthetic-token'})
         self.assertTrue(until(lambda: len(claims) == 2))
         worker.notifications.signal()
         self.assertTrue(until(lambda: worker.snapshot().connection == 'live'))
@@ -684,7 +979,6 @@ class WorkerTriggerTests(unittest.TestCase):
         self.assertTrue(until(lambda: worker.snapshot().connection == 'backup'))
 
     def test_firebase_disconnect_and_session_auth_have_distinct_actions(self):
-        from desktop_calendar.remote_notifications import AUTH_REJECTED
         events = []
         contract = Mock()
         contract.notification_session.side_effect = [
@@ -700,7 +994,8 @@ class WorkerTriggerTests(unittest.TestCase):
         listener.configure(1, fixture.URL, fixture.CONFIG['remote_token'])
         try:
             self.assertTrue(until(lambda: AUTH_REJECTED in events))
-            self.assertEqual(events, [True, False, True, False, AUTH_REJECTED])
+            self.assertEqual(events, [VerifiedAccount('owner-one'), True, False,
+                                      VerifiedAccount('owner-one'), True, False, AUTH_REJECTED])
             time.sleep(0.1)
             self.assertEqual(contract.notification_session.call_count, 3)
         finally:
@@ -785,7 +1080,8 @@ class WorkerTriggerTests(unittest.TestCase):
     def test_account_or_host_switch_cannot_upload_old_receipt(self):
         first = {**fixture.CONFIG, 'remote_account': 'first'}
         old_scope = remote_scope(first['remote_url'], first['remote_token'], first['remote_account'])
-        row = self.worker._intake(fixture.job('old', '明天添加测试事项'), old_scope, fixture.URL)
+        row = self.worker._intake(fixture.job('old', '明天添加测试事项'), old_scope)
+        row['verified_scope'] = old_scope
         self.worker._set_receipt(row, {'status': 'ok', 'assistant_message': '原回执'})
         self.worker._save(old_scope, row)
         requests = []
@@ -796,7 +1092,8 @@ class WorkerTriggerTests(unittest.TestCase):
             return {'job': None}
 
         client.request.side_effect = request
-        worker = RemoteWorker(self.service, self.ledger, client_factory=lambda _url: client, interval=0.04)
+        worker = RemoteWorker(self.service, self.ledger, client_factory=lambda _url: client, interval=0.04,
+                              notification_factory=MockNotifications)
         worker.configure({**first, 'remote_account': 'second'})
         self.addCleanup(lambda: self.stop_worker(worker))
         self.assertTrue(until(lambda: bool(requests)))
@@ -805,29 +1102,37 @@ class WorkerTriggerTests(unittest.TestCase):
         self.assertTrue(all(path == CLAIM_PATH for path, _, _ in requests))
         self.assertEqual(self.ledger.get(JOBS, row['id'], old_scope)['state'], 'ready')
 
-    def test_original_b3_token_resumes_saved_receipt_without_rebinding(self):
+    def test_manual_bootstrap_pins_account_and_keeps_unverified_legacy_receipt(self):
         legacy_scope = fingerprint(fixture.URL)
-        config = {**fixture.CONFIG, 'remote_legacy_credential': fingerprint(
-            [fixture.URL, fixture.CONFIG['remote_token']],
-        )}
-        row = self.worker._intake(fixture.job('legacy', '明天添加测试事项'), legacy_scope, fixture.URL)
+        config = {**self.configuration.load(), **fixture.CONFIG}
+        config.pop('remote_legacy_credential')
+        self.configuration.path.write_bytes(self.protection.encrypt(json.dumps(config).encode()))
+        row = self.worker._intake(fixture.job('legacy', '明天添加测试事项'), legacy_scope)
         self.worker._set_receipt(row, {'status': 'ok', 'assistant_message': '原回执'})
         self.worker._save(legacy_scope, row)
         client = Mock()
         client.request.side_effect = lambda path, token, body=None: (
-            {'job': None} if path == CLAIM_PATH else fixture.completion(body, duplicate=True)
-        )
-        worker = RemoteWorker(self.service, self.ledger, client_factory=lambda _url: client, interval=0.04)
-        worker.configure(config)
+            NotificationContractTests.document() if path == '/api/notifications/session' else {'job': None})
+        # Use the real runtime callback to pin and rotate the Worker generation.
+        with patch('calendar_runtime.RemoteWorker', side_effect=lambda service, journal, **kwargs: RemoteWorker(
+                service, self.ledger, **kwargs, client_factory=lambda _url: client, interval=.04,
+                notification_factory=lambda *args: NotificationListener(*args, stream=Mock(return_value=False)))):
+            self.runtime.apply_remote()
+        worker = self.runtime.remote
         self.addCleanup(lambda: self.stop_worker(worker))
-        self.assertTrue(until(lambda: self.ledger.get(JOBS, row['id'], legacy_scope)['state'] == 'submitted'))
-        self.assertEqual(client.request.call_args_list[0].args,
-                         ('/api/jobs/legacy/complete', fixture.CONFIG['remote_token'], row['receipt'].encode()))
+        self.assertTrue(until(lambda: any(call.args[0] == CLAIM_PATH for call in client.request.call_args_list)))
+        self.assertEqual([call.args[0] for call in client.request.call_args_list][:3],
+                         ['/api/notifications/session', '/api/notifications/session', CLAIM_PATH])
+        self.assertEqual(self.configuration.load()['remote_account'], 'owner-one')
+        self.assertEqual(self.ledger.get(JOBS, row['id'], legacy_scope)['state'], 'ready')
+        self.assertFalse(any(call.args[0].endswith('/complete') for call in client.request.call_args_list))
+        self.configuration.save({**self.configuration.load(), 'remote_account': ''})
+        self.assertEqual(self.configuration.load()['remote_account'], 'owner-one')
         self.assertEqual(self.provider.messages, [])
 
     def test_disable_while_agent_busy_keeps_claim_durable_without_starting_remote_turn(self):
         message = fixture.job('stop-before-agent', '明天添加测试事项')
-        scope = remote_scope(fixture.URL, fixture.CONFIG['remote_token'])
+        scope = fixture.SERVER
         claims = []
 
         def request(path, token):

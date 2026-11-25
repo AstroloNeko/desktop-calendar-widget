@@ -2,10 +2,28 @@
 import hashlib
 import json
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 
 OWNER = 'local-owner'  # Derived from the adapter's authentication, never client sender_id.
 SPECIFIC_DELETE_STAGE = 'reviewing_specific'
+_calendar_write_check = ContextVar('calendar_write_check', default=None)
+
+
+@contextmanager
+def calendar_write_guard(check):
+    token = _calendar_write_check.set(check)
+    try:
+        yield
+    finally:
+        _calendar_write_check.reset(token)
+
+
+def require_calendar_write():
+    check = _calendar_write_check.get()
+    if check is not None and not check():
+        fail('微信远控授权已改变，本次未写入日历。', 'remote_authorization_changed')
 
 
 def affirmative_reply(text):

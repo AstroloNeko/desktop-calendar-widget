@@ -63,13 +63,17 @@ def _legacy_result(record, agent_journal, agent_path):
     return '本地结果未知', False
 
 
-def describe_history(records, agent_journal, processing_id):
+def describe_history(records, agent_journal, processing_id, scope):
     agent_path = str(agent_journal.path.resolve())
     history = []
     for record in sorted(records, key=lambda row: row['received_at'], reverse=True):
         state = record.get('state')
         model_unavailable = False
         processed_at = record.get('processed_at', 0)
+        if record.get('verified_scope') != scope:
+            upload = '回执已保留，暂停上传' if state == 'ready' else ''
+            history.append(HistoryRow(record['received_at'], 0, '旧任务缺少账号核验记录', upload, ''))
+            continue
         if state == 'received':
             result = '已接收，等待处理'
         elif state == 'executing':

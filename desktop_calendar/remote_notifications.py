@@ -1,13 +1,14 @@
 """Firebase SSE reader. A notification can only wake the existing queue worker."""
 
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 import json
 import logging
 import threading
 import time
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
-from desktop_calendar.remote_cloud import NotificationSession, firebase_origin
+from desktop_calendar.remote_cloud import AccountMismatch, NotificationSession, firebase_origin, valid_account
 from desktop_calendar.remote_transport import StatusError, Unavailable
 
 
@@ -16,6 +17,12 @@ READ_TIMEOUT = 45
 STABLE_CONNECTION = 30
 MAX_REDIRECTS = 3
 AUTH_REJECTED = 'auth_rejected'
+ACCOUNT_MISMATCH = 'account_mismatch'
+
+
+@dataclass(frozen=True)
+class VerifiedAccount:
+    account_id: str = field(repr=False)
 
 
 def sse_events(chunks):
@@ -208,19 +215,24 @@ class NotificationListener:
                         break
                     try:
                         credentials = self.contract.notification_session(client, token, account)
-                    except StatusError as error:
-                        if error.status in (401, 403):
-                            if not stop.is_set():
-                                self.changed(generation, AUTH_REJECTED)
-                            with self.condition:
-                                if self.active and self.active[-1] is stop:
-                                    self.active = None
-                                    stop.set()
-                            break
-                        raise
+                    except (AccountMismatch, StatusError) as error:
+                        if isinstance(error, StatusError) and error.status not in (401, 403):
+                            raise
+                        if not stop.is_set():
+                            reason = ACCOUNT_MISMATCH if isinstance(error, AccountMismatch) else AUTH_REJECTED
+                            self.changed(generation, reason)
+                        with self.condition:
+                            if self.active and self.active[-1] is stop:
+                                self.active = None
+                            stop.set()
+                        break
                     if (not isinstance(credentials, NotificationSession) or credentials.id_token == token
-                            or token in unquote(credentials.stream_url)):
+                            or token in unquote(credentials.stream_url) or not valid_account(credentials.account_id)):
                         raise ValueError('通知会话格式无效。')
+                    if stop.is_set():
+                        break
+                    if self.changed(generation, VerifiedAccount(credentials.account_id)) is False:
+                        raise Unavailable
                     if not stop.is_set() and self.stream(credentials, stop, ready, wake):
                         delay = self.retry[0]
                         continue

@@ -15,6 +15,8 @@ from desktop_calendar.assistant.calendar_chat_protocol import OWNER, fingerprint
 from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
 from desktop_calendar.assistant.llm_provider import AIConfiguration
 from desktop_calendar.remote_service import JOBS, RemoteWorker, make_receipt, message_time
+from desktop_calendar.remote_cloud import remote_scope
+from desktop_calendar.remote_notifications import VerifiedAccount
 from desktop_calendar.remote_transport import CLAIM_PATH, Unavailable
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from event_commands import EventCommandHistory
@@ -24,7 +26,8 @@ from test_calendar_runtime import EphemeralProtection
 
 URL = 'https://example.invalid'
 CONFIG = dict(remote_enabled=True, remote_url=URL, remote_token='synthetic-worker-token')
-SERVER = fingerprint(URL)
+BOUND_CONFIG = {**CONFIG, 'remote_account': 'owner-one'}
+SERVER = remote_scope(URL, CONFIG['remote_token'], BOUND_CONFIG['remote_account'])
 ARRIVAL = '2025-12-31T23:55:00+08:00'
 
 
@@ -64,12 +67,13 @@ class RemoteServiceTests(unittest.TestCase):
 
     def worker_for_steps(self):
         worker = RemoteWorker(self.service, self.ledger)
-        worker.config = URL, CONFIG['remote_token'], SERVER, ''
+        worker.config = URL, CONFIG['remote_token'], SERVER, BOUND_CONFIG['remote_account']
+        worker._notification(0, VerifiedAccount(BOUND_CONFIG['remote_account']))
         return worker
 
     def process(self, message, replies=()):
         self.provider.replies = list(replies)
-        record = self.worker._intake(message, SERVER, URL)
+        record = self.worker._intake(message, SERVER)
         self.worker._handle(record, self.client, CONFIG['remote_token'], SERVER, 0)
         return self.ledger.get(JOBS, record['id'], SERVER)
 
@@ -227,13 +231,13 @@ class RemoteServiceTests(unittest.TestCase):
         self.assertIn('通知', restarted.notice)
 
     def test_crash_after_intake_can_enter_agent_on_restart(self):
-        record = self.worker._intake(job('received', '添加待办'), SERVER, URL)
+        record = self.worker._intake(job('received', '添加待办'), SERVER)
         self.provider.replies = [tool('preview_create', dict(title='待办', date='2026-01-01'))]
         self.assertTrue(self.worker_for_steps()._handle(record, self.client, CONFIG['remote_token'], SERVER, 0))
         self.assertEqual(len(self.events()), 1)
 
     def test_unknown_execution_is_not_replayed_on_restart(self):
-        record = self.worker._intake(job('interrupted', '添加待办'), SERVER, URL)
+        record = self.worker._intake(job('interrupted', '添加待办'), SERVER)
         record.update(state='executing', session_id=self.service.new_session(record['owner'])['session_id'])
         self.ledger.put(JOBS, record['id'], SERVER, record)
         self.assertTrue(self.worker_for_steps()._handle(record, self.client, CONFIG['remote_token'], SERVER, 0))
@@ -246,7 +250,7 @@ class RemoteServiceTests(unittest.TestCase):
             {'fields': {'title': 'WB', 'date': '2026-01-01', 'end_date': '2026-01-02'}},
         ]})
         self.process(job('plan', '明后天做WB'), [plan])
-        confirm = self.worker._intake(job('confirm', '可以'), SERVER, URL)
+        confirm = self.worker._intake(job('confirm', '可以'), SERVER)
         original_write = self.service.journal.put
 
         def interrupt(kind, identifier, owner, payload):
@@ -278,7 +282,7 @@ class RemoteServiceTests(unittest.TestCase):
         self.assertEqual(len(self.provider.messages), 1)
 
     def test_ready_without_commit_is_never_resumed_by_remote_recovery(self):
-        record = self.worker._intake(job('ready-operation', '添加待办'), SERVER, URL)
+        record = self.worker._intake(job('ready-operation', '添加待办'), SERVER)
         self.provider.replies = [tool('preview_create', dict(title='待办', date='2026-01-01'))]
         with patch.object(self.service.gateway, 'execute', side_effect=OSError('before owner-thread dispatch')), \
                 patch.object(self.service, 'recover_message', side_effect=OSError('simulated interruption')):
@@ -311,12 +315,14 @@ class RemoteServiceTests(unittest.TestCase):
 
         client = Mock()
         client.request.side_effect = request
-        worker = RemoteWorker(self.service, self.ledger, client_factory=lambda _url: client, interval=0.02)
+        from test_remote_notifications import MockNotifications
+        worker = RemoteWorker(self.service, self.ledger, client_factory=lambda _url: client, interval=0.02,
+                              fallback_grace=0, notification_factory=MockNotifications)
         worker.configure({'remote_enabled': False})
         self.assertIsNone(worker.thread)
-        worker.configure(CONFIG)
+        worker.configure(BOUND_CONFIG)
         thread = worker.thread
-        worker.configure(CONFIG)
+        worker.configure(BOUND_CONFIG)
         self.assertIs(worker.thread, thread)
         try:
             self.assertTrue(claim_entered.wait(3))

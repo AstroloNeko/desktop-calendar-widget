@@ -883,6 +883,10 @@ class AISettings(tk.Toplevel):
         if self.tabs.select() == str(self.remote_tab):
             worker = self.runtime.core.remote
             snapshot = worker.snapshot() if worker else RemoteStatus('unavailable' if self.old['remote_enabled'] else 'disabled')
+            if snapshot.account_verified and not self.old['remote_account']:
+                config = self.configuration.load()
+                if all(config[key] == self.old[key] for key in ('remote_url', 'remote_token')):
+                    self.old['remote_account'] = config['remote_account']
             self.refresh_history(snapshot)
             self.render_remote_status(snapshot)
 
@@ -935,8 +939,8 @@ class AISettings(tk.Toplevel):
 
     def render_remote_status(self, snapshot):
         state = snapshot.connection
-        invalid = state == 'invalid'
-        available = state not in ('disabled', 'invalid')
+        invalid = state in ('invalid', 'mismatch')
+        available = not invalid and state not in ('disabled', 'verifying')
         busy = self.binding_busy or self.pending_binding is not None
         can_check = available and not busy and self.runtime.core.remote and snapshot.check_result != 'checking'
         self.manual_check_button.configure(state='normal' if can_check else 'disabled')
@@ -957,7 +961,7 @@ class AISettings(tk.Toplevel):
         if state == 'live' and snapshot.request_failed:
             detail += ' 任务接口暂不可用，正在重试。'
         self.connection_detail.set(detail)
-        self.binding_state.set('已失效' if invalid else '已绑定到本机' if self.old['remote_account'] else
+        self.binding_state.set('账号不符' if state == 'mismatch' else '已失效' if invalid else '已绑定到本机' if self.old['remote_account'] else
                                '已配置手动连接' if self.old['remote_token'] else '尚未绑定')
         checked_at = snapshot.last_checked_at
         self.last_check_time.set(datetime.fromtimestamp(checked_at).strftime('%m-%d %H:%M:%S')
@@ -1195,8 +1199,7 @@ class AISettings(tk.Toplevel):
             if not same_url or config['remote_token'] != self.old['remote_token']:
                 config['remote_account'] = ''
             config['timeout'], config['port'] = int(config['timeout']), int(config['port'])
-            self.configuration.save(config)
-            self.runtime.core.apply_remote()
+            self.runtime.core.save_settings(config)
             self.runtime.apply_http()
         except (OSError, ValueError) as error:
             self.status.set(str(error))

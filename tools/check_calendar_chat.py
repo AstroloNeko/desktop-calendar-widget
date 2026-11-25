@@ -160,6 +160,8 @@ def main():
     parser.add_argument('--report', type=Path)
     parser.add_argument('--product-exe', type=Path)
     parser.add_argument('--sqlite', action='store_true', help='Use production SQLite startup factory in a temporary profile')
+    parser.add_argument('--themes', nargs='+', choices=('modern', 'aero', 'paper', 'frutiger'),
+                        default=('modern', 'aero', 'paper', 'frutiger'))
     args = parser.parse_args()
     if args.product_exe:
         result = check_product(args.product_exe)
@@ -190,7 +192,7 @@ def main():
                 open_ai_settings(app)
                 assert app._active_modal_window() is direct
                 direct.close()
-                for theme in ('modern', 'aero', 'paper', 'frutiger'):
+                for theme in args.themes:
                     app.set_theme(theme)
                     for view in ('compact', 'global'):
                         (app.enter_global_view if view == 'global' else app.return_to_compact_view)()
@@ -314,6 +316,16 @@ def main():
                                 assert settings.check_result.get() == '本次检查失败'
                                 assert settings.last_check_time.get() == last_success
                                 assert '已创建 1 项' in settings.latest_result.get()
+                                worker.snapshot.return_value = RemoteStatus('verifying', history_revision=10)
+                                settings.refresh_remote_panel()
+                                assert settings.remote_status.get() == '正在核验绑定账号'
+                                assert settings.manual_check_button.cget('state') == 'disabled'
+                                worker.snapshot.return_value = RemoteStatus('mismatch', history_revision=10)
+                                settings.refresh_remote_panel()
+                                assert settings.binding_state.get() == '账号不符'
+                                assert settings.manual_check_button.cget('state') == 'disabled'
+                                assert settings.rebind_button.cget('state') == 'normal'
+                                assert settings.copy_rebinding_control.winfo_manager()
                                 worker.snapshot.return_value = RemoteStatus('invalid', history_revision=10)
                                 settings.refresh_remote_panel()
                                 assert '已失效' in settings.remote_status.get()

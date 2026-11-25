@@ -11,11 +11,13 @@ import time
 from typing import Optional
 
 from desktop_calendar.assistant.calendar_chat_intent import requested_fields
-from desktop_calendar.assistant.calendar_chat_protocol import ChatError, event_line, fingerprint, receipt_message, wechat_delete_review
+from desktop_calendar.assistant.calendar_chat_protocol import (
+    ChatError, calendar_write_guard, event_line, fingerprint, receipt_message, wechat_delete_review,
+)
 from desktop_calendar.assistant.operation_engine import event_action
-from desktop_calendar.remote_cloud import remote_scope, valid_account
+from desktop_calendar.remote_cloud import NOTIFICATION_CONTRACT, remote_scope, valid_account
 from desktop_calendar.remote_history import describe_response
-from desktop_calendar.remote_notifications import AUTH_REJECTED, NotificationListener
+from desktop_calendar.remote_notifications import ACCOUNT_MISMATCH, AUTH_REJECTED, NotificationListener, VerifiedAccount
 from desktop_calendar.remote_transport import (
     CLAIM_PATH, INTERVAL, SAFETY_CHECK_MINUTES, Client, StatusError, Unavailable, normalize_url, transient, valid_token,
 )
@@ -45,6 +47,7 @@ class RemoteStatus:
     completion: Optional[RemoteCompletion] = None
     last_checked_at: Optional[float] = None
     check_result: str = ''
+    account_verified: bool = False
 
 
 def test_connection(url):
@@ -146,7 +149,7 @@ class RemoteWorker:
 
     def __init__(self, service, journal, *, client_factory=Client, interval=INTERVAL, contract=None,
                  notification_factory=NotificationListener, safety_interval=None,
-                 fallback_grace=SSE_FALLBACK_GRACE, on_status_change=None):
+                 fallback_grace=SSE_FALLBACK_GRACE, on_status_change=None, pin_account=None):
         self.service, self.journal = service, journal
         self.agent_journal = str(service.journal.path.resolve())
         self.client_factory, self.interval = client_factory, interval
@@ -158,7 +161,8 @@ class RemoteWorker:
         self.notification_online = False
         self.had_live_connection = False
         self.offline_since = None
-        self.auth_rejected = False
+        self.auth_error = None
+        self.account_verified = False
         self.last_cloud_ok = None
         self.cloud_unavailable = False
         self.processing_id = ''
@@ -174,7 +178,8 @@ class RemoteWorker:
         self.notification_status = ''
         self.safety_interval = None
         self.safety_interval_override, self.fallback_grace = safety_interval, fallback_grace
-        self.notifications = notification_factory(contract, client_factory, self._notification) if contract else None
+        self.pin_account = pin_account
+        self.notifications = notification_factory(contract or NOTIFICATION_CONTRACT, client_factory, self._notification)
 
     def configure(self, config):
         active = None
@@ -203,11 +208,12 @@ class RemoteWorker:
                 return
             self.config = active
             self.generation += 1
-            self.status = '等待首次领取，Worker 身份待验证。' if active else '远程服务已关闭。'
+            self.status = '正在核验绑定账号。' if active else '远程服务已关闭。'
             self.notice = ''
             self.notification_online = False
             self.had_live_connection = False
-            self.auth_rejected = False
+            self.auth_error = None
+            self.account_verified = False
             self.last_cloud_ok = None
             self.cloud_unavailable = False
             self.processing_id = ''
@@ -238,6 +244,7 @@ class RemoteWorker:
         with self.condition:
             self.stopped = True
             self.config = None
+            self.account_verified = False
             self.check_result = ''
             self.status = '远程服务已停止。'
             self.notification_status = ''
@@ -246,17 +253,22 @@ class RemoteWorker:
             self.condition.notify_all()
             self._notify_status_change()
 
+    def _configured(self, generation):
+        return (not self.stopped and self.generation == generation and self.config is not None
+                and self.auth_error is None)
+
     def _current(self, generation):
         with self.condition:
-            return (not self.stopped and self.generation == generation and self.config is not None
-                    and not self.auth_rejected)
+            return self._configured(generation) and self.account_verified
 
     def snapshot(self):
         with self.condition:
             if self.stopped or self.config is None:
                 connection = 'disabled'
-            elif self.auth_rejected:
-                connection = 'invalid'
+            elif self.auth_error:
+                connection = 'mismatch' if self.auth_error == ACCOUNT_MISMATCH else 'invalid'
+            elif not self.account_verified:
+                connection = 'verifying'
             elif self.notification_online:
                 connection = 'live'
             elif self.cloud_unavailable:
@@ -270,7 +282,7 @@ class RemoteWorker:
             else:
                 connection = 'reconnecting' if self.had_live_connection else 'connecting'
             return RemoteStatus(connection, self.processing_id, self.history_revision, self.cloud_unavailable,
-                                self.completion, self.last_checked_at, self.check_result)
+                                self.completion, self.last_checked_at, self.check_result, self.account_verified)
 
     def _notify_status_change(self):
         if self.on_status_change is None:
@@ -288,14 +300,16 @@ class RemoteWorker:
             self.completion = RemoteCompletion(when, result, record.get('model_unavailable') is True)
             self._notify_status_change()
 
-    def _reject_authentication(self, generation, *, check_failed=False):
+    def _reject_authentication(self, generation, reason=AUTH_REJECTED, *, check_failed=False):
         with self.condition:
-            if self._current(generation):
-                self.auth_rejected = True
+            if self._configured(generation):
+                self.auth_error = reason
+                self.account_verified = False
                 self.notification_online = False
                 if check_failed or self.check_result == 'checking':
                     self.check_result = 'failed'
-                self.status = '远程服务绑定已失效。'
+                self.status = ('服务器账号与本机绑定不符。' if reason == ACCOUNT_MISMATCH
+                               else '远程服务绑定已失效。')
                 self.notification_status = ''
                 if self.notifications:
                     self.notifications.configure(generation)
@@ -322,10 +336,33 @@ class RemoteWorker:
                 if notice is not None:
                     self.notice = notice
 
+    def _verify_account(self, generation, account):
+        if not valid_account(account):
+            return False
+        with self.condition:
+            if not self._configured(generation):
+                return False
+            url, token, _, expected = self.config
+            if expected:
+                if expected != account:
+                    self._reject_authentication(generation, ACCOUNT_MISMATCH)
+                    return False
+                if not self.account_verified:
+                    self.account_verified = True
+                    self.condition.notify_all()
+                    self._notify_status_change()
+                return True
+        if self.pin_account:
+            self.pin_account(generation, url, token, account)
+        # An unbound manual credential is pinned before starting a fresh generation.
+        return False
+
     def _notification(self, generation, online):
-        if online == AUTH_REJECTED:
-            self._reject_authentication(generation)
+        if online in (AUTH_REJECTED, ACCOUNT_MISMATCH):
+            self._reject_authentication(generation, online)
             return
+        if isinstance(online, VerifiedAccount):
+            return self._verify_account(generation, online.account_id)
         with self.condition:
             if not self._current(generation):
                 return
@@ -373,13 +410,17 @@ class RemoteWorker:
             idle = checking_queue = False
             try:
                 if generation != previous:
+                    if unrecorded:
+                        self._claim_incident(unrecorded[1], previous)
+                        unrecorded = None
                     client = self.client_factory(url)
                     rows = self.journal.all(JOBS, server)
                     with self.condition:
                         if self._current(generation):
-                            self._remember_completion(max(rows, key=lambda row: row.get('processed_at', 0), default={}))
+                            verified = (row for row in rows if row.get('verified_scope') == server)
+                            self._remember_completion(max(verified, key=lambda row: row.get('processed_at', 0), default={}))
                     backlog = deque(row for row in sorted(rows, key=lambda row: row['received_at'])
-                                    if row['state'] != 'submitted')
+                                    if row['state'] != 'submitted' and row.get('verified_scope') == server)
                     claim_uncertain = False
                     previous = generation
                     try:
@@ -389,11 +430,12 @@ class RemoteWorker:
                     else:
                         self._publish(generation, notice=f"上次领取待核查（UTC {incident['at']}），请检查云端 processing。")
                 if unrecorded:
-                    job, original_server, original_url = unrecorded
-                    row = self._intake(job, original_server, original_url)
-                    unrecorded = None
-                    if original_server == server:
-                        backlog.append(row)
+                    job, original_server = unrecorded
+                    with self.condition:
+                        if not self._current(generation):
+                            continue
+                        backlog.append(self._intake(job, original_server))
+                        unrecorded = None
                 if backlog:
                     if self._handle_active(backlog[0], client, token, server, generation):
                         backlog.popleft()
@@ -408,6 +450,8 @@ class RemoteWorker:
                         checking_queue = False
                     if self._current(generation):
                         self.journal.check_capacity()
+                        if not self._current(generation):
+                            continue
                         checking_queue = True
                         try:
                             response = client.request(CLAIM_PATH, token)
@@ -424,15 +468,20 @@ class RemoteWorker:
                             if claim_uncertain:
                                 self._claim_incident(server, generation)
                             raise
-                        idle = job is None
-                        self._cloud_status(generation, True, check_result='empty' if idle else 'claimed',
-                                           checked_at=claim_checked_at(response, received_at))
-                        checking_queue = False
-                        if job is not None:
-                            # Keep the decoded job in memory until durable intake succeeds.
-                            unrecorded = (job, server, url)
-                            backlog.append(self._intake(job, server, url))
-                            unrecorded = None
+                        with self.condition:
+                            if not self._current(generation):
+                                if job is not None:
+                                    self._claim_incident(server, generation)
+                                continue
+                            idle = job is None
+                            self._cloud_status(generation, True, check_result='empty' if idle else 'claimed',
+                                               checked_at=claim_checked_at(response, received_at))
+                            checking_queue = False
+                            if job is not None:
+                                # Keep the decoded job until intake succeeds for this generation.
+                                unrecorded = (job, server)
+                                backlog.append(self._intake(job, server))
+                                unrecorded = None
                         self._publish(generation, 'Worker 已认证，等待消息。' if job is None else '已领取微信消息。')
                         if backlog and self._handle_active(backlog[0], client, token, server, generation):
                             backlog.popleft()
@@ -465,7 +514,7 @@ class RemoteWorker:
     def _identified(job):
         return isinstance(job, dict) and isinstance(job.get('msg_id'), str) and MSG_ID.fullmatch(job['msg_id'])
 
-    def _intake(self, job, server, url):
+    def _intake(self, job, server):
         msg_id = job['msg_id']
         identifier = fingerprint([server, msg_id])
         try:
@@ -475,12 +524,13 @@ class RemoteWorker:
                 raise
         record = dict(id=identifier, msg_id=msg_id, request_id='wechat-' + identifier,
                       state='received', received_at=time.time(), agent_journal=self.agent_journal)
+        if self.account_verified and self.config and self.config[2] == server:
+            record['verified_scope'] = server
         try:
             openid, text = job['openid'], job['text']
             if not isinstance(openid, str) or not 1 <= len(openid) <= 256 or not isinstance(text, str) or not 1 <= len(text.strip()) <= 4000:
                 raise ValueError
-            principal = url if server == fingerprint(url) else server
-            record.update(owner='wechat-' + fingerprint([principal, openid]), text=text,
+            record.update(owner='wechat-verified-' + fingerprint([server, openid]), text=text,
                           reference_now=message_time(job).isoformat())
         except (ValueError, KeyError):
             self._set_receipt(record, dict(status='failed', error_code='invalid_job', error_message='微信消息格式或发送时间无效。'))
@@ -491,7 +541,7 @@ class RemoteWorker:
         self.journal.put(JOBS, record['id'], server, record)
         with self.condition:
             self.history_revision += 1
-            if self.config and self.config[2] == server:
+            if self.config and self.config[2] == server and record.get('verified_scope') == server:
                 self._remember_completion(record)
 
     def _handle_active(self, record, client, token, server, generation):
@@ -518,6 +568,9 @@ class RemoteWorker:
             return False
         # Read the durable state again if a previous iteration failed to save.
         record = self.journal.get(JOBS, record['id'], server)
+        if record.get('verified_scope') != server:
+            self._publish(generation, notice='旧任务缺少账号核验记录，已保留本地台账。')
+            return True
         state = record['state']
         if state == 'received':
             if record['agent_journal'] != self.agent_journal:
@@ -541,10 +594,11 @@ class RemoteWorker:
                     self._save(server, record)
                     return False
                 try:
-                    response = self.service.send_message(
-                        record['session_id'], record['text'], record['request_id'], owner, 'wechat',
-                        reference_now=datetime.fromisoformat(record['reference_now']),
-                    )
+                    with calendar_write_guard(lambda: self._current(generation)):
+                        response = self.service.send_message(
+                            record['session_id'], record['text'], record['request_id'], owner, 'wechat',
+                            reference_now=datetime.fromisoformat(record['reference_now']),
+                        )
                 except ChatError as error:
                     if error.code in ('service_stopped', 'service_unavailable'):
                         raise
@@ -569,6 +623,8 @@ class RemoteWorker:
 
     def _upload(self, record, client, token, server, generation):
         path = '/api/jobs/' + record['msg_id'] + '/complete'
+        if record.get('verified_scope') != server or not self._current(generation):
+            return False
         try:
             result = client.request(path, token, record['receipt'].encode('utf-8'))
         except StatusError as error:
@@ -587,10 +643,13 @@ class RemoteWorker:
                 or result.get('operation_id') != receipt['operation_id']):
             self._publish(generation, notice='云端回执与本地记录不符，已保留原回执。')
             return True
-        self._cloud_status(generation, True)
-        notify = result.get('notify_status')
-        record.update(state='submitted', notify_status=notify if notify in ('sent', 'failed', 'pending', 'skipped') else 'unknown')
-        self._save(server, record)
+        with self.condition:
+            if not self._current(generation):
+                return False
+            self._cloud_status(generation, True)
+            notify = result.get('notify_status')
+            record.update(state='submitted', notify_status=notify if notify in ('sent', 'failed', 'pending', 'skipped') else 'unknown')
+            self._save(server, record)
         if notify != 'sent':
             self._publish(generation, notice='回执已保存，微信通知未确认送达。')
         self._publish(generation, 'Worker 已认证，回执已提交。')

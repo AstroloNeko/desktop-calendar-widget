@@ -4,6 +4,7 @@ Importing this module creates no root, thread, Win32 handle, file or server.
 Production credentials default to DPAPI; alternative protectors must be explicit.
 """
 from copy import deepcopy
+from contextlib import nullcontext
 from pathlib import Path
 import sqlite3
 import time
@@ -97,11 +98,43 @@ class CalendarRuntime:
             except sqlite3.Error:
                 raise ChatError('service_unavailable', '远程服务台账暂不可用，请检查本机配置目录。') from None
             self.remote = RemoteWorker(self.service, ledger, contract=self.remote_contract,
-                                       on_status_change=self.on_remote_status_change)
+                                       on_status_change=self.on_remote_status_change, pin_account=self._pin_remote_account)
         if self.remote:
             self.remote.configure(config)
         if self.on_remote_status_change:
             self.on_remote_status_change()
+
+    def save_settings(self, config):
+        # The desktop settings write and the Worker generation change share a boundary.
+        with self.remote.condition if self.remote else nullcontext():
+            if self.state != 'running' and config.get('remote_enabled'):
+                raise ChatError('service_stopped', '运行时已停止。')
+            previous = self.configuration.load()
+            if (not config.get('remote_account') and config.get('remote_token') and previous['remote_account']
+                    and config.get('remote_url') and previous['remote_url']
+                    and normalize_url(config['remote_url']) == normalize_url(previous['remote_url'])):
+                config = {**config, 'remote_account': previous['remote_account']}
+            self.configuration.save(config)
+            if self.state == 'running':
+                try:
+                    self.apply_remote()
+                except Exception:
+                    if self.remote:
+                        self.remote.configure({'remote_enabled': False})
+                    raise
+
+    def _pin_remote_account(self, generation, url, token, account):
+        def persist():
+            worker = self.remote
+            with worker.condition:
+                if not worker._configured(generation) or worker.config[:2] != (url, token) or worker.config[3]:
+                    return
+                config = self.configuration.load()
+                if (not config['remote_enabled'] or config['remote_account'] or config['remote_token'] != token
+                        or not config['remote_url'] or normalize_url(config['remote_url']) != url):
+                    return
+                self.save_settings({**config, 'remote_account': account})
+        self.dispatch(persist)
 
     def remote_tray_status(self):
         config = self.remote_tray_config
@@ -115,13 +148,13 @@ class CalendarRuntime:
 
     def recent_remote_history(self, config, processing_id=''):
         url, token = config.get('remote_url'), config.get('remote_token')
-        if not url or not valid_token(token):
+        if not url or not valid_token(token) or not config.get('remote_account'):
             return ()
         scope = remote_scope(normalize_url(url), token, config.get('remote_account', ''),
                              config.get('remote_legacy_credential', ''))
         records = ChatJournal.read_recent(self.configuration.folder / 'wechat-jobs.sqlite3',
                                           self.configuration.protector, JOBS, scope, 20, time_field='received_at')
-        return describe_history(records, self.journal, processing_id)
+        return describe_history(records, self.journal, processing_id, scope)
 
     def save_remote_binding(self, url, binding):
         if not isinstance(binding, Binding):
@@ -147,13 +180,8 @@ class CalendarRuntime:
         return self.configuration.load()
 
     def _save_remote_disabled(self, config):
-        self.configuration.save(config)
-        self.remote_tray_config = RemoteTrayConfig.from_settings(config)
-        if self.remote:
-            self.remote.configure(config)
-        if self.on_remote_status_change:
-            self.on_remote_status_change()
-        return config
+        self.save_settings(config)
+        return self.configuration.load()
 
 
 class _OwnedService:
