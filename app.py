@@ -73,6 +73,7 @@ from win_integration import (
     is_autostart_enabled,
     is_foreground_process,
     is_window_topmost,
+    make_app_window,
     make_frameless_app_window,
     make_tool_window,
     raise_for_interaction,
@@ -3035,6 +3036,7 @@ class UpcomingDialog(tk.Toplevel):
                 widget.bind("<Button-1>", lambda _event, event=item: self._edit(event))
 
         self.bind("<Escape>", lambda _event: self.close())
+        self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
         center_toplevel(self, master, 360, 450, y_offset=40)
         self.after_idle(lambda: self.master_app.present_overlay(self))
@@ -3066,7 +3068,7 @@ class UpdateProgressDialog(tk.Toplevel):
         self.progress.start(12)
         self.update_idletasks()
         center_toplevel(self, master, 340, 138, y_offset=90)
-        self.after_idle(lambda: master.present_overlay(self))
+        self.after_idle(lambda: master.present_overlay(self, show_in_taskbar=False))
 
     def set_status(self, status: str) -> None:
         if self.winfo_exists():
@@ -6346,7 +6348,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             send_to_desktop(self)
         self.routine_editor = RoutineEditor(self, item)
 
-    def present_overlay(self, window: tk.Toplevel) -> None:
+    def present_overlay(self, window: tk.Toplevel, *, show_in_taskbar: bool = True) -> None:
         if not window.winfo_exists():
             return
         self._register_overlay(window)
@@ -6365,7 +6367,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self._suspend_main_topmost()
         if self.view_mode == "compact":
             send_to_desktop(self)
-        make_tool_window(window)
+        if show_in_taskbar:
+            make_app_window(window)
+        else:
+            make_tool_window(window)
         window.attributes("-topmost", True)
         window.lift()
         bring_to_front(window)
@@ -6381,10 +6386,13 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             set_window_topmost(parent, False)
         except (AttributeError, tk.TclError):
             pass
-        window.transient(parent)
-        make_tool_window(window)
+        # On Windows, even reapplying the same transient parent can recreate
+        # Tk's native wrapper and replace the existing taskbar entry.
+        if str(window.transient()) != str(parent):
+            window.transient(parent)
         set_window_owner(window, parent)
         set_window_topmost(window, False)
+        make_app_window(window)
         window.deiconify()
         window.lift()
         raise_for_interaction(window)
@@ -7385,7 +7393,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         y = area.bottom - self.dpi.px(247) - offset
         x, y = clamp_to_work_area(x, y, self.dpi.px(350), self.dpi.px(190))
         popup.geometry(geometry_at(350, 190, x, y))
-        self.present_overlay(popup)
+        self.present_overlay(popup, show_in_taskbar=False)
         self.notification_windows.append(popup)
         popup.bind("<Destroy>", lambda _event, window=popup: self._forget_notification(window), add="+")
         popup.after(90000, lambda: popup.destroy() if popup.winfo_exists() else None)
@@ -7438,7 +7446,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         y = area.bottom - self.dpi.px(225) - offset
         x, y = clamp_to_work_area(x, y, self.dpi.px(340), self.dpi.px(168))
         popup.geometry(geometry_at(340, 168, x, y))
-        self.present_overlay(popup)
+        self.present_overlay(popup, show_in_taskbar=False)
         self.notification_windows.append(popup)
         popup.bind("<Destroy>", lambda _event, window=popup: self._forget_notification(window), add="+")
         popup.after(90000, lambda: popup.destroy() if popup.winfo_exists() else None)

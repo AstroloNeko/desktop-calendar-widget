@@ -3,7 +3,7 @@ from ctypes import wintypes
 import inspect
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from app import CalendarApp, ThemeButton, Tooltip
 from desktop_calendar.global_view.global_header import GlobalHeader, HEADER_HEIGHT, header_layout
@@ -266,6 +266,35 @@ class FramelessNativeTests(unittest.TestCase):
         with patch.object(ctypes, "windll", SimpleNamespace(user32=user), create=True), patch.object(native, "IS_WINDOWS", True):
             native.window_handle(widget, refresh=False)
         widget.update_idletasks.assert_not_called()
+
+
+class DialogTaskbarTests(unittest.TestCase):
+    def test_native_taskbar_style_preserves_other_flags_and_does_not_remap_twice(self):
+        hwnd = 0x200123456789
+        widget = SimpleNamespace(withdraw=Mock(), deiconify=Mock())
+        user32 = SimpleNamespace(
+            GetWindowLongPtrW=Mock(side_effect=[0x80088, 0xC0008]),
+            GetWindowLongW=Mock(), SetWindowLongW=Mock(), SetWindowLongPtrW=Mock(),
+            SetWindowPos=Mock(), IsWindowVisible=Mock(return_value=True),
+        )
+        calls = Mock()
+        calls.attach_mock(widget.withdraw, "withdraw")
+        calls.attach_mock(widget.deiconify, "deiconify")
+        for name in ("SetWindowLongPtrW", "SetWindowPos"):
+            calls.attach_mock(getattr(user32, name), name)
+        with (
+            patch.object(native, "IS_WINDOWS", True),
+            patch.object(native.ctypes, "windll", SimpleNamespace(user32=user32), create=True),
+            patch.object(native, "window_handle", return_value=hwnd),
+            patch.object(native, "_prefer_rounded_corners"),
+        ):
+            native.make_app_window(widget)
+            native.make_app_window(widget)
+
+        self.assertEqual(calls.mock_calls, [call.withdraw(), call.SetWindowLongPtrW(hwnd, -20, 0xC0008),
+                                            call.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x37), call.deiconify()])
+        self.assertEqual(user32.GetWindowLongPtrW.argtypes[0], wintypes.HWND)
+        self.assertEqual(user32.SetWindowLongPtrW.argtypes[0], wintypes.HWND)
 
 
 class NativeMoveTests(unittest.TestCase):

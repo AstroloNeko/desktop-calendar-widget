@@ -116,16 +116,20 @@ def make_tool_window(widget) -> None:
     set_long(hwnd, index, style)
     flags = 0x0001 | 0x0002 | 0x0004 | 0x0020  # NOSIZE | NOMOVE | NOZORDER | FRAMECHANGED
     user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags)
+    _prefer_rounded_corners(hwnd)
+
+
+def _prefer_rounded_corners(hwnd: int) -> None:
     try:
         # Windows 11 rounded corners; harmlessly ignored on older Windows.
         preference = ctypes.c_int(2)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(wintypes.HWND(hwnd), 33, ctypes.byref(preference), ctypes.sizeof(preference))
     except (AttributeError, OSError):
         pass
 
 
 def make_app_window(widget) -> None:
-    """Restore normal taskbar/window chrome after leaving the compact tool window."""
+    """Expose a dialog in the Windows taskbar without changing its owner or frame."""
     if not IS_WINDOWS:
         return
     hwnd = window_handle(widget)
@@ -134,14 +138,33 @@ def make_app_window(widget) -> None:
     user32 = ctypes.windll.user32
     get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
     set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+    get_long.argtypes = [wintypes.HWND, ctypes.c_int]
     get_long.restype = ctypes.c_ssize_t
+    set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
     set_long.restype = ctypes.c_ssize_t
+    position = user32.SetWindowPos
+    position.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                         ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    position.restype = wintypes.BOOL
     index = -20  # GWL_EXSTYLE
     style = get_long(hwnd, index)
-    style = (style & ~0x00000080) | 0x00040000  # no TOOLWINDOW, add APPWINDOW
-    set_long(hwnd, index, style)
-    flags = 0x0001 | 0x0002 | 0x0004 | 0x0020  # NOSIZE | NOMOVE | NOZORDER | FRAMECHANGED
-    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags)
+    new_style = (style & ~0x80) | 0x40000  # no TOOLWINDOW, add APPWINDOW
+    if new_style != style:
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        visible = user32.IsWindowVisible(hwnd)
+        # Tk has already mapped some dialogs. Give Explorer a visibility
+        # transition through Tk itself: synchronous ShowWindow from an idle
+        # callback can reenter Tk with an invalid Python thread state.
+        if visible:
+            widget.withdraw()
+        try:
+            set_long(hwnd, index, new_style)
+            position(hwnd, None, 0, 0, 0, 0, 0x37)  # FRAMECHANGED, no move/size/Z-order/activation
+        finally:
+            if visible:
+                widget.deiconify()
+    _prefer_rounded_corners(hwnd)
 
 
 def make_frameless_app_window(widget) -> None:

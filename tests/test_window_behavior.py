@@ -473,6 +473,55 @@ class WindowBehaviorTests(unittest.TestCase):
 
         self.assertEqual(actions, [("register", "detail"), ("lift", "editor"), ("raise", "editor")])
 
+    def test_present_modal_adds_taskbar_entry_without_detaching_owner(self) -> None:
+        calls = []
+        parent = object()
+        current_owner = None
+
+        def transient(owner=None):
+            nonlocal current_owner
+            if owner is not None:
+                current_owner = owner
+                calls.append(("transient", owner))
+            return current_owner
+
+        window = SimpleNamespace(
+            winfo_exists=lambda: True,
+            transient=transient,
+            deiconify=lambda: calls.append("map"),
+            lift=lambda: calls.append("lift"),
+            focus_force=lambda: calls.append("focus"),
+        )
+        app = SimpleNamespace(
+            _register_overlay=lambda _window: None,
+            _enter_modal=lambda _window: calls.append("enter modal"),
+            _suspend_main_topmost=lambda: None,
+        )
+        with (
+            patch("app.set_window_topmost"),
+            patch("app.set_window_owner", side_effect=lambda child, owner: calls.append(("owner", child, owner))),
+            patch("app.make_app_window", side_effect=lambda child: calls.append(("taskbar", child))),
+            patch("app.raise_for_interaction"),
+        ):
+            CalendarApp.present_modal(app, window, parent)
+            CalendarApp.present_modal(app, window, parent)
+
+        self.assertEqual(calls, ["enter modal", ("transient", parent), ("owner", window, parent),
+                                 ("taskbar", window), "map", "lift", "focus",
+                                 "enter modal", ("owner", window, parent),
+                                 ("taskbar", window), "map", "lift", "focus"])
+
+    def test_persistent_overlays_use_taskbar_but_transient_notifications_do_not(self) -> None:
+        app = SimpleNamespace(view_mode="global", _register_overlay=lambda _window: None,
+                              grab_current=lambda: None, _suspend_main_topmost=lambda: None)
+        detail = SimpleNamespace(winfo_exists=lambda: True, attributes=lambda *_args: None, lift=lambda: None)
+        notification = SimpleNamespace(**vars(detail))
+        with patch("app.make_app_window") as taskbar, patch("app.make_tool_window") as tool, patch("app.bring_to_front"):
+            CalendarApp.present_overlay(app, detail)
+            CalendarApp.present_overlay(app, notification, show_in_taskbar=False)
+        taskbar.assert_called_once_with(detail)
+        tool.assert_called_once_with(notification)
+
     def test_modal_stack_suspends_owner_until_last_modal_leaves(self) -> None:
         actions: list[str] = []
 
