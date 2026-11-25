@@ -160,13 +160,13 @@ class CalendarRuntime:
         if not isinstance(binding, Binding):
             raise ValueError('绑定响应格式无效。')
         config = {**self.configuration.load(), 'remote_url': normalize_url(url), 'remote_token': binding.worker_token,
-                  'remote_account': binding.account_id, 'remote_enabled': False}
+                  'remote_account': binding.account_id, 'remote_display_name': binding.display_name, 'remote_enabled': False}
         # The activated code may already be consumed even if the window is closing.
         return self._save_remote_disabled(config)
 
     def clear_remote_binding(self):
         config = {**self.configuration.load(), 'remote_url': '', 'remote_token': '',
-                  'remote_account': '', 'remote_enabled': False}
+                  'remote_account': '', 'remote_display_name': '', 'remote_enabled': False}
         return self._save_remote_disabled(config)
 
     def clear_ai_settings(self):

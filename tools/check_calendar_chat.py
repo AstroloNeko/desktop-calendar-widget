@@ -207,10 +207,13 @@ def main():
                         assert app.grab_current() is settings
                         assert settings.inputs['api_key'].get() == ''
                         assert not settings.consent.get()
-                        assert settings.title() == 'AI 助理设置'
-                        assert tuple(settings.tabs.tab(page, 'text') for page in settings.tabs.tabs()) == ('AI 设置', '微信远控')
+                        assert settings.title() == 'AI 设置与隐私'
+                        assert tuple(settings.tabs.tab(page, 'text') for page in settings.tabs.tabs()) == ('远程模型', '本机 API', '远程服务')
                         assert settings.tabs.select() == str(settings.ai_tab)
                         assert settings.fields['model'].winfo_ismapped()
+                        assert str(settings.fields['port']).startswith(str(settings.api_tab) + '.')
+                        settings.tabs.select(settings.api_tab)
+                        pump(app, .04)
                         assert settings.fields['port'].winfo_ismapped()
                         assert settings.copy_button.winfo_ismapped()
                         settings.inputs['model'].set('provisional-model')
@@ -284,9 +287,9 @@ def main():
                             bound = settings.old
                             timestamp = time.time()
                             rows = (
-                                HistoryRow(timestamp, timestamp, '已创建 1 项', '回执已上传', '微信已发送'),
-                                HistoryRow(timestamp - 120, timestamp - 119, '查询完成', '回执已上传', '微信已发送'),
-                                HistoryRow(timestamp - 240, timestamp - 237, '当时等待确认', '回执已上传', '微信通知失败'),
+                                HistoryRow(timestamp, timestamp, '已创建 1 项', '回执已上传', '通知已发送', channel='qq'),
+                                HistoryRow(timestamp - 120, timestamp - 119, '查询完成', '回执已上传', '通知已发送', channel='wechat'),
+                                HistoryRow(timestamp - 240, timestamp - 237, '当时等待确认', '回执已上传', '通知失败'),
                                 HistoryRow(timestamp - 360, timestamp - 359, '已修改 1 项', '回执待上传', ''),
                             )
                             with patch.object(runtime.core, 'remote', worker), \
@@ -294,12 +297,14 @@ def main():
                                 settings.old = {**bound, 'remote_enabled': True, 'api_key': 'synthetic-model-key', 'consent': True}
                                 settings.remote_enabled.set(True)
                                 worker.snapshot.return_value = RemoteStatus('live', history_revision=10,
-                                                                           last_checked_at=timestamp, check_result='empty')
+                                    last_checked_at=timestamp, check_result='empty', account_name='演示日历账号')
                                 settings.refresh_remote_panel()
                                 wait(app, lambda: '当时等待确认' in settings.history_view.get('1.0', 'end'), 'recent history visible')
                                 settings.refresh_remote_panel()
                                 assert settings.remote_status.get() == '实时在线'
                                 assert settings.check_result.get() == '无事发生，一切正常'
+                                assert settings.account_name.get() == '演示日历账号'
+                                assert all(name in settings.history_view.get('1.0', 'end') for name in ('QQ', '微信', '未知渠道'))
                                 assert settings.last_check_time.get() != '暂无'
                                 assert '已创建 1 项' in settings.latest_result.get()
                                 assert '无事发生' not in settings.history_view.get('1.0', 'end')
@@ -308,7 +313,7 @@ def main():
                                     destination.mkdir(parents=True, exist_ok=True)
                                     settings.status.set('')
                                     pump(app, .08)
-                                    capture_own_window(settings, destination/'wechat-settings.png')
+                                    capture_own_window(settings, destination/'remote-settings.png')
                                 last_success = settings.last_check_time.get()
                                 worker.snapshot.return_value = RemoteStatus('live', history_revision=10, request_failed=True,
                                                                            last_checked_at=timestamp, check_result='failed')
@@ -340,7 +345,7 @@ def main():
                                 pump(app, .1)
                                 assert settings.auto_remote.winfo_ismapped()
                                 if not getattr(sys, 'frozen', False):
-                                    capture_own_window(settings, destination/'wechat-rebind.png')
+                                    capture_own_window(settings, destination/'remote-rebind.png')
                             settings.old = bound
                             confirm = 'desktop_calendar.assistant.calendar_chat_ui.messagebox.askyesno'
                             with patch(confirm, side_effect=(False, True, True)):

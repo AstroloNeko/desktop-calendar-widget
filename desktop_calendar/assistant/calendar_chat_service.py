@@ -523,7 +523,8 @@ class CalendarChatService:
                                         error_message=task.get('error_message'))
             return None
 
-    def send_message(self, session_id, message, request_id, owner=OWNER, source='desktop', *, reference_now=None):
+    def send_message(self, session_id, message, request_id, owner=OWNER, source='desktop', *, reference_now=None,
+                     reference_target=None):
         with self.lock, request_reference(reference_now):
             if self.stopped:
                 fail('AI服务已停止。', 'service_stopped')
@@ -536,6 +537,8 @@ class CalendarChatService:
             key = fingerprint([owner, request_id])
             content_hash = fingerprint([session_id, message] if reference_now is None else
                                        [session_id, message, reference_now.isoformat()])
+            if reference_target is not None:
+                content_hash = fingerprint([content_hash, reference_target])
             try:
                 receipt = self.journal.get('request', key, owner)
             except ChatError:
@@ -572,7 +575,10 @@ class CalendarChatService:
             conversation = message.strip() not in ('确认', '确认执行', '取消', '取消操作')
             working = deepcopy(session)
             try:
-                if message.strip() in ('取消','取消操作') and session.get('active_task') and self.journal.get('task',session['active_task'],owner)['status'] in ('needs_clarification','ready'):
+                if reference_target is not None:
+                    response = self._referenced_update(working, message, request_id, owner, source, diagnostic, reference_target)
+                    session = working
+                elif message.strip() in ('取消','取消操作') and session.get('active_task') and self.journal.get('task',session['active_task'],owner)['status'] in ('needs_clarification','ready'):
                     task=self.journal.get('task',session['active_task'],owner)
                     task['status']='cancelled'
                     self.journal.put('task',task['task_id'],owner,task)
@@ -669,6 +675,47 @@ class CalendarChatService:
         session['delete_scope']=dict(clarification_id=secrets.token_urlsafe(24),intent='batch_delete',
             ids=[r['id'] for r in rows],total=result['total'],truncated=result.get('truncated',False),
             hashes=hashes,filters=args,expires=self.clock()+900)
+
+    def _referenced_update(self, session, message, request_id, owner, source, diagnostic, target):
+        event_id, revision = target['event_id'], target['revision']
+        if self._pending_status(session, owner) in ('pending', 'ready', 'executing', 'uncertain'):
+            fail('请先处理当前待确认操作，再使用引用。', 'operation_conflict')
+        if self.gateway.event_revisions([event_id]).get(event_id) != revision:
+            fail('引用的事项已变更或删除，请重新查询。', 'reference_conflict')
+        row = self.gateway.detail(event_id)
+        session.update(selected=event_id, selected_kind='event', candidates=[row])
+        state = dict(context=request_context(), selected_event_id=event_id, candidates=[row],
+                     category_catalog=self.gateway.categories(),
+                     reference_instruction='引用已定位至唯一事项。只能修改此事项或补充说明，确认由宿主处理。')
+
+        def dispatch(name, args, entry):
+            if name == 'propose_events':
+                if args['action'] not in ('update', 'complete') or args.get('color_policy'):
+                    fail('引用只能修改所选事项；其他操作请单独提出。', 'reference_conflict')
+                if 'target' in args:
+                    validate_target_plan(args)
+                    selected = args['target']
+                    if (selected['quantity'] != 'one' or selected['titles'] != [row['title']]
+                            or 'start' in selected and not selected['start'] <= row['date'] <= selected['end']):
+                        fail('计划必须指向引用中的唯一事项。', 'reference_conflict')
+                    args = {'event_id': event_id, **({'changes': args['fields']} if args['action'] == 'update'
+                                                    else {'done': args['done']})}
+                else:
+                    name, args = compile_proposal(args)
+                name = 'preview_update' if 'changes' in args else 'preview_complete'
+            if name == 'clarify' and not args.get('create_plan') or name in ('list_categories', 'get_event'):
+                return self._tool(name, args, session, owner, request_id, source, message, entry)
+            if name not in ('preview_update', 'preview_complete') or args.get('event_id') != event_id:
+                fail('引用只能修改所选事项；请重新描述修改内容。', 'reference_conflict')
+            return self._tool(name, args, session, owner, request_id, source, message, entry, target_lock=event_id,
+                              preview_only=True, expected_before=revision)
+
+        def clarify(*_args):
+            return envelope(session['session_id'], request_id, status='clarification_required',
+                            assistant_message='请说明要修改引用事项的哪个字段。')
+
+        return run_model_turn(self.provider, state, session['messages'], diagnostic, dispatch=dispatch,
+                              on_no_tools=clarify, stopped=lambda: self.stopped)
 
     def _confirm_delete_reply(self, session, operation, reply, owner, source, request_id):
         sid = session['session_id']

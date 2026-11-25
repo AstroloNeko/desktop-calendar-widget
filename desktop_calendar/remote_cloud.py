@@ -17,6 +17,14 @@ def valid_account(account):
             and all(char.isprintable() and not char.isspace() for char in account))
 
 
+def display_name(value):
+    if isinstance(value, str):
+        value = value.strip()
+        if value and value.isprintable():
+            return value[:64]
+    return ''
+
+
 def remote_scope(url, token, account='', legacy_credential=''):
     if account:
         return fingerprint(['wechat-account', url, account])
@@ -32,6 +40,7 @@ class AccountMismatch(ValueError):
 class Binding:
     account_id: str = field(repr=False)
     worker_token: str = field(repr=False)
+    display_name: str = field(default='', repr=False)
 
     def __post_init__(self):
         if not valid_account(self.account_id) or not valid_token(self.worker_token):
@@ -45,6 +54,8 @@ class NotificationSession:
     expires_at: float
     refresh_at: float = None
     account_id: str = field(default='', repr=False)
+    display_name: str = field(default='', repr=False)
+    interaction_version: int = 0
 
     def __post_init__(self):
         try:
@@ -113,7 +124,9 @@ class FirebaseNotificationContract:
         now = time.monotonic()
         refresh_after = remaining - (refresh_before if remaining > refresh_before else remaining / 2)
         stream_url = f"{origin}/wakeups/{quote(account, safe='')}/version.json"
-        return NotificationSession(stream_url, data.get('id_token'), now + remaining, now + refresh_after, account)
+        version = data.get('interaction_schema_version')
+        return NotificationSession(stream_url, data.get('id_token'), now + remaining, now + refresh_after, account,
+                                   display_name(data.get('display_name')), 1 if type(version) is int and version == 1 else 0)
 
 
 NOTIFICATION_CONTRACT = FirebaseNotificationContract()
@@ -138,4 +151,4 @@ def activate_binding(url, code):
         raise ValueError(messages.get(error.status, f'绑定服务暂不可用（HTTP {error.status}）。')) from None
     except Unavailable:
         raise ValueError('未收到有效的绑定响应。服务器可能已使用激活码，请核对后再试。') from None
-    return Binding(data.get('user_id'), data.get('worker_token'))
+    return Binding(data.get('user_id'), data.get('worker_token'), display_name(data.get('display_name')))

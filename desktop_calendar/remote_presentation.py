@@ -4,15 +4,15 @@ from dataclasses import dataclass
 
 
 CONNECTION_LABELS = {
-    'disabled': ('远程服务已关闭', '启用并保存后即可接收微信消息。'),
+    'disabled': ('远程服务已关闭', '启用并保存后即可接收远程消息。'),
     'verifying': ('正在核验绑定账号', '服务器核验完成前，暂停领取任务和上传回执。'),
     'connecting': ('正在连接', '正在连接服务器并检查待处理消息。'),
     'live': ('实时在线', '实时通知已连接。'),
     'reconnecting': ('正在重新连接', '实时通知暂时断开，正在恢复。'),
     'backup': ('在线（备用轮询）', '备用检查已成功，正在恢复实时通知。'),
     'unavailable': ('暂时无法连接服务器', '会自动尝试恢复连接。'),
-    'invalid': ('绑定已失效，请重新绑定', '请在对应的微信公众号中发送“重新获取激活码”，然后重新绑定本机。'),
-    'mismatch': ('绑定账号不符，请重新绑定', '服务器返回的账号与本机绑定不一致。请在对应的微信公众号中重新获取激活码。'),
+    'invalid': ('绑定已失效，请重新绑定', '请向服务器提供的机器人发送“重新获取激活码”，然后重新绑定本机。'),
+    'mismatch': ('绑定账号不符，请重新绑定', '服务器返回的账号与本机绑定不一致。请向服务器提供的机器人重新获取激活码。'),
 }
 
 
@@ -61,7 +61,7 @@ class RemoteTrayConfig:
                 color = 'red'
             else:
                 color = 'green' if connection == 'live' else 'yellow'
-        tip = f'微信远控：{title}'
+        tip = f'远程服务：{title}'
         if completion and completion.processed_at:
             when = datetime.fromtimestamp(completion.processed_at).strftime('%H:%M')
             tip += f'\n最近处理：{when} · {completion.result}'

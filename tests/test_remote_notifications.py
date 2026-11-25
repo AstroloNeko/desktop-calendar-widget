@@ -418,7 +418,7 @@ class PairingAndScopeTests(unittest.TestCase):
             self.assertEqual(len(rows), 20)
             self.assertEqual([row.received_at for row in rows], list(range(23, 3, -1)))
             self.assertEqual(rows[0].result, '当时等待确认')
-            self.assertEqual(rows[0].notification, '微信通知失败')
+            self.assertEqual(rows[0].notification, '通知失败')
             self.assertEqual(rows[0].upload, '回执已上传')
             self.assertIn('写入状态未记录', rows[1].result)
             self.assertNotIn('synthetic-private', repr(rows))
@@ -483,6 +483,19 @@ class NotificationContractTests(unittest.TestCase):
         self.assertNotIn(SHORT_TOKEN, repr(credentials))
         self.assertEqual(FirebaseNotificationContract().notification_session(
             client, fixture.CONFIG['remote_token']).stream_url, credentials.stream_url)
+
+    def test_display_name_and_draft_capability_are_optional(self):
+        client = Mock()
+        contract = FirebaseNotificationContract()
+        client.request.return_value = self.document(display_name=' 演示账号 ', interaction_schema_version=1)
+        verified = contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
+        self.assertEqual(verified.display_name, '演示账号')
+        self.assertEqual(verified.interaction_version, 1)
+        self.assertNotIn('演示账号', repr(verified))
+        for value in (None, '1', True, 2):
+            client.request.return_value = self.document(display_name='无效\n名称', interaction_schema_version=value)
+            verified = contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
+            self.assertEqual((verified.display_name, verified.interaction_version), ('', 0))
 
     def test_rejects_mismatched_account_paths_domains_and_credentials(self):
         invalid = (
@@ -558,6 +571,20 @@ class WorkerIdentityTests(unittest.TestCase):
         worker.configure({**fixture.CONFIG, 'remote_account': account,
                           'remote_token': token or fixture.CONFIG['remote_token']})
         return worker, client, stream
+
+    def test_claim_with_different_internal_owner_is_blocked_before_intake(self):
+        def request(path, token, body=None):
+            if path == '/api/notifications/session':
+                return NotificationContractTests.document()
+            self.assertEqual(path, CLAIM_PATH)
+            return {'job': {**fixture.job('other-owner', '新建事项'), 'owner_id': 'owner-two'}}
+        worker, client, _ = self.start(request)
+        self.assertTrue(until(lambda: worker.snapshot().connection == 'mismatch'))
+        self.assertEqual(self.ledger.all(JOBS, fixture.SERVER), [])
+        self.assertFalse(worker.request_check())
+        self.assertEqual(self.provider.messages, [])
+        self.assertEqual(self.events(), [])
+        self.assertTrue(all(not call.args[0].endswith('/complete') for call in client.request.call_args_list))
 
     def test_delayed_identity_holds_first_claim_and_then_allows_it(self):
         waiting, resume, claim = (threading.Event() for _ in range(3))

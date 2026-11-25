@@ -22,6 +22,7 @@ class TrayBadgePresentationTests(unittest.TestCase):
                 self.assertEqual(configured.tray_status(RemoteStatus(connection, processing_id='in-flight')), status)
         self.assertEqual(configured.tray_status(RemoteStatus('live', request_failed=True))[0], 'red')
         self.assertIn('绑定账号不符，请重新绑定', configured.tray_status(RemoteStatus('mismatch'))[1])
+        self.assertTrue(configured.tray_status(RemoteStatus('live'))[1].startswith('远程服务：'))
 
     def test_model_configuration_and_saved_binding_precedence(self):
         for config, color in (

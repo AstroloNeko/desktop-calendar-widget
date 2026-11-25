@@ -23,7 +23,7 @@ def calendar_write_guard(check):
 def require_calendar_write():
     check = _calendar_write_check.get()
     if check is not None and not check():
-        fail('微信远控授权已改变，本次未写入日历。', 'remote_authorization_changed')
+        fail('远程服务授权已改变，本次未写入日历。', 'remote_authorization_changed')
 
 
 def affirmative_reply(text):

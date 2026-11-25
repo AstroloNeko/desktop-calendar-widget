@@ -23,6 +23,8 @@ ACCOUNT_MISMATCH = 'account_mismatch'
 @dataclass(frozen=True)
 class VerifiedAccount:
     account_id: str = field(repr=False)
+    display_name: str = field(default='', repr=False)
+    interaction_version: int = 0
 
 
 def sse_events(chunks):
@@ -231,7 +233,8 @@ class NotificationListener:
                         raise ValueError('通知会话格式无效。')
                     if stop.is_set():
                         break
-                    if self.changed(generation, VerifiedAccount(credentials.account_id)) is False:
+                    if self.changed(generation, VerifiedAccount(credentials.account_id, credentials.display_name,
+                                                                credentials.interaction_version)) is False:
                         raise Unavailable
                     if not stop.is_set() and self.stream(credentials, stop, ready, wake):
                         delay = self.retry[0]

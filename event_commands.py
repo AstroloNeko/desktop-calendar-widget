@@ -50,6 +50,7 @@ class EventPreview:
     effective_dates: tuple[date, ...]
     deadline: Optional[date]
     effective_color: Optional[str]
+    operation_id: Optional[str] = None
 
     def event(self) -> Optional[Event]:
         return self.after.event()
@@ -80,6 +81,7 @@ class EventChange:
 class BatchPreview:
     entries: tuple[EventPreview, ...]
     label: str
+    operation_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -262,7 +264,7 @@ class EventCommandHistory:
             return None
         change = self._apply(preview, forward=True, operation_id=operation_id)
         # Capture the successfully persisted state (including notification pruning).
-        committed = replace(preview, after=self._capture(preview.event_id))
+        committed = replace(preview, after=self._capture(preview.event_id), operation_id=operation_id)
         self._undo.append(committed)
         del self._undo[:-self.limit]
         self._redo.clear()
@@ -336,7 +338,8 @@ class EventCommandHistory:
             return None
         command = BatchPreview(entries, batch.label)
         change = self._apply(command, forward=True, operation_id=operation_id)
-        self._undo.append(BatchPreview(tuple(replace(entry, after=self._capture(entry.event_id)) for entry in entries), batch.label))
+        self._undo.append(BatchPreview(tuple(replace(entry, after=self._capture(entry.event_id)) for entry in entries),
+                                       batch.label, operation_id))
         del self._undo[:-self.limit]
         self._redo.clear()
         return change
@@ -388,13 +391,20 @@ class EventCommandHistory:
                                              self._capture(entry.event_id), before, after)
                                  for entry, source, _target, _event, _keys, before, after in prepared), command.label)
 
-    def undo(self) -> Optional[EventChange | BatchChange]:
+    def can_undo_operation(self, operation_id: str) -> bool:
+        return bool(operation_id and self._undo and isinstance(self._undo[-1], (EventPreview, BatchPreview))
+                    and self._undo[-1].operation_id == operation_id)
+
+    def undo(self, *, expected_operation=None, operation_id=None) -> Optional[EventChange | BatchChange]:
+        if expected_operation is not None and not self.can_undo_operation(expected_operation):
+            raise CommandConflictError("该操作已不在可安全撤销的位置。")
         if not self._undo:
             return None
         command = self._undo[-1]
-        change = self._apply(command, forward=False)
+        change = self._apply(command, forward=False, operation_id=operation_id)
         self._undo.pop()
-        self._redo.append(command)
+        self._redo.append(replace(command, operation_id=None)
+                          if isinstance(command, (EventPreview, BatchPreview)) else command)
         return change
 
     def redo(self) -> Optional[EventChange | BatchChange]:

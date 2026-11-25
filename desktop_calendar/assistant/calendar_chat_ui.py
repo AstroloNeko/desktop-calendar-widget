@@ -15,6 +15,7 @@ from desktop_calendar.ui.themed_controls import (RoundedCardShell, SettingsScrol
                                                   form_entry, themed_check)
 from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.remote_presentation import CONNECTION_LABELS, RemoteTrayConfig, model_status
+from desktop_calendar.remote_channels import channel_name
 from desktop_calendar.remote_service import RemoteStatus, test_connection
 from desktop_calendar.remote_transport import SAFETY_CHECK_MINUTES, StatusError, Unavailable, normalize_url
 from calendar_runtime import CalendarRuntime
@@ -612,13 +613,13 @@ class EmbeddedChat(_ChatWidgets, tk.Frame):
         super().destroy()
 
 
-WECHAT_HELP = (
-    ('首次绑定', '关注私人服务器对应的微信公众号，发送“绑定 + 管理员提供的邀请码”。'
-               '收到服务器地址和一次性激活码后，在本页填写并绑定，再启用服务。'),
-    ('重新绑定', '向微信公众号发送“重新获取激活码”，在本页填写新激活码。绑定成功后，旧设备的访问密钥会失效。'),
-    ('日常使用', '直接用自然语言创建、修改、删除或查询日历事项。需要确认时，按微信回复继续操作。'
-               '电脑关机或月历未运行时，消息会在云端等待。等待超过一分钟可能收到提醒。'
-               '长时间离线后任务仍可继续处理，微信回执可能因客服消息时限而无法送达。'),
+REMOTE_HELP = (
+    ('首次绑定', '向服务器提供的 QQ Bot 发送“绑定 + 管理员提供的邀请码”。'
+               '收到服务器地址和一次性激活码后，在本页绑定日历账号，再启用服务。'),
+    ('重新绑定', '向机器人发送“重新获取激活码”，在本页填写新激活码。绑定成功后，旧设备的访问密钥会失效。'),
+    ('日常使用', '向 QQ Bot 发送自然语言创建、修改、删除或查询日历事项。需要确认时，按回复继续操作。'
+               '电脑关机或月历未运行时，消息会在云端等待。队列等待或处理超时可能收到提醒。'),
+    ('微信兼容', '微信历史记录、原有绑定和回执继续保留。日历指令以服务器当前开放的渠道为准。'),
 )
 class AISettings(tk.Toplevel):
     def __init__(self, chat=None, *, app=None, runtime=None, show_remote=False):
@@ -630,7 +631,7 @@ class AISettings(tk.Toplevel):
         self.configuration = self.runtime.configuration
         self.old = self.configuration.load()
         theme, dp, font = self.app.theme, self.app.dpi.px, self.app.search_font
-        self.title('AI 助理设置')
+        self.title('AI 设置与隐私')
         bg = theme.panel_background
         self.configure(bg=bg)
         width, height, x, y = dialog_geometry(self.app.dpi.work_area(), self.app.dpi.dpi,
@@ -675,8 +676,9 @@ class AISettings(tk.Toplevel):
             forms.append(scroll)
             return page, scroll
 
-        self.ai_tab, ai_form = add_tab('AI 设置')
-        self.remote_tab, remote_form = add_tab('微信远控')
+        self.ai_tab, ai_form = add_tab('远程模型')
+        self.api_tab, api_form = add_tab('本机 API')
+        self.remote_tab, remote_form = add_tab('远程服务')
         form, content = ai_form, ai_form.content
         wrapped = [status]
 
@@ -725,7 +727,7 @@ class AISettings(tk.Toplevel):
         field(content, 'api_key', 'API Key（留空保留已有密钥）')
         option(content, '我同意将上述信息发给已配置的远程模型', self.consent)
 
-        tk.Frame(content, height=dp(1), bg=theme.divider).pack(fill='x', pady=(dp(6), 0))
+        form, content = api_form, api_form.content
         section(content, '本机 API', '仅监听 127.0.0.1，连接必须使用 Bearer Token。')
         option(content, '启用本机 HTTP API', self.http)
         local = tk.Frame(content, bg=bg)
@@ -738,7 +740,7 @@ class AISettings(tk.Toplevel):
         self.copy_button.bind('<FocusIn>', lambda _e, scroll=form: scroll.reveal(copy), add='+')
         self.clear_ai_button, clear_ai = form_button(content, self.app, '清除 AI 助理设置', self.clear_ai_settings, quiet=True)
         clear_ai.pack(anchor='w', pady=(0, dp(4)))
-        self.clear_ai_button.bind('<FocusIn>', lambda _e: ai_form.reveal(clear_ai), add='+')
+        self.clear_ai_button.bind('<FocusIn>', lambda _e: api_form.reveal(clear_ai), add='+')
 
         form, content = remote_form, remote_form.content
         self.remote_enabled = tk.BooleanVar(value=self.old['remote_enabled'])
@@ -746,6 +748,7 @@ class AISettings(tk.Toplevel):
         self.remote_status = tk.StringVar(self)
         self.connection_detail = tk.StringVar(self)
         self.binding_state = tk.StringVar(self)
+        self.account_name = tk.StringVar(self)
         self.ai_state = tk.StringVar(self)
         self.last_check_time = tk.StringVar(self)
         self.check_result = tk.StringVar(self)
@@ -764,13 +767,14 @@ class AISettings(tk.Toplevel):
                           fg=theme.text_secondary, font=(font, 8), anchor='w', justify='left')
         detail.pack(fill='x', pady=(dp(2), dp(6)))
         wrapped.append(detail)
-        for label, variable in (('微信账号', self.binding_state), ('AI 助理', self.ai_state),
+        for label, variable in (('绑定状态', self.binding_state), ('日历账号', self.account_name), ('AI 助理', self.ai_state),
                                 ('最近成功检查', self.last_check_time), ('检查结果', self.check_result),
                                 ('最近处理', self.latest_result)):
             row = tk.Frame(details, bg=status_bg)
             row.pack(fill='x', pady=dp(1))
             tk.Label(row, text=label, bg=status_bg, fg=theme.text_secondary, font=(font, 9)).pack(side='left')
-            tk.Label(row, textvariable=variable, bg=status_bg, fg=theme.text_primary, font=(font, 9)).pack(side='right')
+            tk.Label(row, textvariable=variable, bg=status_bg, fg=theme.text_primary, font=(font, 9),
+                     wraplength=dp(230), justify='right').pack(side='right')
         actions = tk.Frame(details, bg=status_bg)
         actions.pack(fill='x', pady=(dp(6), 0))
         self.manual_check_button, manual_check = form_button(actions, self.app, '手动检查', self.check_remote_jobs)
@@ -808,8 +812,8 @@ class AISettings(tk.Toplevel):
         self.paint_history()
         tk.Label(history, text='最近 20 条本机记录', bg=bg, fg=theme.text_secondary,
                  font=(font, 8), anchor='w').pack(fill='x', pady=(0, dp(5)))
-        help_body = self.add_fold(content, '微信绑定与使用说明', form)
-        for title, description in WECHAT_HELP:
+        help_body = self.add_fold(content, '绑定与使用说明', form)
+        for title, description in REMOTE_HELP:
             section(help_body, title, description)
 
         advanced = self.add_fold(content, '高级连接设置', form)
@@ -935,7 +939,7 @@ class AISettings(tk.Toplevel):
     def copy_rebinding_command(self):
         self.clipboard_clear()
         self.clipboard_append('重新获取激活码')
-        self.status.set('已复制。请粘贴到微信公众号。')
+        self.status.set('已复制。请发送给服务器提供的机器人。')
 
     def render_remote_status(self, snapshot):
         state = snapshot.connection
@@ -957,17 +961,18 @@ class AISettings(tk.Toplevel):
         self.connection_label.configure(fg=theme.quick_success if state in ('live', 'backup') else
                                         theme.event_type_urgent if invalid else theme.text_primary)
         if snapshot.processing_id:
-            detail += ' 正在处理微信消息。'
+            detail += ' 正在处理远程消息。'
         if state == 'live' and snapshot.request_failed:
             detail += ' 任务接口暂不可用，正在重试。'
         self.connection_detail.set(detail)
         self.binding_state.set('账号不符' if state == 'mismatch' else '已失效' if invalid else '已绑定到本机' if self.old['remote_account'] else
                                '已配置手动连接' if self.old['remote_token'] else '尚未绑定')
+        self.account_name.set(snapshot.account_name or self.old['remote_display_name'] or '—')
         checked_at = snapshot.last_checked_at
         self.last_check_time.set(datetime.fromtimestamp(checked_at).strftime('%m-%d %H:%M:%S')
                                  if checked_at is not None else '暂无')
         self.check_result.set({'checking': '正在检查……', 'empty': '无事发生，一切正常',
-                               'claimed': '已领取微信任务', 'failed': '本次检查失败'}.get(snapshot.check_result, '暂无'))
+                               'claimed': '已领取远程任务', 'failed': '本次检查失败'}.get(snapshot.check_result, '暂无'))
         finished = (row for row in self.history_rows if row.result not in ('正在处理', '已接收，等待处理'))
         latest = max(finished, key=lambda row: row.processed_at or row.received_at, default=None)
         recent = snapshot.completion
@@ -1020,7 +1025,7 @@ class AISettings(tk.Toplevel):
         if not self.history_rows:
             view.insert('end', '本机记录暂不可读取。' if unavailable else '暂无本机处理记录。', 'secondary')
         for row in self.history_rows:
-            view.insert('end', f'{self.history_time(row.received_at)}  ·  {row.result}\n')
+            view.insert('end', f'{self.history_time(row.received_at)}  ·  {channel_name(row.channel)}  ·  {row.result}\n')
             delivery = ' · '.join(filter(None, (row.upload, row.notification)))
             view.insert('end', f'{delivery}\n', 'secondary')
         view.configure(state='disabled')
@@ -1198,6 +1203,7 @@ class AISettings(tk.Toplevel):
                 config['remote_token'] = self.old['remote_token']
             if not same_url or config['remote_token'] != self.old['remote_token']:
                 config['remote_account'] = ''
+                config['remote_display_name'] = ''
             config['timeout'], config['port'] = int(config['timeout']), int(config['port'])
             self.runtime.core.save_settings(config)
             self.runtime.apply_http()

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Desktop Calendar remote interaction v1 draft",
+  "oneOf": [
+    {"$ref": "#/$defs/businessReceipt"},
+    {"$ref": "#/$defs/interaction"}
+  ],
+  "$defs": {
+    "msgId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+    "actionId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{24,64}$"},
+    "event": {
+      "type": "object",
+      "required": ["index", "title", "date"],
+      "additionalProperties": false,
+      "properties": {
+        "index": {"type": "integer", "minimum": 1, "maximum": 30},
+        "title": {"type": "string"},
+        "date": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date"},
+        "time": {"type": ["string", "null"], "pattern": "^[0-9]{2}:[0-9]{2}$"},
+        "done": {"type": "boolean"},
+        "event_type": {"enum": ["general", "urgent", "ddl"]},
+        "deadline": {"type": ["string", "null"], "format": "date"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["id", "kind", "expires_at_ts"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/actionId"},
+        "kind": {"enum": ["confirm", "cancel", "undo", "select_candidate"]},
+        "index": {"type": "integer", "minimum": 1, "maximum": 30},
+        "expires_at_ts": {"type": "integer"}
+      },
+      "if": {"properties": {"kind": {"const": "select_candidate"}}},
+      "then": {"required": ["index"]},
+      "else": {"not": {"required": ["index"]}}
+    },
+    "businessReceipt": {
+      "type": "object",
+      "required": ["schema_version", "result_type", "summary", "events", "available_actions"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {"const": 1},
+        "result_type": {"enum": ["query", "create", "update", "delete", "complete", "confirmation",
+          "clarification", "candidates", "undo", "failed", "partial", "uncertain", "cancelled", "message"]},
+        "summary": {"type": "string"},
+        "events": {"type": "array", "maxItems": 30, "items": {"$ref": "#/$defs/event"}},
+        "available_actions": {"type": "array", "maxItems": 30, "items": {"$ref": "#/$defs/action"}},
+        "reference_until": {"type": "integer"},
+        "undo_reference": {"$ref": "#/$defs/actionId"},
+        "pending_confirmation": {
+          "type": "object",
+          "required": ["stage", "expires_at_ts"],
+          "additionalProperties": false,
+          "properties": {
+            "stage": {"enum": ["confirm", "reviewing_specific", "reviewing_batch", "awaiting_final_confirmation"]},
+            "expires_at_ts": {"type": "integer"}
+          }
+        },
+        "outcome": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "committed": {"type": ["boolean", "null"]},
+            "goal_satisfied": {"type": ["boolean", "null"]},
+            "changed": {"type": ["boolean", "null"]}
+          }
+        }
+      }
+    },
+    "interaction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["schema_version", "kind", "source_msg_id", "action_id"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {"const": 1},
+            "kind": {"const": "action"},
+            "source_msg_id": {"$ref": "#/$defs/msgId"},
+            "action_id": {"$ref": "#/$defs/actionId"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["schema_version", "kind", "source_msg_id"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {"const": 1},
+            "kind": {"const": "reference"},
+            "source_msg_id": {"$ref": "#/$defs/msgId"},
+            "index": {"type": "integer", "minimum": 1, "maximum": 30}
+          }
+        }
+      ]
+    }
+  }
+}

@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fingerprint
-from desktop_calendar.remote_cloud import valid_account
+from desktop_calendar.remote_cloud import display_name, valid_account
 from desktop_calendar.remote_transport import SAFETY_CHECK_MINUTES, normalize_url, valid_token
 
 
@@ -60,7 +60,7 @@ class AIConfiguration:
         return dict(endpoint='https://api.deepseek.com', model='deepseek-chat', api_key='', timeout=30,
                     temperature=0.1, consent=False, http_enabled=False, port=18746, token='',
                     remote_enabled=False, remote_url='', remote_token='', remote_account='', remote_legacy_credential='',
-                    remote_safety_check_minutes=0, remote_was_configured=False)
+                    remote_safety_check_minutes=0, remote_was_configured=False, remote_display_name='')
 
     def load(self):
         defaults = self.defaults()
@@ -74,6 +74,7 @@ class AIConfiguration:
             config['remote_legacy_credential'] = fingerprint([normalize_url(config['remote_url']), config['remote_token']])
         config['remote_was_configured'] = bool(config.get('remote_was_configured') or config.get('remote_url')
                                                or config.get('remote_legacy_credential'))
+        config['remote_display_name'] = display_name(config.get('remote_display_name')) if config.get('remote_account') else ''
         return {**defaults, **config}
 
     def save(self, config):
@@ -117,6 +118,7 @@ class AIConfiguration:
         if config['remote_enabled'] and not (config['remote_url'] and config['remote_token']):
             raise ValueError('启用私人远程服务需要填写服务器地址和 Worker Token。')
         config['remote_was_configured'] = bool(previous['remote_was_configured'] or config['remote_url'])
+        config['remote_display_name'] = display_name(config.get('remote_display_name')) if config['remote_account'] else ''
         config['version'] = 1
         config['token'] = config.get('token') or secrets.token_urlsafe(32)
         config['temperature'] = 0.1

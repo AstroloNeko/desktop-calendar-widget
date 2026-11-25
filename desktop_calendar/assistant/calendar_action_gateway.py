@@ -6,7 +6,7 @@ from tk_dispatcher import TkDispatcher  # Compatibility export; implementation i
 
 from calendar_core import Event, COLORS
 from event_input import build_event_candidate, EventInputError
-from event_commands import BatchPreview
+from event_commands import BatchPreview, CommandConflictError
 from calendar_event_service import CalendarEventService, OperationContext
 from event_search import EventSearchIndex, capture_search_store
 from desktop_calendar.assistant.calendar_chat_protocol import fail, fingerprint as fingerprint, require_calendar_write
@@ -141,6 +141,35 @@ class CalendarActionGateway:
 
     def event_revisions(self, identifiers):
         return self.dispatch(lambda: {identifier: fingerprint(self._state(identifier)) for identifier in identifiers})
+
+    def reference_revisions(self, rows):
+        def capture():
+            revisions = {}
+            for row in rows:
+                event = self.store.event_by_id(row['id'])
+                if event is None:
+                    continue
+                live = self._detail(event)
+                if all(live.get(key) == value for key, value in row.items() if key in live):
+                    revisions[event.id] = fingerprint(self._state(event.id))
+            return revisions
+        return self.dispatch(capture)
+
+    def undo_remote_operation(self, expected, operation_id):
+        def execute():
+            if not self.writable():
+                fail('日历暂不可写，未撤销。', 'execution_failed')
+            require_calendar_write()
+            try:
+                change = self.commands.undo(expected_operation=expected, operation_id=operation_id)
+            except CommandConflictError as error:
+                fail(str(error), 'operation_conflict')
+            try:
+                self.refresh(change)
+            except Exception:
+                pass  # The calendar transaction has already committed.
+            return change
+        return self.dispatch(execute)
 
     def preview(self, name, arguments, event_id, previous=None, *, message=''):
         validate_call(name, arguments)

@@ -1,7 +1,7 @@
 """Private WeChat input adapter. Calendar access stays behind CalendarChatService."""
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 import re
@@ -15,15 +15,19 @@ from desktop_calendar.assistant.calendar_chat_protocol import (
     ChatError, calendar_write_guard, event_line, fingerprint, receipt_message, wechat_delete_review,
 )
 from desktop_calendar.assistant.operation_engine import event_action
+from desktop_calendar.remote_channels import conversation_from_job
 from desktop_calendar.remote_cloud import NOTIFICATION_CONTRACT, remote_scope, valid_account
 from desktop_calendar.remote_history import describe_response
+from desktop_calendar.remote_interaction import (
+    JOBS, UNDO_REPLIES, VERSION as INTERACTION_VERSION, build_business_receipt, execute_interaction,
+    execute_undo_reply, interaction_from_job,
+)
 from desktop_calendar.remote_notifications import ACCOUNT_MISMATCH, AUTH_REJECTED, NotificationListener, VerifiedAccount
 from desktop_calendar.remote_transport import (
     CLAIM_PATH, INTERVAL, SAFETY_CHECK_MINUTES, Client, StatusError, Unavailable, normalize_url, transient, valid_token,
 )
 
 
-JOBS = 'wechat-job'
 CLAIM_INCIDENT = 'wechat-claim-incident'
 CHINA_TIME = timezone(timedelta(hours=8))
 MSG_ID = re.compile(r'[A-Za-z0-9_-]{1,128}')
@@ -48,6 +52,7 @@ class RemoteStatus:
     last_checked_at: Optional[float] = None
     check_result: str = ''
     account_verified: bool = False
+    account_name: str = field(default='', repr=False)
 
 
 def test_connection(url):
@@ -69,6 +74,14 @@ def claim_checked_at(response, received_at):
 
 
 def message_time(job):
+    if job.get('created_at_ts') is not None:
+        stamp = job['created_at_ts']
+        if type(stamp) is int and stamp > 0:
+            try:
+                return datetime.fromtimestamp(stamp, CHINA_TIME)
+            except (ValueError, OverflowError, OSError):
+                pass
+        raise ValueError('消息发送时间戳无效。')
     local = job.get('message_time_local')
     if isinstance(local, str):
         try:
@@ -83,10 +96,10 @@ def message_time(job):
             return datetime.fromtimestamp(stamp, CHINA_TIME)
         except (ValueError, OverflowError, OSError):
             pass
-    raise ValueError('缺少有效的微信消息发送时间。')
+    raise ValueError('缺少有效的消息发送时间。')
 
 
-def make_receipt(response, request_text=''):
+def make_receipt(response, request_text='', *, business=None):
     status = response['status']
     op = response.get('pending_operation') or {}
     task = response.get('task') or {}
@@ -140,8 +153,10 @@ def make_receipt(response, request_text=''):
         op.get('operation_id'), task.get('operation_id'),
     ) if identifier))
     operation_id = ids[0] if ids and (result or status == 'committed_unverified') and status != 'pending' else None
-    return json.dumps(dict(ok=ok, reply_text=reply, operation_id=operation_id, error=error),
-                      ensure_ascii=False, separators=(',', ':')), ids
+    body = dict(ok=ok, reply_text=reply, operation_id=operation_id, error=error)
+    if business is not None:
+        body['business_receipt'] = business
+    return json.dumps(body, ensure_ascii=False, separators=(',', ':')), ids
 
 
 class RemoteWorker:
@@ -163,6 +178,8 @@ class RemoteWorker:
         self.offline_since = None
         self.auth_error = None
         self.account_verified = False
+        self.account_name = ''
+        self.interaction_version = 0
         self.last_cloud_ok = None
         self.cloud_unavailable = False
         self.processing_id = ''
@@ -214,6 +231,8 @@ class RemoteWorker:
             self.had_live_connection = False
             self.auth_error = None
             self.account_verified = False
+            self.account_name = ''
+            self.interaction_version = 0
             self.last_cloud_ok = None
             self.cloud_unavailable = False
             self.processing_id = ''
@@ -245,6 +264,8 @@ class RemoteWorker:
             self.stopped = True
             self.config = None
             self.account_verified = False
+            self.account_name = ''
+            self.interaction_version = 0
             self.check_result = ''
             self.status = '远程服务已停止。'
             self.notification_status = ''
@@ -282,13 +303,15 @@ class RemoteWorker:
             else:
                 connection = 'reconnecting' if self.had_live_connection else 'connecting'
             return RemoteStatus(connection, self.processing_id, self.history_revision, self.cloud_unavailable,
-                                self.completion, self.last_checked_at, self.check_result, self.account_verified)
+                                self.completion, self.last_checked_at, self.check_result, self.account_verified,
+                                self.account_name)
 
     def _notify_status_change(self):
         if self.on_status_change is None:
             return
         snapshot = self.snapshot()
-        status = (snapshot.connection, snapshot.request_failed, snapshot.completion, snapshot.last_checked_at)
+        status = (snapshot.connection, snapshot.request_failed, snapshot.completion, snapshot.last_checked_at,
+                  snapshot.account_name)
         if status != self._notified_status:
             self._notified_status = status
             self.on_status_change()
@@ -305,6 +328,8 @@ class RemoteWorker:
             if self._configured(generation):
                 self.auth_error = reason
                 self.account_verified = False
+                self.account_name = ''
+                self.interaction_version = 0
                 self.notification_online = False
                 if check_failed or self.check_result == 'checking':
                     self.check_result = 'failed'
@@ -336,7 +361,8 @@ class RemoteWorker:
                 if notice is not None:
                     self.notice = notice
 
-    def _verify_account(self, generation, account):
+    def _verify_account(self, generation, profile):
+        account = profile.account_id
         if not valid_account(account):
             return False
         with self.condition:
@@ -347,10 +373,11 @@ class RemoteWorker:
                 if expected != account:
                     self._reject_authentication(generation, ACCOUNT_MISMATCH)
                     return False
-                if not self.account_verified:
-                    self.account_verified = True
-                    self.condition.notify_all()
-                    self._notify_status_change()
+                self.account_name = profile.display_name
+                self.interaction_version = profile.interaction_version
+                self.account_verified = True
+                self.condition.notify_all()
+                self._notify_status_change()
                 return True
         if self.pin_account:
             self.pin_account(generation, url, token, account)
@@ -362,7 +389,7 @@ class RemoteWorker:
             self._reject_authentication(generation, online)
             return
         if isinstance(online, VerifiedAccount):
-            return self._verify_account(generation, online.account_id)
+            return self._verify_account(generation, online)
         with self.condition:
             if not self._current(generation):
                 return
@@ -405,7 +432,7 @@ class RemoteWorker:
                 self.condition.wait_for(lambda: self.stopped or self._current(self.generation))
                 if self.stopped:
                     return
-                generation, (url, token, server, _) = self.generation, self.config
+                generation, (url, token, server, account) = self.generation, self.config
                 seen = self.wake_serial
             idle = checking_queue = False
             try:
@@ -473,6 +500,10 @@ class RemoteWorker:
                                 if job is not None:
                                     self._claim_incident(server, generation)
                                 continue
+                            if job is not None and 'owner_id' in job and job['owner_id'] != account:
+                                self._reject_authentication(generation, ACCOUNT_MISMATCH, check_failed=True)
+                                self._claim_incident(server, generation)
+                                continue
                             idle = job is None
                             self._cloud_status(generation, True, check_result='empty' if idle else 'claimed',
                                                checked_at=claim_checked_at(response, received_at))
@@ -482,7 +513,7 @@ class RemoteWorker:
                                 unrecorded = (job, server)
                                 backlog.append(self._intake(job, server))
                                 unrecorded = None
-                        self._publish(generation, 'Worker 已认证，等待消息。' if job is None else '已领取微信消息。')
+                        self._publish(generation, 'Worker 已认证，等待消息。' if job is None else '已领取远程消息。')
                         if backlog and self._handle_active(backlog[0], client, token, server, generation):
                             backlog.popleft()
                             if self.notifications:
@@ -518,22 +549,43 @@ class RemoteWorker:
         msg_id = job['msg_id']
         identifier = fingerprint([server, msg_id])
         try:
-            return self.journal.get(JOBS, identifier, server)
+            old = self.journal.get(JOBS, identifier, server)
         except ChatError as error:
             if error.code != 'authentication_failed':
                 raise
+        else:
+            if old.get('owner'):
+                try:
+                    conversation = conversation_from_job(job)
+                    if (conversation.owner(server) != old['owner'] or
+                            old.get('route') and conversation.route(server) != old['route']):
+                        raise ValueError('duplicate route mismatch')
+                except ValueError:
+                    self._reject_authentication(self.generation, ACCOUNT_MISMATCH)
+            return old
         record = dict(id=identifier, msg_id=msg_id, request_id='wechat-' + identifier,
                       state='received', received_at=time.time(), agent_journal=self.agent_journal)
         if self.account_verified and self.config and self.config[2] == server:
             record['verified_scope'] = server
         try:
-            openid, text = job['openid'], job['text']
-            if not isinstance(openid, str) or not 1 <= len(openid) <= 256 or not isinstance(text, str) or not 1 <= len(text.strip()) <= 4000:
+            conversation = conversation_from_job(job)
+            route = conversation.route(server)
+            record.update(channel=conversation.channel, owner=conversation.owner(server), route=route)
+            if (route and self.config and job.get('owner_id') == self.config[3] and
+                    self.interaction_version == INTERACTION_VERSION):
+                record['interaction_version'] = INTERACTION_VERSION
+            if 'interaction' in job:
+                if not record.get('interaction_version'):
+                    raise ValueError('服务器未启用远程交互。')
+                record['interaction'] = interaction_from_job(job['interaction'])
+            button = (record.get('interaction') or {}).get('kind') == 'action'
+            text = job.get('text', '')
+            if not isinstance(text, str) or len(text.strip()) > 4000 or not (button or text.strip()):
                 raise ValueError
-            record.update(owner='wechat-verified-' + fingerprint([server, openid]), text=text,
-                          reference_now=message_time(job).isoformat())
+            record.update(text=text, reference_now=message_time(job).isoformat())
         except (ValueError, KeyError):
-            self._set_receipt(record, dict(status='failed', error_code='invalid_job', error_message='微信消息格式或发送时间无效。'))
+            self._set_receipt(record, dict(status='failed', error_code='invalid_job',
+                                           error_message='远程消息格式、会话或发送时间无效。'))
         self._save(server, record)
         return record
 
@@ -557,11 +609,19 @@ class RemoteWorker:
                     self.processing_id = ''
 
     def _set_receipt(self, record, response):
-        body, ids = make_receipt(response, record.get('text', ''))
+        business = None
+        if record.get('interaction_version') == INTERACTION_VERSION:
+            try:
+                business, record['interaction_reply'] = build_business_receipt(self.service, record, response)
+            except (ChatError, KeyError, ValueError, TypeError, OSError, sqlite3.Error):
+                # Optional rendering cannot make a committed operation fail or change the text receipt.
+                pass
+        body, ids = make_receipt(response, record.get('text', ''), business=business)
         record.update(state='ready', receipt=body, operation_ids=ids)
         record.update(history_result=describe_response(response), processed_at=time.time(),
                       model_unavailable=response.get('error_code') == 'model_unavailable')
         record.pop('text', None)
+        record.pop('interaction', None)
 
     def _handle(self, record, client, token, server, generation):
         if not self._current(generation):
@@ -595,10 +655,21 @@ class RemoteWorker:
                     return False
                 try:
                     with calendar_write_guard(lambda: self._current(generation)):
-                        response = self.service.send_message(
-                            record['session_id'], record['text'], record['request_id'], owner, 'wechat',
-                            reference_now=datetime.fromisoformat(record['reference_now']),
-                        )
+                        reference_now = datetime.fromisoformat(record['reference_now'])
+                        undo_reply = (record.get('interaction_version') == INTERACTION_VERSION and
+                                      record['text'].strip(' 。！!') in UNDO_REPLIES)
+                        if record.get('interaction') or undo_reply:
+                            with self.condition:
+                                capability = self._current(generation) and self.interaction_version == INTERACTION_VERSION
+                            if not capability:
+                                raise ChatError('action_expired', '远程交互已停用，请发送文字指令。')
+                            execute = execute_interaction if record.get('interaction') else execute_undo_reply
+                            response = execute(self.service, self.journal, server, record, reference_now)
+                        else:
+                            response = self.service.send_message(
+                                record['session_id'], record['text'], record['request_id'], owner, 'wechat',
+                                reference_now=reference_now,
+                            )
                 except ChatError as error:
                     if error.code in ('service_stopped', 'service_unavailable'):
                         raise
@@ -651,6 +722,6 @@ class RemoteWorker:
             record.update(state='submitted', notify_status=notify if notify in ('sent', 'failed', 'pending', 'skipped') else 'unknown')
             self._save(server, record)
         if notify != 'sent':
-            self._publish(generation, notice='回执已保存，微信通知未确认送达。')
+            self._publish(generation, notice='回执已保存，通知未确认送达。')
         self._publish(generation, 'Worker 已认证，回执已提交。')
         return True

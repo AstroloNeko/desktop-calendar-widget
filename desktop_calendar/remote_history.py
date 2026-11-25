@@ -13,6 +13,7 @@ class HistoryRow:
     upload: str
     notification: str
     model_unavailable: bool = False
+    channel: str = 'unknown'
 
 
 def describe_response(response):
@@ -90,8 +91,9 @@ def describe_history(records, agent_journal, processing_id, scope):
         notification = ''
         if state == 'submitted':
             notification = {
-                'sent': '微信已发送', 'failed': '微信通知失败', 'pending': '微信通知待确认',
-                'skipped': '未发送微信通知',
-            }.get(record.get('notify_status'), '微信送达未知')
-        history.append(HistoryRow(record['received_at'], processed_at, result, upload, notification, model_unavailable))
+                'sent': '通知已发送', 'failed': '通知失败', 'pending': '通知待确认',
+                'skipped': '未发送通知',
+            }.get(record.get('notify_status'), '送达未知')
+        history.append(HistoryRow(record['received_at'], processed_at, result, upload, notification, model_unavailable,
+                                  record.get('channel', 'unknown')))
     return tuple(history)

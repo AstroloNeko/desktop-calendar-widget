@@ -68,6 +68,7 @@ class RemoteServiceTests(unittest.TestCase):
     def worker_for_steps(self):
         worker = RemoteWorker(self.service, self.ledger)
         worker.config = URL, CONFIG['remote_token'], SERVER, BOUND_CONFIG['remote_account']
+        worker.offline_since = time.monotonic()
         worker._notification(0, VerifiedAccount(BOUND_CONFIG['remote_account']))
         return worker
 
