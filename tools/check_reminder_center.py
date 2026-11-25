@@ -199,7 +199,7 @@ def main():
                     assert window.winfo_height() <= 800
                     window.scroll_canvas.yview_moveto(1)
                     pump(app, .05)
-                    assert visible(window.cancel_button, window)
+                    assert visible(window.rule_hint, window)
                     window.close()
                 assert original_events == [asdict(event) for event in store.events]
                 assert app.event_commands.undo_count == 0

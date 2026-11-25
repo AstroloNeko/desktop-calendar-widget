@@ -6,6 +6,7 @@ from pathlib import Path
 import queue
 import sys
 import time
+import tkinter as tk
 import traceback
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -107,6 +108,10 @@ def main():
     last_heartbeat = time.monotonic()
     deadline = last_heartbeat + 55
     start = (datetime.now() + timedelta(seconds=16)).replace(microsecond=0)
+    if args.visual_only:
+        preview_now = datetime(2031, 4, 16, 8)
+        app._reminder_preview_clock = lambda: preview_now
+        start = preview_now.replace(hour=10)
     window = None
 
     def finish():
@@ -154,9 +159,12 @@ def main():
             from tools.check_interactions import pump
             pump(app, .18)
             screenshot("brief-preview")
-            assert "合成事项" in window.preview_body.cget("text")
+            def widget_text(widget):
+                value = widget.cget("text") if isinstance(widget, tk.Label) else ""
+                return value + "".join(widget_text(child) for child in widget.winfo_children())
+            assert "合成事项" in widget_text(window.preview_body)
             window.private.set(True)
-            assert "合成事项" not in window.preview_body.cget("text")
+            assert "合成事项" not in widget_text(window.preview_body)
             window.private.set(False)
         if index == 3 and args.visual_only:
             assert window.plan.counts["upcoming"].get() == "8"

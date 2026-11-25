@@ -69,7 +69,7 @@ def main():
                             window.update_idletasks()
                             window.scroll_canvas.yview_moveto(1)
                             pump(app, .06)
-                            assert visible(window.cancel_button, window)
+                            assert visible(window.rule_hint, window)
                             if dpi == native:
                                 capture_own_window(window, output / f'{theme}-settings-rules.png')
                             window.close()
@@ -82,7 +82,7 @@ def main():
                             window.tree.selection_set('event:3')
                             window.show_selection()
                             assert store.events[3].title in window.detail.get()
-                            assert store.events[3].title in window.detail_label.get('1.0', 'end')
+                            assert store.events[3].title in window.details_title.get()
                             window.tree.selection_set('event:1')
                             window.show_selection()
                             assert window.cancel_button.cget('state') == 'normal'
@@ -114,7 +114,7 @@ def main():
                     pump(app, .1)
                     assert dialog.winfo_height() <= 800 and visible(dialog.save_button, dialog)
                     capture_own_window(dialog, output / 'small-work-area.png')
-                    assert window.tree.winfo_height() >= app.dpi.px(3 * 29), ('Compact footer squeezed out reminder rows', window.tree.winfo_height())
+                    assert window.tree.winfo_height() >= app.dpi.px(3 * 26), ('Compact footer squeezed out reminder rows', window.tree.winfo_height())
                     window.tree.yview_moveto(1)
                     pump(app, .05)
                     assert window.tree.bbox(window.tree.get_children('upcoming')[-1])

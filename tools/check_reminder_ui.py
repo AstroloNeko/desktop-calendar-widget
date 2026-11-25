@@ -57,7 +57,7 @@ def main():
                             assert "HH:MM" in dialog.status.get(), "validation feedback was lost"
                             dialog.scroll_canvas.yview_moveto(1)
                             pump(app, .04)
-                            assert visible(dialog.cancel_button, dialog), "bottom content cannot be reached"
+                            assert visible(dialog.rule_hint, dialog), "bottom content cannot be reached"
                             dialog.close()
                             pump(app, .15)
                             assert app.grab_current() is None

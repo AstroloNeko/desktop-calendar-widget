@@ -278,7 +278,7 @@ class ReminderEngine:
         config, state = self.config(), self._state()
         plans = plans_for_store(self.store, config)
         self._import_legacy({plan.event_id: plan for plan in plans}, state)
-        return build_overview(self.store, plans, state, local_wall(now), config["enabled"])
+        return build_overview(self.store, plans, state, local_wall(now), config)
 
     def tick(self, now):
         self.delivery.tick(local_wall(now))

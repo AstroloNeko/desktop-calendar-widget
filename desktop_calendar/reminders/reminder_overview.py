@@ -19,6 +19,10 @@ class ReminderRow:
     snoozed: bool = False
     next_attempt: datetime | None = None
     batch: str = ""
+    windows: str = "—"
+    qq: str = "—"
+    rule: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -29,7 +33,29 @@ class ReminderOverview:
     qq_sent: int = 0
 
 
-def build_overview(store, plans, state, now, enabled):
+CHANNEL_LABELS = {**STATUS_LABELS, "submitted": "已提交", "sent": "发送成功",
+                  "dispatching": "等待结果", "unknown": "结果不确定", "failed": "发送失败"}
+
+
+def batch_channel_statuses(batch):
+    channels = batch["channels"]
+    return tuple(CHANNEL_LABELS[channels[key]["status"]] if key in channels else "未列入"
+                 for key in ("windows", "qq"))
+
+
+def rule_label(event, plan, config, snoozed):
+    rule = config["events"].get(event.id, {})
+    if rule.get("mode") == "custom":
+        text = f"单事项规则 · 提前 {rule['days']} 天 · {rule['time']}"
+    elif event.has_time:
+        text = f"事项编辑器 · 提前 {event.reminder} 分钟"
+    else:
+        days = config["ddl_days" if plan.ddl else "general_days"]
+        text = f"默认规则 · 提前 {days} 天 · {config['time']}"
+    return f"稍后提醒 · {text}" if snoozed else text
+
+
+def build_overview(store, plans, state, now, config):
     rows, old_submitted = [], 0
     events = {event.id: event for event in store.events}
     for base in plans:
@@ -42,7 +68,8 @@ def build_overview(store, plans, state, now, enabled):
             plan = snoozed_plan(base, snooze)
         except (ValueError, TypeError, KeyError):
             rows.append(ReminderRow(base.event_id, str(event.title), base.when, base.anchor, base.ddl,
-                                    "attention", "稍后提醒记录异常", "未派发，请取消稍后提醒后重新设置。", True))
+                                    "attention", "稍后提醒记录异常", "未派发，请取消稍后提醒后重新设置。", True,
+                                    rule=rule_label(event, base, config, True)))
             continue
         entry = state["deliveries"].get(plan.key, {})
         entry = entry if isinstance(entry, dict) else {}
@@ -54,8 +81,12 @@ def build_overview(store, plans, state, now, enabled):
             states = [value["status"] for value in channels.values()]
             needs_attention = any(value in ("failed", "unknown", "expired", "cancelled") for value in states)
             sending = any(value in ("pending", "dispatching") for value in states)
-            group = "attention" if needs_attention else ("snoozed" if is_snoozed and sending else
-                                                          "upcoming" if sending else "processed")
+            if needs_attention:
+                group = "attention"
+            elif sending:
+                group = "snoozed" if is_snoozed else "attention"
+            else:
+                group = "processed"
             statuses = [f"{'Windows' if channel == 'windows' else 'QQ'}: {STATUS_LABELS[value['status']]}"
                         for channel, value in channels.items()]
             details = [label + (f" ({value['reason']})" if value.get("reason") else "")
@@ -65,8 +96,12 @@ def build_overview(store, plans, state, now, enabled):
                        if value["status"] == "failed" and value["attempts"] < MAX_ATTEMPTS]
             retry = min((at for at in retries if at < expiry), default=None)
             details.insert(0, f"同一通知共 {len(batch['members'])} 项")
+            windows, qq = batch_channel_statuses(batch)
+            reason = "；".join(value["reason"] for value in channels.values()
+                              if value.get("reason") and value["status"] in ("failed", "unknown", "expired", "cancelled"))
             rows.append(ReminderRow(plan.event_id, str(event.title), plan.when, plan.anchor, plan.ddl,
-                                    group, " / ".join(statuses), "\n".join(details), is_snoozed and (sending or needs_attention), retry, batch_id))
+                                    group, " / ".join(statuses), "\n".join(details), is_snoozed and (sending or needs_attention),
+                                    retry, batch_id, windows, qq, rule_label(event, base, config, is_snoozed), reason))
             continue
         if status == "accepted":
             old_submitted += 1
@@ -102,12 +137,21 @@ def build_overview(store, plans, state, now, enabled):
                 text, detail = "已结束派发", "此计划已结束，不会自动补发。"
             elif status not in ("failed", "exhausted"):
                 text, detail = "已错过提醒", "已超过现有 24 小时补发范围，不会自动补发。"
+        if group == "upcoming" and plan.when < now:
+            group = "attention"
+            if text == "等待提醒":
+                text = "已到提醒时间"
+        elapsed = now - plan.when >= CATCHUP
+        waiting = "已过期" if elapsed else "待处理" if plan.when < now else "等待触发"
+        windows = text if status else (waiting if config["windows"] else "未启用")
+        qq = "未列入" if status else (waiting if config["qq"] else "未启用")
         rows.append(ReminderRow(plan.event_id, str(event.title), plan.when, plan.anchor, plan.ddl,
-                                group, text, detail, is_snoozed, next_attempt))
+                                group, text, detail, is_snoozed, next_attempt, windows=windows, qq=qq,
+                                rule=rule_label(event, base, config, is_snoozed)))
     order = {"attention": 0, "snoozed": 1, "upcoming": 2, "processed": 3}
     rows.sort(key=lambda row: (order[row.group], row.next_attempt or row.when, row.when))
     submitted = sum(batch["channels"].get("windows", {}).get("status") == "submitted"
                     for batch in state["batches"].values())
     qq_sent = sum(batch["channels"].get("qq", {}).get("status") == "sent"
                   for batch in state["batches"].values())
-    return ReminderOverview(enabled, tuple(rows), old_submitted + submitted, qq_sent)
+    return ReminderOverview(config["enabled"], tuple(rows), old_submitted + submitted, qq_sent)

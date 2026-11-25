@@ -57,6 +57,34 @@ class ReminderOverviewTests(unittest.TestCase):
         self.assertEqual(row.group, "upcoming")
         self.assertEqual(row.status, "等待提醒")
 
+    def test_projected_due_and_expired_plans_do_not_count_as_upcoming(self):
+        self.event("due", due="2031-10-24T23:59")
+        self.event("expired", due="2031-10-22T23:59")
+        self.event("future", due="2031-10-25T23:59")
+        overview = self.engine.overview(self.now + timedelta(minutes=5))
+        rows = {row.event_id: row for row in overview.rows}
+        self.assertEqual((rows["due"].group, rows["due"].windows), ("attention", "待处理"))
+        self.assertEqual((rows["expired"].group, rows["expired"].windows), ("attention", "已过期"))
+        self.assertEqual((rows["future"].group, rows["future"].qq), ("upcoming", "未启用"))
+
+    def test_channel_columns_project_each_durable_delivery_independently(self):
+        self.event()
+        self.engine.configure({"enabled": True, "qq": True})
+        plan = self.plan()
+        state = self.engine._state()
+        state["deliveries"][plan.key] = {"batch": plan.key}
+        state["batches"][plan.key] = {
+            "expires": (self.now + timedelta(days=1)).isoformat(),
+            "members": [[plan.event_id, plan.key]],
+            "channels": {"windows": {"status": "submitted"},
+                         "qq": {"status": "failed", "attempts": 1, "reason": "test rejection"}},
+        }
+        self.store.settings[STATE_KEY] = state
+        row = self.row()
+        self.assertEqual((row.windows, row.qq, row.group), ("已提交", "发送失败", "attention"))
+        self.assertIn("test rejection", row.detail)
+        self.assertIn("默认规则", row.rule)
+
     def test_read_does_not_rebuild_write_or_touch_cache(self):
         self.event()
         self.store.save()
