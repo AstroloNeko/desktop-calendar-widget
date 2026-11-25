@@ -156,21 +156,10 @@ class ReminderRoutingTests(unittest.TestCase):
         self.assertFalse(self.app._notification_test_pending)
         self.assertIn("暂未收到", self.app._notification_test_status)
 
-    def test_test_lease_prevents_premature_shutdown_while_off(self):
+    def test_disabled_scheduler_does_not_join_a_channel_worker(self):
         self.app.reminder_engine.config.return_value = {"enabled": False}
-        self.app._notification_test_until = 200
-        with patch("desktop_calendar.reminders.reminder_ui.time.monotonic", return_value=100):
-            self.app._native_reminders_tick()
+        self.app._native_reminders_tick()
         self.app.notification_backend.close.assert_not_called()
-
-    def test_disabled_backend_stops_when_test_lease_expires(self):
-        self.app.reminder_engine.config.return_value = {"enabled": False}
-        old_backend = self.app.notification_backend
-        with patch("desktop_calendar.reminders.reminder_ui.time.monotonic", return_value=201), \
-             patch("desktop_calendar.reminders.reminder_ui.WindowsNotificationBackend") as constructor:
-            self.app._native_reminders_tick()
-        old_backend.close.assert_called_once()
-        constructor.assert_called_once()
 
     def test_test_not_sent_while_exiting(self):
         self.app.lifecycle.exiting = True

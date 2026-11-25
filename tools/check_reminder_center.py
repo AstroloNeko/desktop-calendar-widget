@@ -121,6 +121,7 @@ def main():
                             assert app.grab_current() is settings
                             assert not app.hide_to_tray(), "settings modal could be hidden"
                             before = store.data_file.read_bytes()
+                            settings.tabs.select(2)
                             settings.test_button.invoke()
                             assert settings.test_button.cget("state") == "disabled"
                             backend.events.put(("test_delivery", ("f" * 32, True)))
@@ -131,14 +132,16 @@ def main():
                             settings.show_plans()
                             plan_window = app.notification_plan_window
                             pump(app, .12)
-                            assert not settings.winfo_exists()
-                            assert app.grab_current() is plan_window
-                            assert str(plan_window.transient()) == str(app)
+                            assert settings.winfo_exists()
+                            assert settings.tabs.index("current") == 3
+                            assert plan_window is settings.plan
+                            assert app.grab_current() is settings
+                            assert str(settings.transient()) == str(app)
                             assert not app.hide_to_tray(), "plan modal could be hidden"
                             assert not app.on_close(), "exit bypassed plan modal"
                             assert not app.lifecycle.exiting
                             assert len(plan_window.rows) == 65
-                            assert visible(plan_window.close_button, plan_window)
+                            assert visible(settings.save_button, settings)
                             plan_window.tree.yview_moveto(0)
                             plan_window.tree.event_generate("<MouseWheel>", delta=-120, x=60, y=60)
                             pump(app, .04)
@@ -184,10 +187,11 @@ def main():
                 # Small work area / high DPI: both windows retain reachable actions.
                 with patch.object(app.dpi, "work_area", return_value=WorkArea(0, 0, 1280, 800)):
                     app.open_reminder_plans()
-                    window = app.notification_plan_window
+                    window = app.notification_settings_window
                     pump(app, .1)
                     assert window.winfo_height() <= 800
-                    assert visible(window.close_button, window)
+                    assert visible(window.save_button, window)
+                    assert window.tabs.index("current") == 3
                     window.close()
                     app.open_reminder_settings()
                     window = app.notification_settings_window
@@ -205,7 +209,7 @@ def main():
                                   "modal_focus_search": "passed", "small_work_area": "passed",
                                   "event_data_unchanged": True, "errors": errors}, ensure_ascii=False))
             finally:
-                for window in (app.notification_settings_window, app.notification_plan_window, app.editor_window):
+                for window in (app.notification_settings_window, app.editor_window):
                     if window and window.winfo_exists():
                         window.close()
                 cleanup(app)

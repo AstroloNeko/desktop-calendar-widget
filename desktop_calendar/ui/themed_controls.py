@@ -53,12 +53,12 @@ def themed_popup_menu(parent, theme, font):
                    selectcolor=theme.accent)
 
 
-def form_entry(parent, app, variable, *, show="", width=1):
+def form_entry(parent, app, variable, *, show="", width=1, rounded=True):
     """The geometry widget may be a shell; the entry remains a native Tk field."""
     theme, dp = app.theme, app.dpi.px
     shell = (RoundedCardShell(parent, theme, dp, theme.input_background, surface=parent.cget("bg"),
                               outline=theme.input_border, cursor="xterm")
-             if theme.rounded_widget_shells else None)
+             if rounded and theme.rounded_widget_shells else None)
     entry = tk.Entry(shell or parent, textvariable=variable, show=show, width=width,
                      font=(app.search_font, 9), bg=theme.input_background,
                      fg=theme.text_primary, insertbackground=theme.text_primary,

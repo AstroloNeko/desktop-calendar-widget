@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from desktop_calendar.reminders.reminder_engine import CATCHUP, RETRY, local_wall, snoozed_plan
+from desktop_calendar.reminders.notification_dispatch import STATUS_LABELS, MAX_ATTEMPTS, read_time
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class ReminderRow:
     detail: str
     snoozed: bool = False
     next_attempt: datetime | None = None
+    batch: str = ""
 
 
 @dataclass(frozen=True)
@@ -24,10 +26,11 @@ class ReminderOverview:
     enabled: bool
     rows: tuple[ReminderRow, ...]
     submitted: int = 0
+    qq_sent: int = 0
 
 
 def build_overview(store, plans, state, now, enabled):
-    rows, submitted = [], 0
+    rows, old_submitted = [], 0
     events = {event.id: event for event in store.events}
     for base in plans:
         event = events.get(base.event_id)
@@ -44,8 +47,29 @@ def build_overview(store, plans, state, now, enabled):
         entry = state["deliveries"].get(plan.key, {})
         entry = entry if isinstance(entry, dict) else {}
         status = entry.get("status")
+        batch_id = entry.get("batch")
+        batch = state["batches"].get(batch_id)
+        if batch:
+            channels = batch["channels"]
+            states = [value["status"] for value in channels.values()]
+            needs_attention = any(value in ("failed", "unknown", "expired", "cancelled") for value in states)
+            sending = any(value in ("pending", "dispatching") for value in states)
+            group = "attention" if needs_attention else ("snoozed" if is_snoozed and sending else
+                                                          "upcoming" if sending else "processed")
+            statuses = [f"{'Windows' if channel == 'windows' else 'QQ'}: {STATUS_LABELS[value['status']]}"
+                        for channel, value in channels.items()]
+            details = [label + (f" ({value['reason']})" if value.get("reason") else "")
+                       for label, value in zip(statuses, channels.values())]
+            expiry = read_time(batch["expires"], now)
+            retries = [read_time(value.get("at"), now) + RETRY for value in channels.values()
+                       if value["status"] == "failed" and value["attempts"] < MAX_ATTEMPTS]
+            retry = min((at for at in retries if at < expiry), default=None)
+            details.insert(0, f"同一通知共 {len(batch['members'])} 项")
+            rows.append(ReminderRow(plan.event_id, str(event.title), plan.when, plan.anchor, plan.ddl,
+                                    group, " / ".join(statuses), "\n".join(details), is_snoozed and (sending or needs_attention), retry, batch_id))
+            continue
         if status == "accepted":
-            submitted += 1
+            old_submitted += 1
             continue
         if status == "snoozed":
             continue  # Superseded/cancelled; never promise another dispatch.
@@ -69,24 +93,21 @@ def build_overview(store, plans, state, now, enabled):
                 text = "正在提交 / 等待结果"
                 detail = ("尚未收到 Windows 接受结果；失败或中断后按原有规则有限重试。"
                           if next_attempt is not None else "尚未收到 Windows 接受结果；已是最后一次尝试，不会继续自动重试。")
-        if status in ("expired", "exhausted") or now - plan.when > CATCHUP:
+        if status == "unknown":
+            group, text, next_attempt = "attention", "发送结果不确定", None
+            detail = "旧版提交结果未确认。"
+        if status in ("expired", "exhausted") or now - plan.when >= CATCHUP:
             group, next_attempt = "attention", None
             if status == "expired" and now - plan.when <= CATCHUP:
                 text, detail = "已结束派发", "此计划已结束，不会自动补发。"
             elif status not in ("failed", "exhausted"):
                 text, detail = "已错过提醒", "已超过现有 24 小时补发范围，不会自动补发。"
-        # Reflect the existing burst gate without changing its state or heap.
-        if next_attempt is not None and next_attempt <= now:
-            burst = state["burst"]
-            try:
-                start = local_wall(datetime.fromisoformat(burst["at"]))
-                if 0 <= (now - start).total_seconds() < 300 and int(burst["count"]) >= 3:
-                    next_attempt = max(next_attempt, start + timedelta(minutes=5))
-                    detail += " 当前处于批量提醒限流，需等待下一窗口。"
-            except (ValueError, KeyError, TypeError, OverflowError):
-                pass
         rows.append(ReminderRow(plan.event_id, str(event.title), plan.when, plan.anchor, plan.ddl,
                                 group, text, detail, is_snoozed, next_attempt))
-    order = {"attention": 0, "snoozed": 1, "upcoming": 2}
+    order = {"attention": 0, "snoozed": 1, "upcoming": 2, "processed": 3}
     rows.sort(key=lambda row: (order[row.group], row.next_attempt or row.when, row.when))
-    return ReminderOverview(enabled, tuple(rows), submitted)
+    submitted = sum(batch["channels"].get("windows", {}).get("status") == "submitted"
+                    for batch in state["batches"].values())
+    qq_sent = sum(batch["channels"].get("qq", {}).get("status") == "sent"
+                  for batch in state["batches"].values())
+    return ReminderOverview(enabled, tuple(rows), old_submitted + submitted, qq_sent)

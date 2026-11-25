@@ -56,7 +56,7 @@ def main():
                             app.open_reminder_settings()
                             window = app.notification_settings_window
                             pump(app, .1)
-                            assert len(window.sections) == 4
+                            assert len(window.tabs.tabs()) == 4
                             assert visible(window.save_button, window)
                             if dpi == native:
                                 capture_own_window(window, output / f'{theme}-settings.png')
@@ -74,9 +74,10 @@ def main():
                                 capture_own_window(window, output / f'{theme}-settings-rules.png')
                             window.close()
                             app.open_reminder_plans()
+                            dialog = app.notification_settings_window
                             window = app.notification_plan_window
                             pump(app, .1)
-                            assert visible(window.close_button, window)
+                            assert visible(dialog.save_button, dialog)
                             assert len(window.rows) == 40
                             window.tree.selection_set('event:3')
                             window.show_selection()
@@ -86,7 +87,7 @@ def main():
                             window.show_selection()
                             assert window.cancel_button.cget('state') == 'normal'
                             if dpi == native:
-                                capture_own_window(window, output / f'{theme}-plans.png')
+                                capture_own_window(dialog, output / f'{theme}-plans.png')
                             for _ in range(15):
                                 window._hover(type('Point', (), {'y': 80})())
                             if window._hovered:
@@ -101,22 +102,23 @@ def main():
                                 pump(app, .05)
                                 assert window.empty_label.winfo_ismapped()
                                 if dpi == native:
-                                    capture_own_window(window, output / f'{theme}-empty.png')
+                                    capture_own_window(dialog, output / f'{theme}-empty.png')
                             window.close()
                             assert app.grab_current() is None
                             assert case_before == store.data_file.read_bytes(), 'Reminder windows wrote data'
                             cases.append((dpi, theme))
                 with patch.object(app.dpi, 'work_area', return_value=WorkArea(0, 0, 1280, 800)):
                     app.open_reminder_plans()
+                    dialog = app.notification_settings_window
                     window = app.notification_plan_window
                     pump(app, .1)
-                    assert window.winfo_height() <= 800 and visible(window.close_button, window)
-                    capture_own_window(window, output / 'small-work-area.png')
+                    assert dialog.winfo_height() <= 800 and visible(dialog.save_button, dialog)
+                    capture_own_window(dialog, output / 'small-work-area.png')
                     assert window.tree.winfo_height() >= app.dpi.px(3 * 29), ('Compact footer squeezed out reminder rows', window.tree.winfo_height())
                     window.tree.yview_moveto(1)
                     pump(app, .05)
                     assert window.tree.bbox(window.tree.get_children('upcoming')[-1])
-                    capture_own_window(window, output / 'small-work-area.png')
+                    capture_own_window(dialog, output / 'small-work-area.png')
                     window.close()
                 original = json.loads(before)
                 current = json.loads(store.data_file.read_bytes())
@@ -130,9 +132,9 @@ def main():
                 (output / 'results.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
                 print(json.dumps(result), flush=True)
             finally:
-                for window in (app.notification_settings_window, app.notification_plan_window):
-                    if window and window.winfo_exists():
-                        window.close()
+                window = app.notification_settings_window
+                if window and window.winfo_exists():
+                    window.close()
                 cleanup(app)
 
 

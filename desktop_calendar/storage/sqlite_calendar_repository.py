@@ -161,6 +161,13 @@ class SqliteCalendarRepository(JsonCalendarRepository):
         except sqlite3.Error as exc:
             raise OSError('SQLite 辅助状态保存失败：' + str(exc)) from exc
 
+    def write_reminder_preference(self, key, value):
+        """Update one auxiliary key without loading and validating the entire calendar."""
+        try:
+            self._apply({}, preferences={key: deepcopy(value)}, replace_preferences=False)
+        except sqlite3.Error as exc:
+            raise OSError('SQLite 提醒状态保存失败：' + str(exc)) from exc
+
     def apply_changes(self, changes, *, expected_revision=None, operation_id=None):
         try:
             return self._apply(changes, expected_revision=expected_revision, operation_id=operation_id)
@@ -200,7 +207,8 @@ class SqliteCalendarRepository(JsonCalendarRepository):
             return {row[0] for row in db.execute(
                 'SELECT id FROM events WHERE id IN ('+placeholders+')', identifiers)}
 
-    def _apply(self, changes, *, expected_revision=None, operation_id=None, preferences=None, initial_import=False):
+    def _apply(self, changes, *, expected_revision=None, operation_id=None, preferences=None, initial_import=False,
+               replace_preferences=True):
         from calendar_core import MutationUncertainError
         store = self.legacy_store
         if store.load_error: raise DataCompatibilityError(store.load_error)
@@ -220,7 +228,8 @@ class SqliteCalendarRepository(JsonCalendarRepository):
                          base=self._loaded.generation))
             else:
                 request[key] = sorted(val) if isinstance(val,set) else val
-        if preferences is not None: request['preferences'] = preferences
+        if preferences is not None:
+            request['preferences' if replace_preferences else 'preference_updates'] = preferences
         digest = hashlib.sha256(encoded(request).encode()).hexdigest()
         expected = self._loaded if expected_revision is None else expected_revision
         with closing(self._connect()) as db:
@@ -260,9 +269,14 @@ class SqliteCalendarRepository(JsonCalendarRepository):
                     for key in new-old: db.execute('INSERT INTO reminder_delivery_state VALUES(?,?)', (actual.session,key))
                     changed |= old != new
                 if preferences is not None:
-                    old = {r[0]:r[1] for r in db.execute('SELECT key,value_json FROM preferences')}
-                    new = {key:encoded(val) for key,val in preferences.items()}
-                    for key in old.keys()-new.keys(): db.execute('DELETE FROM preferences WHERE key=?',(key,))
+                    new = {key: encoded(val) for key, val in preferences.items()}
+                    if replace_preferences:
+                        old = {r[0]: r[1] for r in db.execute('SELECT key,value_json FROM preferences')}
+                        for key in old.keys() - new.keys():
+                            db.execute('DELETE FROM preferences WHERE key=?', (key,))
+                    else:
+                        old = {key: row[0] for key in new
+                               if (row := db.execute('SELECT value_json FROM preferences WHERE key=?', (key,)).fetchone())}
                     for key,val in new.items():
                         if old.get(key) != val:
                             db.execute('INSERT INTO preferences VALUES(?,?,?,?) ON CONFLICT(calendar_id,key) DO UPDATE SET value_json=excluded.value_json,scope=excluded.scope',
@@ -302,7 +316,8 @@ class SqliteCalendarRepository(JsonCalendarRepository):
                     raise MutationUncertainError(store.load_error) from exc
                 new_revision = proof['committed_revision']
         for key,value in candidates.items(): setattr(store,key,value)
-        if preferences is not None: store.settings = preferences
+        if preferences is not None:
+            store.settings = preferences if replace_preferences else {**store.settings, **preferences}
         self._loaded = SnapshotToken(actual.session,new_revision)
         return RepositoryCommit(True,self._loaded,operation_id)
 

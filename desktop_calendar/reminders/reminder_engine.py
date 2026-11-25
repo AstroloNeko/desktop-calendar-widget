@@ -15,6 +15,7 @@ import json
 from urllib.parse import parse_qs, urlencode
 
 from calendar_core import normalize_reminder_time
+from desktop_calendar.reminders.notification_model import brief_settings
 
 CONFIG_KEY = "native_reminders"
 STATE_KEY = "native_reminder_state"
@@ -38,6 +39,9 @@ def normalize_config(raw):
     result = deepcopy(DEFAULT_CONFIG)
     result.update(enabled=raw.get("enabled") is True, private=raw.get("private") is True,
                   time=normalize_reminder_time(raw.get("time")) or "09:00")
+    for key in ("windows", "aggregate", "merge_backlog", "qq"):
+        result[key] = raw.get(key, key != "qq") is True
+    result["brief"] = brief_settings(raw.get("brief"))
     for key in ("general_days", "ddl_days"):
         value = raw.get(key, result[key])
         if type(value) is int and value in LEADS:
@@ -150,14 +154,10 @@ def parse_activation(value):
 
 
 class ReminderEngine:
-    """All methods are owned by the Tk/main thread; backend is injected.
-
-    backend.send(plan, title, text, actions) is asynchronous; results must call
-    acknowledge. Reservation is persisted *before* send, limiting crash retries.
-    At most three accepted dispatches per poll, three attempts per plan. Stable
-    OS tags replace the same history item across the unavoidable send/ack gap.
-    """
-    def __init__(self, store, backend):
+    """Calendar plan and ledger owner. Channel workers only receive detached notices."""
+    def __init__(self, store, backend, qq=None):
+        from desktop_calendar.reminders.notification_dispatch import DeliveryQueue
+        self.delivery = DeliveryQueue(self, qq)
         self.store, self.backend = store, backend
         self.dirty = True
         self.plans = {}
@@ -175,12 +175,17 @@ class ReminderEngine:
             raw = {}
         if type(raw.get("version", 1)) is not int or raw.get("version", 1) != 1:
             raise ReminderError("提醒记录版本不兼容，已停止提醒；日历数据未改变。")
-        return {"version": 1,
-                "deliveries": deepcopy(raw.get("deliveries")) if isinstance(raw.get("deliveries"), dict) else {},
-                "snoozes": deepcopy(raw.get("snoozes")) if isinstance(raw.get("snoozes"), dict) else {},
-                "burst": deepcopy(raw.get("burst")) if isinstance(raw.get("burst"), dict) else {}}
+        return {"version": 1, **{
+            key: deepcopy(raw[key]) if isinstance(raw.get(key), dict) else {}
+            for key in ("deliveries", "snoozes", "batches", "qq_cutover")
+        }}
 
     def _save(self, key, value):
+        write_preference = getattr(self.store.repository, "write_reminder_preference", None)
+        if write_preference is not None:
+            write_preference(key, value)
+            self.revision += 1
+            return
         missing = key not in self.store.settings
         previous = self.store.settings.get(key)
         self.store.settings[key] = deepcopy(value)
@@ -197,6 +202,8 @@ class ReminderEngine:
     def configure(self, config):
         normalized = normalize_config(config)
         self._save(CONFIG_KEY, normalized)
+        if self.delivery.qq is not None:
+            self.delivery.qq.set_privacy(normalized["private"])
         self.invalidate()
 
     def invalidate(self):
@@ -221,13 +228,24 @@ class ReminderEngine:
                 changed = True
         if changed:
             self._save(STATE_KEY, state)
-        self.queue = []
+        self.delivery.remove_stale(state)
+        ready = []
+        last_in_minute = {}
         for plan in self.plans.values():
             try:
                 plan = snoozed_plan(plan, state["snoozes"].get(plan.event_id))
             except (ValueError, TypeError, KeyError):
-                continue  # Corrupt snooze is not silently sent as a base reminder.
-            heapq.heappush(self.queue, (plan.when, plan.key, plan))
+                continue
+            entry = state["deliveries"].get(plan.key, {})
+            if isinstance(entry, dict) and (entry.get("batch") or entry.get("status") in
+                                            ("accepted", "expired", "exhausted", "snoozed", "unknown")):
+                continue
+            minute = plan.ddl, plan.when.replace(second=0, microsecond=0)
+            last_in_minute[minute] = max(last_in_minute.get(minute, plan.when), plan.when)
+            ready.append((minute, plan))
+        self.queue = [(last_in_minute[minute] if config["aggregate"] else plan.when, plan.key, plan)
+                      for minute, plan in ready]
+        heapq.heapify(self.queue)
         self.rebuild_count += 1
         self.dirty = False
 
@@ -263,113 +281,78 @@ class ReminderEngine:
         return build_overview(self.store, plans, state, local_wall(now), config["enabled"])
 
     def tick(self, now):
-        now = local_wall(now)
+        self.delivery.tick(local_wall(now))
+        return 2000
+
+    def acknowledge(self, key, success, now, attempt=None, reason=""):
+        if attempt is None:
+            attempt = self._state()["batches"].get(key, {}).get("channels", {}).get("windows", {}).get("attempts")
+        if attempt is not None:
+            self.delivery.acknowledge(key, "windows", attempt, "submitted" if success else "failed",
+                                      local_wall(now), reason)
+
+    def batch_members(self, key):
         if self.dirty:
             self._rebuild()
-        if not self.config()["enabled"]:
-            return 15000
-        if not self.queue or self.queue[0][0] > now:
-            return 15000
         state = self._state()
-        deliveries = state["deliveries"]
-        sent = 0
-        # The heap already excludes completed/deleted events after invalidation.
-        while self.queue and self.queue[0][0] <= now and sent < 3:
-            _, _, plan = heapq.heappop(self.queue)
-            entry = deliveries.get(plan.key, {})
-            if not isinstance(entry, dict):
-                entry = {}
-            if entry.get("status") in ("accepted", "expired", "exhausted", "snoozed"):
-                continue
-            attempts = entry.get("attempts", 0)
-            attempts = attempts if type(attempts) is int and 0 <= attempts <= 3 else 3
-            if now - plan.when > CATCHUP:
-                continue
-            if entry.get("status") in ("dispatching", "failed"):
-                try:
-                    retry = local_wall(datetime.fromisoformat(entry["at"])) + RETRY
-                except (KeyError, ValueError, TypeError):
-                    retry = now
-                if retry > now:
-                    heapq.heappush(self.queue, (retry, plan.key, plan))
-                    continue
-            if attempts >= 3:
-                deliveries[plan.key] = {"status": "exhausted", "at": now.isoformat(), "attempts": attempts}
-                self._save(STATE_KEY, state)
-                continue
-            event = self.store.event_by_id(plan.event_id)
-            if event is None or event.done:
-                continue
-            burst = state["burst"]
-            try:
-                burst_start = local_wall(datetime.fromisoformat(burst["at"]))
-                count = int(burst["count"])
-            except (ValueError, TypeError, KeyError):
-                burst_start, count = now, 0
-            if not timedelta() <= now - burst_start < timedelta(minutes=5):
-                burst_start, count = now, 0
-            if count >= 3:
-                retry = burst_start + timedelta(minutes=5)
-                heapq.heappush(self.queue, (retry, plan.key, plan))
-                break
-            state["burst"] = {"at": burst_start.isoformat(), "count": count + 1}
-            deliveries[plan.key] = {"status": "dispatching", "at": now.isoformat(), "attempts": attempts + 1}
-            try:
-                self._save(STATE_KEY, state)
-            except Exception:
-                self.invalidate()
-                raise  # No notification is sent if the durable reservation fails.
-            private = self.config()["private"]
-            text = "你有一项日程需要处理" if private else ("截止提醒：" if plan.ddl else "日程提醒：") + str(event.title)[:200]
-            try:
-                self.backend.send(plan, "桌面月历 · 日程提醒", text,
-                                  [(f"{minutes} 分钟后", notification_arguments(plan, str(minutes))) for minutes in SNOOZES])
-            except Exception:
-                self.acknowledge(plan.key, False, now)
-            heapq.heappush(self.queue, (now + RETRY, plan.key, plan))
-            sent += 1
-        delay = 15000
-        if self.queue:
-            delay = max(1000, min(delay, int((self.queue[0][0] - now).total_seconds() * 1000)))
-        return delay
+        record = state["batches"].get(key)
+        return self.delivery.current_members(record, state) if record else ()
 
-    def acknowledge(self, key, success, now):
-        state = self._state()
-        entry = state["deliveries"].get(key)
-        if not isinstance(entry, dict):
-            return
-        # An async Failed event may arrive before the Show return result.
-        if success and entry.get("status") != "dispatching":
-            return
-        entry.update(status="accepted" if success else "failed", at=local_wall(now).isoformat())
-        self._save(STATE_KEY, state)
-        if not success:
-            self.invalidate()
+    def batch_record(self, key):
+        return self._state()["batches"].get(key)
 
     def snooze(self, event_id, key, minutes, now):
+        return bool(self._snooze_many(((event_id, key),), minutes, local_wall(now)))
+
+    def _snooze_many(self, members, minutes, now):
         if minutes not in SNOOZES:
             raise ReminderError("不支持的延后时间")
         if self.dirty:
             self._rebuild()
-        plan = self.plans.get(event_id)
-        event = self.store.event_by_id(event_id)
-        if not plan or not event or event.done:
-            return False
         state = self._state()
-        previous = state["snoozes"].get(event_id, {})
-        previous = previous if isinstance(previous, dict) else {}
-        if key not in (plan.key, previous.get("key")):
-            return False
-        when = local_wall(now) + timedelta(minutes=minutes)
-        snooze_key = hashlib.sha256(f"{plan.key}:snooze:{when.isoformat()}".encode()).hexdigest()
-        state["deliveries"][plan.key] = {"status": "snoozed", "at": local_wall(now).isoformat(), "attempts": 0}
-        if previous.get("key"):
-            state["deliveries"][previous["key"]] = {"status": "snoozed", "at": local_wall(now).isoformat(), "attempts": 0}
-        state["snoozes"][event_id] = {"base": plan.key, "key": snooze_key, "at": when.isoformat()}
-        self._save(STATE_KEY, state)
-        self.backend.remove(key[:16])
-        self.invalidate()
-        return True
+        when = now + timedelta(minutes=minutes)
+        current = self.delivery.current_members({"members": members}, state)
+        for event_id, key in current:
+            plan = self.plans[event_id]
+            snooze_key = hashlib.sha256(f"{plan.key}:snooze:{when.isoformat()}".encode()).hexdigest()
+            marker = {"status": "snoozed", "at": now.isoformat(), "attempts": 0}
+            state["deliveries"][plan.key] = marker
+            state["deliveries"][key] = marker
+            state["snoozes"][event_id] = {"base": plan.key, "key": snooze_key, "at": when.isoformat()}
+        if current:
+            self._save(STATE_KEY, state)
+            for _event_id, key in current:
+                self.backend.remove(key[:16])
+            self.invalidate()
+        return len(current)
+
+    def apply_qq_action(self, identifier, action, binding, now):
+        """Called on the calendar owner thread by the verified remote-action adapter."""
+        now = local_wall(now)
+        from desktop_calendar.reminders.notification_dispatch import read_time
+        if binding is None or binding != self.delivery.binding():
+            raise ReminderError("远程绑定已变更")
+        state = self._state()
+        batch = state["batches"].get(identifier, {})
+        qq = batch.get("channels", {}).get("qq", {})
+        config = self.config()
+        if (not config["enabled"] or not config["qq"] or batch.get("scope") != binding.scope
+                or batch.get("kind") not in ("event", "ddl") or qq.get("status") != "sent"
+                or read_time(batch.get("expires"), now) <= now):
+            raise ReminderError("提醒交互已失效")
+        if action == "acknowledge":
+            if not qq.get("acknowledged_at"):
+                qq["acknowledged_at"] = now.isoformat()
+                self._save(STATE_KEY, state)
+            return {"acknowledged": True}
+        if config["private"]:
+            raise ReminderError("当前通知已启用隐私保护")
+        if action == "snooze_10m":
+            return {"snoozed": self._snooze_many(batch["members"], 10, now)}
+        if action == "view_items":
+            from desktop_calendar.reminders.notification_model import event_items
+            return {"items": event_items(self.store, self.batch_members(identifier), False)}
+        raise ReminderError("不支持的提醒交互")
 
     def cancel_snooze(self, event_id):
         state = self._state()
@@ -393,4 +376,5 @@ class ReminderEngine:
         state = self._state()
         snooze = state["snoozes"].get(event_id, {})
         snooze = snooze if isinstance(snooze, dict) else {}
-        return bool(plan and (key == plan.key or (snooze.get("base") == plan.key and key == snooze.get("key"))))
+        return bool(plan and key == (snooze.get("key") if snooze.get("base") == plan.key else plan.key)
+                    and state["deliveries"].get(key, {}).get("status") != "snoozed")

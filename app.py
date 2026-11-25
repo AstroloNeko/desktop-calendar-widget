@@ -3233,6 +3233,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self._init_native_reminders(resource_path("."))
         self.after(500, lambda: start_chat_if_enabled(self))
         self.after(1200, self.check_reminders)
+        self.after(1200, self._schedule_calendar_reminders)
 
     @staticmethod
     def _load_image(relative: str) -> Optional[tk.PhotoImage]:
@@ -7125,8 +7126,6 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                          command=lambda: self._queue_context_menu_action(menu, self._open_assistant))
         menu.add_command(label="AI 助理设置…",
                          command=lambda: self._queue_context_menu_action(menu, lambda: open_ai_settings(self)))
-        menu.add_command(label="提醒计划…",
-                         command=lambda: self._queue_context_menu_action(menu, self.open_reminder_plans))
         menu.add_command(label=f"检查更新…（当前 v{__version__}）", command=self.check_for_updates)
         data_menu = themed_popup_menu(menu, self.theme, (FONT, 9))
         data_menu.add_command(label='当前存储：SQLite 已启用' if self._sqlite_backup_boundary() else '当前存储：JSON', state='disabled')
@@ -7341,15 +7340,13 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                              f"更新尚未完成，已中止交接。\n\n{exc}\n\n请勿用旧程序覆盖较新数据；必要时使用新版独立修复工具。")
 
     def check_reminders(self) -> None:
-        now = datetime.now()
-        delay = self._native_reminders_tick()
-        changed = False
-        if self._check_routine_reminder(now):
-            changed = True
-        if changed:
-            self.store.save()
-            self.render()
-        self.after(delay, self.check_reminders)
+        try:
+            if self._check_routine_reminder(datetime.now()):
+                self.store.save()
+                self.render()
+        finally:
+            if not self.lifecycle.exiting:
+                self.after(15000, self.check_reminders)
 
     def _check_routine_reminder(self, now: datetime) -> bool:
         due = self.store.due_routine_reminders(now)

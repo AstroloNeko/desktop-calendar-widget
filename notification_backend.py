@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
+from datetime import datetime
 import os
 from pathlib import Path
 import queue
@@ -17,6 +18,7 @@ import uuid
 
 from native_notifications import NativeNotificationError, WinRTTransport, toast_xml
 from desktop_calendar.reminders.reminder_engine import notification_arguments
+from desktop_calendar.reminders.notification_model import Notice
 
 
 def notification_identity(executable, data_file, *, frozen):
@@ -191,9 +193,16 @@ class WindowsNotificationBackend:
                         actions = []
                     else:
                         plan, title, text, actions = value
-                        tag, arguments = plan.tag, notification_arguments(plan)
+                        tag = plan.tag
+                        arguments = (plan.activation if isinstance(plan, Notice) and not plan.event_id
+                                     else notification_arguments(plan))
                     try:
                         if tag in self._cancelled_tags:
+                            if not testing and isinstance(plan, Notice):
+                                self.events.put(("notice_delivery", (plan.key, plan.attempt, "cancelled", "")))
+                            continue
+                        if not testing and isinstance(plan, Notice) and datetime.now() >= plan.expires:
+                            self.events.put(("notice_delivery", (plan.key, plan.attempt, "expired", "")))
                             continue
                         if initialization_error:
                             raise RuntimeError(initialization_error)
@@ -207,13 +216,19 @@ class WindowsNotificationBackend:
                             raise RuntimeError(f"Windows 已限制通知（状态 {permission}）；未派发。")
                         transport.show(tag, toast_xml(title, text, arguments,
                                                            self.root / "assets/calendar.png", actions))
-                        self.events.put(("test_delivery" if testing else "delivery", (value if testing else plan.key, True)))
+                        if not testing and isinstance(plan, Notice):
+                            self.events.put(("notice_delivery", (plan.key, plan.attempt, "submitted", "")))
+                        else:
+                            self.events.put(("test_delivery" if testing else "delivery", (value if testing else plan.key, True)))
                     except Exception as error:
                         if testing:
                             self.events.put(("test_error", (value, str(error))))
                         else:
                             self.events.put(("error", str(error)))
-                        self.events.put(("test_delivery" if testing else "delivery", (value if testing else plan.key, False)))
+                        if not testing and isinstance(plan, Notice):
+                            self.events.put(("notice_delivery", (plan.key, plan.attempt, "failed", str(error))))
+                        else:
+                            self.events.put(("test_delivery" if testing else "delivery", (value if testing else plan.key, False)))
                 elif action == "remove":
                     try:
                         if not initialization_error:

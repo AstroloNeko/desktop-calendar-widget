@@ -202,10 +202,10 @@ class ReminderOverviewTests(unittest.TestCase):
         self.assertEqual(before, self.store.settings)
         self.backend.remove.assert_not_called()
 
-    def test_burst_gate_shown_as_earliest_attempt(self):
+    def test_legacy_burst_gate_no_longer_delays_a_reminder(self):
         self.event()
         self.store.settings[STATE_KEY] = {"burst": {"at": self.now.isoformat(), "count": 3}}
-        self.assertEqual(self.row().next_attempt, self.now + timedelta(minutes=5))
+        self.assertEqual(self.row().next_attempt, self.now)
 
     def test_legacy_snooze_can_be_cancelled_before_first_tick(self):
         event = self.event(snooze_until="2031-10-24T11:00")

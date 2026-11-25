@@ -148,19 +148,21 @@ class ReminderEngineTests(unittest.TestCase):
         self.engine.tick(datetime(2026, 10, 24, 9, 20))
         self.assertEqual(self.backend.send.call_count, 1)
 
-    def test_burst_limit_persists_and_no_repeated_full_scan(self):
+    def test_batch_persists_and_no_repeated_full_scan(self):
         for index in range(1000):
             self.event(id=f"test-{index}")
         self.engine.tick(self.now)
-        self.assertEqual(self.backend.send.call_count, 3)
+        self.backend.send.assert_called_once()
+        notice = self.backend.send.call_args.args[0]
+        self.assertEqual(len(notice.items), 1000)
+        self.engine.acknowledge(notice.key, True, self.now)
         count = self.engine.rebuild_count
         for _ in range(20):
             self.engine.tick(self.now + timedelta(seconds=15))
         self.assertEqual(self.engine.rebuild_count, count)
-        self.assertEqual(self.backend.send.call_count, 3)
         restarted = ReminderEngine(Store(self.path), self.backend)
         restarted.tick(self.now + timedelta(minutes=1))
-        self.assertEqual(self.backend.send.call_count, 3)
+        self.backend.send.assert_called_once()
 
     def test_failure_retry_bounded_not_permanent_success(self):
         self.event()
@@ -171,7 +173,7 @@ class ReminderEngineTests(unittest.TestCase):
             self.engine.acknowledge(key, False, now)
         self.engine.tick(self.now + timedelta(hours=1))
         self.assertEqual(self.backend.send.call_count, 3)
-        self.assertNotEqual(self.engine._state()["deliveries"][key]["status"], "accepted")
+        self.assertNotEqual(self.engine.batch_record(key)["channels"]["windows"]["status"], "accepted")
 
     def test_async_failure_wins_over_late_show_success(self):
         self.event()
@@ -179,16 +181,17 @@ class ReminderEngineTests(unittest.TestCase):
         key = self.plan().key
         self.engine.acknowledge(key, False, self.now)
         self.engine.acknowledge(key, True, self.now)
-        self.assertEqual(self.engine._state()["deliveries"][key]["status"], "failed")
+        self.assertEqual(self.engine.batch_record(key)["channels"]["windows"]["status"], "failed")
 
-    def test_crash_after_reservation_waits_before_retry(self):
+    def test_crash_after_reservation_is_unknown_without_retry(self):
         self.event()
         self.engine.tick(self.now)
         restarted = ReminderEngine(Store(self.path), self.backend)
         restarted.tick(self.now + timedelta(seconds=10))
         self.assertEqual(self.backend.send.call_count, 1)
         restarted.tick(self.now + timedelta(minutes=2))
-        self.assertEqual(self.backend.send.call_count, 2)
+        self.backend.send.assert_called_once()
+        self.assertEqual(restarted.batch_record(self.plan().key)["channels"]["windows"]["status"], "unknown")
 
     def test_persist_failure_prevents_send_and_rolls_back(self):
         self.event()
