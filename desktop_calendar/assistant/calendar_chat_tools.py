@@ -126,8 +126,12 @@ DESCRIPTIONS['propose_events'] = ('提交一个完整的同类事项计划。cre
     '创建使用items。修改、完成、删除优先用target替代items，无需先查ID。target用start/end含端点、titles精确标题数组'
     '（全部事项为[]）、quantity=one或all_matches；日期不明确时省略start/end。修改值用顶层fields或color_policy，'
     '完成值用顶层done。用户要求先预览时preview_only=true。宿主查询、选择、确认和执行。')
-TOOLS = [{"type": "function", "function": {"name": name, "description": DESCRIPTIONS[name], "parameters": schema}}
-         for name, schema in SCHEMAS.items() if name not in EVENT_ADAPTERS]
+def tool_definition(name):
+    return {"type": "function", "function": {"name": name, "description": DESCRIPTIONS[name],
+                                              "parameters": SCHEMAS[name]}}
+
+
+TOOLS = [tool_definition(name) for name in SCHEMAS if name not in EVENT_ADAPTERS]
 
 
 def validate(value, schema, path='arguments'):

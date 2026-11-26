@@ -226,6 +226,48 @@ class RemoteInteractionTests(unittest.TestCase):
         self.assertEqual(len(self.provider.messages), calls)
         self.assertFalse(self.events())
 
+    def test_numbered_reference_with_same_title_passes_locked_target_and_scoped_tools_to_model(self):
+        self.enable()
+        self.event('first', '同名组会')
+        for index, phrase in enumerate(('把第2个改到下午三点', '把第二个改到下午三点')):
+            with self.subTest(phrase=phrase):
+                self.event('second', '同名组会')
+                origin = f'numbered-list-{index}'
+                listed = self.data(self.native(origin, context=self.quick_query()))
+                self.assertEqual([event['title'] for event in listed['business_receipt']['events']], ['同名组会'] * 2)
+                reference = dict(schema_version=1, kind='reference', source_msg_id=origin, index=2)
+                job = self.native(f'numbered-update-{index}', phrase, context=reference)
+                proposal = fixture.tool('preview_update', {'event_id': 'second', 'changes': {'time': '15:00'}})
+                illegal_search = fixture.tool('query_events', {'keyword': '同名组会'})
+                replies = [illegal_search, proposal] if index else [proposal]
+                before = len(self.provider.messages)
+                with patch.object(self.provider, 'complete', wraps=self.provider.complete) as complete, \
+                        patch.object(self.service.gateway, 'query', side_effect=AssertionError('reference searched again')):
+                    preview = self.data(job, replies)
+                    self.assertEqual(preview['business_receipt']['result_type'], 'confirmation')
+                    _, tools = complete.call_args_list[0].args
+                    messages = self.provider.messages[before]
+                    self.assertEqual({tool['function']['name'] for tool in tools},
+                                     {'preview_update', 'preview_complete', 'get_event', 'list_categories', 'clarify'})
+                    self.assertEqual(messages[-1], {'role': 'user', 'content': phrase})
+                    instruction, encoded_state = messages[0]['content'].split('\n', 1)
+                    state = json.loads(encoded_state)
+                    self.assertIn('不要按句中序号再定位', instruction)
+                    self.assertEqual(state['selected_event_id'], 'second')
+                    self.assertEqual([row['id'] for row in state['candidates']], ['second'])
+                    self.assertEqual(complete.call_count, len(replies))
+                    if index:
+                        followup = self.provider.messages[before + 1]
+                        self.assertTrue(any(item['role'] == 'tool' and 'tool_not_available' in item['content']
+                                            for item in followup))
+                self.assertTrue(all(item.due.endswith('10:00') for item in self.events()))
+                done = self.data(self.click(f'numbered-confirm-{index}', job['msg_id'], preview, 'confirm'))
+                self.assertEqual(done['business_receipt']['result_type'], 'update')
+                self.assertEqual({item.id: item.due[-5:] for item in self.events()}, {'first': '10:00', 'second': '15:00'})
+                with patch.object(self.provider, 'complete', side_effect=AssertionError('stale reference called model')):
+                    stale = self.data(self.native(f'numbered-stale-{index}', phrase, context=reference))
+                self.assertEqual(stale['error'], 'reference_conflict')
+
     def test_high_risk_buttons_keep_both_confirmation_stages(self):
         self.enable()
         for index in range(6):
