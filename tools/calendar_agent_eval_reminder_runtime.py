@@ -63,6 +63,19 @@ def brief(day, group, title):
     return check
 
 
+def selected_brief(slot, scope):
+    def check(response):
+        actual = response["brief_result"]
+        require((actual["slot"], actual["scope"]) == (slot, scope), "wrong brief mode")
+        require(actual["agenda_count"] == 1 and any(item["title"] == "组会" for item in actual["items"]),
+                "incorrect today's pending items")
+        if slot == "evening":
+            require(actual["completion"] == {"total":1, "completed":0, "remaining":1, "percent":0},
+                    "wrong evening statistics")
+        return actual
+    return check
+
+
 def runtime_plan(kind, identifier, **patch):
     def check(response):
         require(response["status"] == "confirmation_required", "did not reach runtime confirmation")
@@ -106,6 +119,8 @@ def cases(calendar):
         "next": ([("下一次提醒是什么时候？", titles(["组会"]))],False),
         "missed": ([("有哪些已经错过的提醒？", titles(["合成作业"]))],False),
         "brief": ([("给我看看明天的行程简报。", brief("2026-11-27","timed","HPLC实验"))],False),
+        "evening-preview": ([("给我看看今天的晚间简报。", selected_brief("evening", "agenda"))],False),
+        "remaining-today": ([("看一下今天还有哪些事情没完成。", selected_brief("morning", "remaining"))],False),
         "ddl": ([("最近有哪些DDL需要注意？", brief("2026-11-26","upcoming","合成周报"))],False),
         "snooze-cancel": ([
             ("组会这条提醒推迟10分钟。", runtime_plan("snooze","meeting",minutes=10)),
@@ -153,7 +168,10 @@ def config_query(response):
 
 def config_cases(calendar):
     scenarios = {
-        "enable-brief": ("以后每天早上八点发日报。", {"brief.enabled":True,"brief.time":"08:00"}),
+        "default-instant-off": ("以后默认不要即时提醒。", {"enabled":False}),
+        "enable-evening": ("每天下午六点发晚间简报。", {"brief.evening_enabled":True,"brief.evening_time":"18:00"}),
+        "disable-evening": ("关闭晚间简报。", {"brief.evening_enabled":False}),
+        "enable-brief": ("每天早上八点发晨间简报。", {"brief.enabled":True,"brief.time":"08:00"}),
         "brief-time": ("日报改到早上九点半。", {"brief.time":"09:30"}),
         "brief-content": ("日报不要显示逾期DDL，近期DDL看未来五天。", {"brief.overdue":False,"brief.days":5}),
         "global-ddl": ("DDL统一提前三天提醒。", {"ddl_days":3}),
@@ -177,7 +195,7 @@ def config_cases(calendar):
 def main():
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", required=True)
-    parser.add_argument("--config", type=Path, required=True, help="Explicit read-only QA configuration.dpapi")
+    parser.add_argument("--config", type=Path, required=True, help="Explicit read-only configuration.dpapi authorized for Live evaluation")
     parser.add_argument("--cases", nargs="+")
     parser.add_argument("--suite", choices=("runtime","config"), default="runtime")
     args = parser.parse_args()
@@ -196,7 +214,8 @@ def main():
                 config = CONFIG
                 if configuration:
                     config = {**CONFIG, "aggregate":False, "private":case == "privacy",
-                              "brief":{**CONFIG["brief"], "enabled":case == "disable-brief"}}
+                              "brief":{**CONFIG["brief"], "enabled":case == "disable-brief",
+                                       "evening_enabled":case == "disable-evening", "evening_time":"19:00"}}
                 calendar = EvaluationCalendar(root,recorder,MOMENT,config)
                 try:
                     calendar.start()

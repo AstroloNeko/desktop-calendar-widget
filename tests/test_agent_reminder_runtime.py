@@ -269,7 +269,7 @@ class AgentReminderRuntimeTests(TestCase):
 
         response = self.send("/brief")
         brief = response["brief_result"]
-        self.assertEqual(brief["counts"], {"timed":19, "untimed":5, "unfinished":0, "upcoming":6, "overdue":4})
+        self.assertEqual(brief["counts"], {"timed":19, "untimed":5, "unfinished":0, "today_ddl":0, "upcoming":6, "overdue":4})
         self.assertEqual(brief["agenda_count"], 24)
         selected = [item["event_id"] for item in brief["items"]]
         self.assertEqual(selected, [f"{group}-{index:02d}" for group, limit in (

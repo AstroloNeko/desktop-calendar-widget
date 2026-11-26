@@ -13,6 +13,12 @@ from desktop_calendar.remote_interaction import CAPABILITY_REQUEST, LEGACY_CAPAB
 from desktop_calendar.remote_transport import Client, StatusError, Unavailable, normalize_url, valid_token
 
 
+NOTIFICATION_CAPABILITY_REQUEST = json.dumps({
+    **json.loads(CAPABILITY_REQUEST),
+    'brief_context_version': 1,
+}, separators=(',', ':')).encode('utf-8')
+
+
 def valid_account(account):
     return (isinstance(account, str) and 0 < len(account) <= 256
             and all(char.isprintable() and not char.isspace() for char in account))
@@ -60,6 +66,7 @@ class NotificationSession:
     interaction_capabilities: tuple = LEGACY_CAPABILITIES
     proactive_enabled: bool = False
     proactive_actions: tuple = ()
+    brief_context_version: int = 0
 
     def __post_init__(self):
         try:
@@ -104,7 +111,7 @@ class FirebaseNotificationContract:
     """Cloud Run issues a short-lived ID token for exactly one wakeup path."""
 
     def notification_session(self, client, token, expected_account=''):
-        data = client.request('/api/notifications/session', token, CAPABILITY_REQUEST)
+        data = client.request('/api/notifications/session', token, NOTIFICATION_CAPABILITY_REQUEST)
         account = data.get('user_id')
         if expected_account and account != expected_account:
             raise AccountMismatch('通知账户与本机绑定账户不符。')
@@ -140,8 +147,11 @@ class FirebaseNotificationContract:
                    and isinstance(proactive.get('supported_actions'), list))
         actions = tuple(action for action in ('acknowledge','view_items','snooze_10m','view_today','view_week','view_ddl')
                         if action in proactive['supported_actions']) if enabled and 'proactive_action' in capabilities else ()
+        context = proactive.get('brief_context_version') if enabled else None
+        brief_context_version = 1 if type(context) is int and context == 1 else 0
         return NotificationSession(stream_url, data.get('id_token'), now + remaining, now + refresh_after, account,
-                                   display_name(data.get('display_name')), version, capabilities, enabled, actions)
+                                   display_name(data.get('display_name')), version, capabilities, enabled, actions,
+                                   brief_context_version)
 
 
 NOTIFICATION_CONTRACT = FirebaseNotificationContract()

@@ -45,14 +45,20 @@ class EventInputTests(TestCase):
                 value = str(value) if value is not None else ''
             setattr(editor, attribute, SimpleNamespace(get=lambda value=value: value))
         from calendar_core import REMINDERS
-        label = next(label for label, minutes in REMINDERS.items() if minutes == defaults['reminder'])
+        editor.default_reminder_choice = '默认即时提醒'
+        editor.explicit_reminder_choice = '明确提醒'
+        editor.off_reminder_choice = '不进行即时提醒'
+        editor.reminder_choices = {label: minutes for label, minutes in REMINDERS.items() if minutes is not None}
+        editor.reminder_changed = 'reminder' in values
+        label = next((label for label, minutes in editor.reminder_choices.items()
+                      if minutes == defaults['reminder']), editor.default_reminder_choice)
         editor.reminder_var = SimpleNamespace(get=lambda: label)
         editor.notes = SimpleNamespace(get=lambda *a: defaults['notes'])
         editor._selected_category = lambda: self.store.category_by_id(defaults['category_id'])
         with patch('app.owned_messagebox') as message:
             EventEditor.save(editor)
         self.assertFalse(message.called)
-        return app.upsert_event.call_args.args[0]
+        return app.upsert_event.call_args.args[0], app.upsert_event.call_args.kwargs["reminder_rule"]
 
     def test_gui_ai_create_parity(self):
         for extra in ({}, dict(category_id='lab', color=COLORS['鸢尾紫'], color_mode='override'),
@@ -60,7 +66,10 @@ class EventInputTests(TestCase):
                       dict(time='09:30', reminder=30, event_type='urgent')):
             with self.subTest(extra=extra):
                 values = dict(title='WB 实验', date='2026-11-23', **extra)
-                gui = asdict(self.gui(values))
+                event, rule = self.gui(values)
+                gui = asdict(event)
+                self.assertEqual(rule, {"mode":"relative", "minutes":30, "explicit":True}
+                                 if "reminder" in values else {"mode":"default"})
                 ai = self.gateway.preview('preview_create', values, 'one')['after']
                 for key in ('id', 'created_at'):
                     gui.pop(key); ai.pop(key)

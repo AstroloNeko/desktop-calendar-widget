@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
@@ -7,9 +8,11 @@ import unittest
 from unittest.mock import Mock
 
 from calendar_core import Event, Store
-from desktop_calendar.reminders.notification_model import Notice, brief_items, brief_settings
+from desktop_calendar.reminders.notification_model import (
+    Notice, brief_content, brief_items, brief_settings, brief_window, identity,
+)
 from desktop_calendar.reminders.qq_reminders import QQReminderBackend, VerifiedBinding, notice_payload
-from desktop_calendar.reminders.reminder_engine import ReminderEngine, ReminderError
+from desktop_calendar.reminders.reminder_engine import CONFIG_KEY, STATE_KEY, ReminderEngine, ReminderError
 from desktop_calendar.remote_transport import Unavailable
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from event_commands import EventCommandHistory
@@ -226,6 +229,125 @@ class ReminderDeliveryTests(unittest.TestCase):
         restarted.tick(self.now + timedelta(days=2))
         self.assertEqual(self.windows.send.call_count, 2)
 
+    def test_morning_upgrade_keeps_legacy_ledger_evening_has_own_slot(self):
+        self.add("today", self.now.replace(hour=13))
+        self.engine.configure({"brief": {"enabled": True, "time": "08:00", "qq": False}})
+        key = identity("brief", "windows", self.now.date().isoformat(), "")
+        self.engine.tick(self.now)
+        notice = self.windows.send.call_args.args[0]
+        self.assertEqual(notice.key, key)
+        self.engine.acknowledge(key, True, self.now)
+        state = self.engine._state()
+        del state["batches"][key]["brief_slot"]
+        self.engine._save(STATE_KEY, state)  # Actual pre-upgrade ledger shape.
+        self.store.repository.write_reminder_preference(CONFIG_KEY, {"brief": {
+            "enabled": True, "time": "08:00", "windows": True, "qq": False,
+        }})
+        engine = ReminderEngine(self.store, self.windows, self.qq)
+        prefs = engine.config()["brief"]
+        self.assertTrue(prefs["enabled"])
+        self.assertFalse(prefs["evening_enabled"])
+        engine.configure({"brief": {**prefs, "evening_enabled": True}})
+        engine.tick(self.now + timedelta(hours=1))
+        evening = self.now.replace(hour=18)
+        engine.tick(evening)
+        late = self.windows.send.call_args.args[0]
+        self.assertEqual((late.brief_slot, late.progress.total, late.progress.completed), ("evening", 1, 0))
+        self.assertNotEqual(late.key, key)
+        engine.acknowledge(late.key, True, evening)
+        ReminderEngine(self.store, self.windows, self.qq).tick(evening + timedelta(minutes=1))
+        self.assertEqual(self.windows.send.call_count, 2)
+
+    def test_evening_statistics_exclude_external_deadlines_and_future_today_is_not_overdue(self):
+        self.add("already", self.now.replace(hour=10), done=True)
+        self.add("ddl-done", self.now.replace(hour=13), event_type="ddl", done=True)
+        self.add("future-today", self.now.replace(hour=21))
+        self.add("today-ddl", self.now.replace(hour=17), event_type="ddl")
+        self.add("past-ddl", self.now - timedelta(days=1), event_type="ddl")
+        self.add("future-ddl", self.now + timedelta(days=2), event_type="ddl")
+        evening = self.now.replace(hour=18)
+        prefs = brief_settings({})
+        items, progress = brief_content(self.store, evening, prefs, slot="evening")
+        self.assertEqual((progress.total, progress.completed, progress.remaining, progress.percent), (4, 2, 2, 50))
+        self.assertEqual([(x["event_id"], x["group"], x.get("overdue", False)) for x in items],
+                         [("future-today", "timed", False), ("today-ddl", "today_ddl", True),
+                          ("future-ddl", "upcoming", False), ("past-ddl", "overdue", True)])
+        morning = brief_items(self.store, self.now, prefs, False)
+        self.assertEqual([item["event_id"] for item in morning], [item["event_id"] for item in items])
+        empty, stats = brief_content(self.store, evening, prefs, slot="evening", events=[])
+        self.assertEqual(empty, ())
+        self.assertIsNone(stats.percent)
+
+    def test_brief_windows_use_local_day_and_cut_off_morning_at_evening(self):
+        prefs = brief_settings({"time": "14:00", "evening_time": "16:30", "evening_enabled": True})
+        self.assertEqual(brief_window(self.now.date(), prefs, "morning"),
+                         (self.now.replace(hour=14), self.now.replace(hour=16, minute=30)))
+        prefs["evening_time"] = "23:00"
+        self.assertEqual(brief_window(self.now.date(), prefs, "evening")[1],
+                         (self.now + timedelta(days=1)).replace(hour=0))
+
+    def test_completed_queued_notice_is_cancelled_before_dispatch_and_can_replan(self):
+        self.engine.configure({"enabled": True, "windows": True})
+        event = self.add("finish-in-queue")
+        self.engine.tick(self.now)
+        notice = self.windows.send.call_args.args[0]
+        self.commands.update(event.id, done=True)
+        self.engine.invalidate()
+        self.windows.remove.assert_any_call(notice.tag)
+        self.engine.delivery.acknowledge(notice.key, "windows", 1, "cancelled", self.now)
+        self.engine.tick(self.now)
+        self.assertEqual(self.engine._state()["batches"][notice.key]["channels"]["windows"]["status"], "cancelled")
+        self.windows.send.assert_called_once()
+        self.commands.update(event.id, done=False)
+        self.engine.invalidate()
+        self.engine.tick(self.now + timedelta(minutes=1))
+        resent = self.windows.send.call_args.args[0]
+        self.assertEqual((resent.key, resent.attempt), (notice.key, 2))
+        self.engine.acknowledge(resent.key, True, self.now)
+        self.commands.update(event.id, done=True)
+        self.engine.replan([event.id])
+        self.commands.update(event.id, done=False)
+        self.engine.replan([event.id])
+        self.engine.tick(self.now + timedelta(minutes=2))
+        self.assertEqual(self.windows.send.call_count, 2)
+
+    def test_completing_snoozed_item_cancels_snooze_and_reopening_uses_base_plan(self):
+        from desktop_calendar.reminders.reminder_runtime import live_instances
+        event = self.add("snoozed-then-done", self.now + timedelta(minutes=30))
+        self.engine.tick(self.now)
+        _config, plans, state = self.engine.read_snapshot()
+        plan = plans[event.id]
+        revision = live_instances(self.engine, plans, state)[plan.key][1]
+        self.engine.apply_runtime_action({"action":"snooze", "minutes":10},
+            [{"key":plan.key, "event_id":event.id, "revision":revision}], self.now)
+        self.commands.update(event.id, done=True)
+        self.engine.replan([event.id])
+        self.assertNotIn(event.id, self.engine._state()["snoozes"])
+        self.engine.tick(self.now + timedelta(minutes=30))
+        self.windows.send.assert_not_called()
+        self.commands.update(event.id, done=False)
+        self.engine.replan([event.id])
+        self.engine.tick(self.now + timedelta(minutes=40))
+        self.assertEqual(self.windows.send.call_args.args[0].key, plan.key)
+
+    def test_evening_qq_compatible_payload_and_negotiated_private_projection(self):
+        self.add("completed", self.now, done=True)
+        self.add("today-ddl", self.now, event_type="ddl")
+        items, progress = brief_content(self.store, self.now, brief_settings({}), slot="evening")
+        notice = Notice("b"*64, "brief", self.now, self.now + timedelta(minutes=2), items,
+                        brief_slot="evening", progress=progress)
+        old = notice_payload(notice, self.binding, False)
+        self.assertNotIn("brief_context", old)
+        self.assertEqual(old["items"][0]["group"], "upcoming")
+        self.assertIn("完成率 50%", old["fallback_text"])
+        capable = replace(self.binding, brief_context_version=1)
+        self.assertEqual(notice_payload(notice, capable, False)["brief_context"],
+                         {"slot":"evening", "completion":{"total":2,"completed":1}})
+        private = notice_payload(notice, capable, True)
+        self.assertEqual(private["brief_context"], {"slot":"evening"})
+        self.assertEqual(private["items"], [])
+        self.assertNotIn("50%", private["fallback_text"])
+
     def test_empty_brief_does_not_send(self):
         self.engine.configure({"brief": {"enabled": True}})
         self.engine.tick(self.now)
@@ -271,7 +393,10 @@ class ReminderDeliveryTests(unittest.TestCase):
         self.assertEqual([item["title"].split()[0] for item in payload["items"]], expected)
         self.assertEqual([item["index"] for item in payload["items"]], list(range(1, 19)))
         fallback = payload["fallback_text"]
-        self.assertEqual([line.split()[1] for line in fallback.splitlines() if line.startswith("08:00 ")], expected)
+        self.assertEqual([next((word for word in line.split() if word in expected), "")
+                          for line in fallback.splitlines() if any(word in expected for word in line.split())], expected)
+        self.assertIn("今天到期", fallback)
+        self.assertIn("今天逾期", fallback)
         self.assertLessEqual(len(fallback.encode("utf-8")), 1900)
         self.assertIn(f"共 {sum(totals.values())} 项", fallback)
 

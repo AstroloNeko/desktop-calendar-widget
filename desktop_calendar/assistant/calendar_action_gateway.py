@@ -178,7 +178,8 @@ class CalendarActionGateway:
         before, after = before.get('reminder_plan'), after.get('reminder_plan')
         if before is None:  # Older journal previews did not carry a forecast.
             return True
-        keys = ('mode', 'planned_at', 'global_enabled')
+        keys = ('mode', 'planned_at', 'rule_enabled') if 'rule_enabled' in before else (
+            'mode', 'planned_at', 'global_enabled')
         return after is not None and all(before.get(key) == after.get(key) for key in keys)
 
     def event_revisions(self, identifiers):
@@ -282,13 +283,15 @@ class CalendarActionGateway:
                 if candidate.reminder is None:
                     rule = {"mode":"off"} if prior or not candidate.has_time else None
                 else:
-                    rule = None  # Explicit legacy minutes replace any override.
+                    rule = None  # Legacy tools only carry the editor's scalar value.
+            elif creating and candidate.has_time and self.reminders is not None:
+                rule = {"mode":"default"}
             return candidate, rule
         mode = request["mode"]
         if mode in ("default", "disabled") and set(request) != {"mode"}:
             fail('默认和关闭模式不需要提醒时间或提前量。')
         if mode == "relative":
-            if set(request) not in ({"mode","minutes"}, {"mode","days"}, {"mode","days","time"}):
+            if set(request) not in ({"mode"}, {"mode","minutes"}, {"mode","days"}, {"mode","days","time"}):
                 fail('请指定提前分钟数或提前天数。')
             if "minutes" in request and not candidate.has_time:
                 fail('事项没有开始或截止时刻。请指定提醒钟点，或使用按天提前。','clarification_required','reminder_rule')
@@ -307,6 +310,8 @@ class CalendarActionGateway:
         rule = normalize_event_rule(request)
         if rule is None:
             fail('提醒规则超出有效范围。','invalid_arguments','reminder_rule')
+        if mode in ("relative", "absolute"):
+            rule["explicit"] = True
         # Equivalent timed leads keep their legacy duration and notification key.
         minutes = rule.get("minutes")
         if mode == "relative" and candidate.has_time and "days" in rule and "time" not in rule:

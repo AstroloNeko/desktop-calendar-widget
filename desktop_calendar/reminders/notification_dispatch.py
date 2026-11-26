@@ -1,11 +1,11 @@
 """Durable business batches. Calendar data and state stay owned by the desktop thread."""
 from collections import defaultdict
 from contextlib import ExitStack
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 import heapq
 
 from desktop_calendar.reminders.notification_model import (
-    BRIEF_CATCHUP, Notice, brief_items, event_items, identity,
+    BRIEF_SLOTS, Notice, brief_content, brief_enabled, brief_policy_key, brief_window, event_items, identity,
 )
 from desktop_calendar.reminders.reminder_engine import (
     CATCHUP, RETRY, SNOOZES, STATE_KEY, local_wall, notification_arguments, plans_for_store, snoozed_plan,
@@ -62,14 +62,23 @@ class DeliveryQueue:
 
     def prepare_config_change(self, state, before, after, now):
         from desktop_calendar.reminders.reminder_runtime import may_have_sent
-        for kind, old, new in (("event", before, after), ("brief", before["brief"], after["brief"])):
-            if before["private"] and not after["private"] and new["enabled"] and new["qq"]:
+        policies = [("event", before, after, True, True)]
+        for slot in BRIEF_SLOTS:
+            old, new = before["brief"], after["brief"]
+            policies.append((brief_policy_key(slot), old, new, brief_enabled(old, slot), brief_enabled(new, slot)))
+        for kind, old, new, was_enabled, is_enabled in policies:
+            if before["private"] and not after["private"] and is_enabled and new["qq"]:
                 state["qq_capability_required"][kind] = True
             for channel in ("windows", "qq"):
-                if new["enabled"] and new[channel] and not (old["enabled"] and old[channel]):
+                if is_enabled and new[channel] and not (was_enabled and old[channel]):
                     state["config_cutovers"][f"{kind}.{channel}"] = now.isoformat()
                     if channel == "qq":
                         state["qq_capability_required"][kind] = True
+        if after["enabled"] and not before["enabled"]:
+            for channel in ("windows", "qq"):
+                state["config_cutovers"][f"default_event.{channel}"] = now.isoformat()
+            if after["qq"]:
+                state["qq_capability_required"]["event"] = True
         old_plans = {plan.event_id:plan for plan in plans_for_store(self.engine.store, before)}
         history = defaultdict(set)
         for batch in state["batches"].values():
@@ -84,7 +93,8 @@ class DeliveryQueue:
         for batch in state["batches"].values():
             for channel, entry in batch["channels"].items():
                 prefs = after["brief"] if batch["kind"] == "brief" else after
-                if not (prefs["enabled"] and prefs[channel]) and entry["status"] in ("pending", "failed"):
+                enabled = brief_enabled(prefs, batch.get("brief_slot", "morning")) if batch["kind"] == "brief" else True
+                if not (enabled and prefs[channel]) and entry["status"] in ("pending", "failed"):
                     entry.update(status="cancelled", reason="提醒或通知通道设置已关闭")
 
     def refresh_configuration(self, before, after):
@@ -107,12 +117,20 @@ class DeliveryQueue:
         cutoff = read_time(state["config_cutovers"].get(f"{kind}.{channel}"), scheduled)
         return scheduled >= cutoff
 
+    def past_event_cutover(self, state, channel, plan, config):
+        if not self.past_cutover(state, "event", channel, plan.when):
+            return False
+        rule = config["events"].get(plan.event_id, {})
+        independent = (rule.get("mode") in ("relative", "absolute", "custom")
+                       and (rule.get("explicit") or config["legacy_explicit"]))
+        return independent or self.past_cutover(state, "default_event", channel, plan.when)
+
     def qq_eligible(self, plan, state, now):
         binding = self.binding()
         cutover = state["qq_cutover"]
         return bool(binding and cutover.get("scope") == binding.scope
                     and plan.when >= read_time(cutover.get("at"), now)
-                    and self.past_cutover(state,"event","qq",plan.when)
+                    and self.past_event_cutover(state, "qq", plan, self.engine.config())
                     and (not state["qq_capability_required"].get("event") or self.qq_status(state)[0] == "available"))
 
     def cancel_stale_events(self, event_ids):
@@ -131,14 +149,15 @@ class DeliveryQueue:
                 self.qq.cancel(*task)
                 del self.qq_notices[task]
 
-    def cancel_changed_qq_members(self):
+    def cancel_changed_notices(self):
         """Invalidate queued QQ payloads after an owner-thread event mutation."""
-        if not self.qq_notices:
+        if not (self.qq_notices or self.current_notices):
             return
         from desktop_calendar.reminders.reminder_runtime import delivery_member_revision
         state = self.engine._state()
-        for task, (members, _private, kind) in list(self.qq_notices.items()):
-            if kind == "brief":
+        self.remove_stale(state)
+        for task, (members, _private, notice) in list(self.qq_notices.items()):
+            if notice.kind == "brief":
                 continue
             identifier, attempt = task
             qq = state["batches"][identifier]["channels"]["qq"]
@@ -154,7 +173,7 @@ class DeliveryQueue:
         e = self.engine
         config = e.config()
         brief = config["brief"]
-        binding = self.binding() if config["qq"] or brief["enabled"] and brief["qq"] else None
+        binding = self.binding() if config["qq"] or brief["qq"] and any(brief_enabled(brief, slot) for slot in BRIEF_SLOTS) else None
         scope = binding.scope if binding else ""
         if scope != self.scope:
             self.scope = scope
@@ -174,6 +193,9 @@ class DeliveryQueue:
 
         while e.queue and e.queue[0][0] <= now:
             _, _, plan = heapq.heappop(e.queue)
+            event = e.store.event_by_id(plan.event_id)
+            if event is None or event.done:
+                continue
             record = state["deliveries"].get(plan.key, {})
             record = record if isinstance(record, dict) else {}
             status = record.get("status")
@@ -183,9 +205,9 @@ class DeliveryQueue:
                 continue
             if record.get("batch") or status in ("accepted", "expired", "exhausted", "snoozed", "unknown"):
                 continue
-            channels = (["windows"] if config["windows"] and self.past_cutover(state,"event","windows",plan.when) else []) + (
+            channels = (["windows"] if config["windows"] and self.past_event_cutover(state, "windows", plan, config) else []) + (
                 ["qq"] if config["qq"] and qq_scope and plan.when >= qq_since
-                 and self.past_cutover(state,"event","qq",plan.when) else [])
+                 and self.past_event_cutover(state, "qq", plan, config) else [])
             if now - plan.when >= CATCHUP or not channels:
                 continue
             attempts = record.get("attempts", 0)
@@ -221,18 +243,22 @@ class DeliveryQueue:
             state["batches"][identifier] = record
             changed = True
 
-        if brief["enabled"]:
-            start = datetime.combine(now.date(), time.fromisoformat(brief["time"]))
-            expires = min(start + BRIEF_CATCHUP, datetime.combine(now.date() + timedelta(days=1), time()))
-            if start <= now < expires:
-                windows = brief["windows"] and self.past_cutover(state,"brief","windows",start)
-                qq = brief["qq"] and binding is not None and self.past_cutover(state,"brief","qq",start)
-                # One local notice per date, one QQ notice per verified account per date.
-                for channel, account in ([("windows", "")] if windows else []) + ([("qq", binding.account_scope)] if qq else []):
-                    identifier = identity("brief", channel, now.date().isoformat(), account)
-                    if identifier not in state["batches"]:
-                        state["batches"][identifier] = self.new_record("brief", start, expires, (), (channel,), scope)
-                        changed = True
+        for slot in BRIEF_SLOTS:
+            if not brief_enabled(brief, slot):
+                continue
+            start, expires = brief_window(now.date(), brief, slot)
+            if not start <= now < expires:
+                continue
+            policy = brief_policy_key(slot)
+            windows = brief["windows"] and self.past_cutover(state, policy, "windows", start)
+            qq = brief["qq"] and binding is not None and self.past_cutover(state, policy, "qq", start)
+            for channel, account in ([("windows", "")] if windows else []) + ([("qq", binding.account_scope)] if qq else []):
+                identifier = identity(policy, channel, now.date().isoformat(), account)
+                if identifier not in state["batches"]:
+                    record = self.new_record("brief", start, expires, (), (channel,), scope)
+                    record["brief_slot"] = slot
+                    state["batches"][identifier] = record
+                    changed = True
 
         for identifier, record in state["batches"].items():
             if not isinstance(record, dict):
@@ -247,14 +273,18 @@ class DeliveryQueue:
                         self.replace_on_cancel.discard(task)
                         changed = True
                     continue
+                if status == "cancelled" and entry.get("paused_for_completion") and self.current_members(record, state):
+                    entry.update(status="pending", paused_for_completion=False)
+                    status = "pending"
+                    changed = True
                 if status in TERMINAL or entry["attempts"] >= MAX_ATTEMPTS:
                     continue
                 is_brief = record["kind"] == "brief"
+                slot = record.get("brief_slot", "morning")
                 if is_brief and read_time(record["when"], now).date() == now.date():
-                    start = datetime.combine(now.date(), time.fromisoformat(brief["time"]))
-                    if record["when"] != start.isoformat():
-                        record["when"] = start.isoformat()
-                        record["expires"] = min(start + BRIEF_CATCHUP, datetime.combine(now.date()+timedelta(days=1), time())).isoformat()
+                    start, expires = brief_window(now.date(), brief, slot)
+                    if (record["when"], record["expires"]) != (start.isoformat(), expires.isoformat()):
+                        record.update(when=start.isoformat(), expires=expires.isoformat())
                         changed = True
                 expiry = read_time(record["expires"], now)
                 if expiry <= now:
@@ -262,11 +292,11 @@ class DeliveryQueue:
                     changed = True
                     continue
                 prefs = brief if is_brief else config
-                if not prefs["enabled"] or not prefs[channel] or (channel == "qq" and record["scope"] != qq_scope):
+                if (is_brief and not brief_enabled(brief, slot)) or not prefs[channel] or (channel == "qq" and record["scope"] != qq_scope):
                     entry.update(status="cancelled", reason="提醒、通道或绑定已变更")
                     changed = True
                     continue
-                kind = "brief" if is_brief else "event"
+                kind = brief_policy_key(slot) if is_brief else "event"
                 if not self.past_cutover(state,kind,channel,read_time(record["when"],now)):
                     entry.update(status="cancelled", reason="该历史通知早于当前通道启用时刻")
                     changed = True
@@ -289,26 +319,37 @@ class DeliveryQueue:
                     if read_time(entry.get("retry_at"),read_time(entry["at"],now)+RETRY) > now:
                         continue
                 members = self.current_members(record, state)
+                if not is_brief:
+                    members = [(event_id, key) for event_id, key in members
+                               if self.past_event_cutover(state, channel,
+                                   snoozed_plan(e.plans[event_id], state["snoozes"].get(event_id)), config)]
                 if not is_brief and not members:
-                    entry.update(status="cancelled", reason="原事项提醒已失效")
+                    completed = any(event.done for event_id, _ in record["members"]
+                                    if (event := e.store.event_by_id(event_id)) is not None)
+                    entry.update(status="cancelled", reason="原事项提醒已失效", paused_for_completion=completed)
                     changed = True
                     continue
                 private = config["private"]
+                has_content = False
+                progress = None
                 if is_brief:
-                    local_items = brief_items(e.store, now, brief, False)
+                    local_items, progress = brief_content(e.store, read_time(record["when"], now), brief, slot=slot)
+                    has_content = bool(local_items or progress and progress.total)
                     record["brief_items"] = [{key: value for key, value in item.items() if key != "title"}
                                              for item in local_items]
                     items = tuple({} for _ in local_items) if private else local_items
+                    if private:
+                        progress = None
                 else:
                     items = event_items(e.store, members, private)
-                if is_brief and not items and not brief["send_empty"]:
+                if is_brief and not has_content and not brief["send_empty"]:
                     entry.update(status="skipped")
                     changed = True
                     continue
                 attempt = entry["attempts"] + 1
                 notice = Notice(identifier, record["kind"], read_time(record["when"], now), expiry, items,
                                 members[0][0] if len(members) == 1 and len(record["members"]) == 1 else "",
-                                attempt, record["scope"])
+                                attempt, record["scope"], brief_slot=slot, progress=progress)
                 entry.update(status="dispatching", attempts=attempt, at=now.isoformat(), reason="", tag=notice.tag)
                 if not is_brief:
                     entry["members"] = [list(member) for member in members]
@@ -330,7 +371,7 @@ class DeliveryQueue:
             if channel == "windows":
                 self.current_notices[notice.tag] = (notice, members, config["private"])
             else:
-                self.qq_notices[(notice.key, notice.attempt)] = (members, config["private"], notice.kind)
+                self.qq_notices[(notice.key, notice.attempt)] = (members, config["private"], notice)
             try:
                 if channel == "windows":
                     self.send_windows(notice, members)
@@ -354,7 +395,8 @@ class DeliveryQueue:
         members = []
         for event_id, key in record["members"]:
             plan = self.engine.plans.get(event_id)
-            if plan is not None:
+            event = self.engine.store.event_by_id(event_id)
+            if plan is not None and event is not None and not event.done:
                 try:
                     entry = state["deliveries"].get(key, {})
                     disabled = isinstance(entry, dict) and entry.get("status") == "snoozed"
@@ -368,31 +410,42 @@ class DeliveryQueue:
         config = self.engine.config()
         for tag, (notice, members, private) in list(self.current_notices.items()):
             is_brief = notice.kind == "brief"
-            enabled = config["brief"]["enabled"] and config["brief"]["windows"] if is_brief else config["enabled"] and config["windows"]
+            prefs = config["brief"] if is_brief else config
+            enabled = prefs["windows"] and (not is_brief or brief_enabled(prefs, notice.brief_slot))
             live = self.current_members({"members": members}, state)
             task = (notice.key, "windows", notice.attempt)
             needs_update = (private != config["private"] or len(live) != len(members)
-                            or is_brief and refresh_brief and task in self.inflight)
+                            or is_brief and task in self.inflight
+                            and (refresh_brief or self.brief_changed(notice, prefs, private)))
             if not enabled or needs_update:
-                if enabled and (live or notice.kind == "brief") and task in self.inflight:
+                if enabled and task in self.inflight:
                     self.replace_on_cancel.add(task)
                 self.engine.backend.remove(tag)
                 del self.current_notices[tag]
             elif datetime.now() >= notice.expires:
                 del self.current_notices[tag]
-        for task, (members, private, kind) in list(self.qq_notices.items()):
+        for task, (members, private, notice) in list(self.qq_notices.items()):
+            kind = notice.kind
             prefs = config["brief"] if kind == "brief" else config
-            enabled = prefs["enabled"] and prefs["qq"]
+            slot = state["batches"].get(task[0], {}).get("brief_slot", "morning")
+            enabled = prefs["qq"] and (kind != "brief" or brief_enabled(prefs, slot))
             live = self.current_members({"members": members}, state)
-            if not enabled or private != config["private"] or len(live) != len(members) or kind == "brief" and refresh_brief:
-                if enabled and (live or kind == "brief") and (task[0], "qq", task[1]) in self.inflight:
+            if not enabled or private != config["private"] or len(live) != len(members) or kind == "brief" and (
+                    refresh_brief or self.brief_changed(notice, prefs, private)):
+                if enabled and (task[0], "qq", task[1]) in self.inflight:
                     self.replace_on_cancel.add((task[0], "qq", task[1]))
                 self.qq.cancel(*task)
                 del self.qq_notices[task]
 
+    def brief_changed(self, notice, prefs, private):
+        items, progress = brief_content(self.engine.store, notice.when, prefs, slot=notice.brief_slot)
+        if private:
+            return len(items) != len(notice.items)
+        return items != notice.items or progress != notice.progress
+
     def send_windows(self, notice, members):
         actions = []
-        text = notice.summary()
+        text = notice.windows_summary()
         if notice.event_id:
             plan_key = members[0][1]
             if not any("title" in item for item in notice.items):

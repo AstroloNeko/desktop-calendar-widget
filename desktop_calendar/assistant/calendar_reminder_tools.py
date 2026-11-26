@@ -7,7 +7,10 @@ import secrets
 from desktop_calendar.assistant.calendar_chat_protocol import envelope, fail
 from desktop_calendar.assistant.calendar_chat_tools import iso_day, reference_today
 from desktop_calendar.reminders.notification_dispatch import read_time
-from desktop_calendar.reminders.notification_model import BRIEF_GROUP_LABELS, brief_items, compact_brief_line, select_brief_items
+from desktop_calendar.reminders.notification_model import (
+    BRIEF_GROUP_LABELS, BRIEF_TITLES, brief_content, brief_item_context,
+    brief_today_count, compact_brief_line, select_brief_items,
+)
 from desktop_calendar.reminders.reminder_config import FIELDS, config_plan, field_lines, impacts, lookup, public_config, put
 from desktop_calendar.reminders.reminder_engine import CONFIG_KEY, CATCHUP, ReminderError, normalize_config
 from desktop_calendar.reminders.reminder_runtime import channel_members, snooze_time
@@ -206,28 +209,37 @@ def query_brief(gateway, args, source):
     day = iso_day(args["date"]) if "date" in args else reference_today(now.date)
     config = normalize_config(gateway.store.settings.get(CONFIG_KEY))
     settings = config["brief"]
-    if args.get("scope") == "ddl":
-        settings = {**settings, "timed":False, "untimed":False, "unfinished":False}
-    # This uses the exact deterministic generator used by DeliveryQueue.tick.
-    items = brief_items(gateway.store, datetime.combine(day, time()), settings, False, overdue_at=now)
+    slot = args.get("slot", "morning")
+    scope = args.get("scope", "agenda")
+    if scope == "remaining":
+        settings = {**settings, "timed": True, "untimed": True, "unfinished": True,
+                    "upcoming": False, "overdue": False}
+    items, progress = brief_content(gateway.store, datetime.combine(day, time()), settings,
+                                    slot=slot, overdue_at=now, ddl_only=scope == "ddl")
     shown, counts = select_brief_items(items)
-    agenda = sum(counts[key] for key in ("timed","untimed","unfinished"))
+    agenda = brief_today_count(items)
     anchor = day.isoformat()
-    lines = [f"{anchor} 行程简报 · 当日安排 {agenda} 项 · 近期 DDL {counts['upcoming']} 项 · 逾期 DDL {counts['overdue']} 项"]
+    title = "今日未完成事项" if scope == "remaining" else BRIEF_TITLES[slot]
+    lines = [f"{anchor} {title} · 当日待办 {agenda} 项 · 近期 DDL {counts['upcoming']} 项 · 逾期 DDL {counts['overdue']} 项"]
     private = config["private"] and source == "wechat"
-    if not private:
+    if private:
+        progress = None
+    else:
+        if progress is not None:
+            lines.append(progress.summary())
         for group, label in BRIEF_GROUP_LABELS.items():
             matches = [item for item in shown if item["group"] == group]
             if matches:
                 lines.append(label)
                 for item in matches:
-                    line = " · ".join(filter(None, (item["date"] if group in ("upcoming","overdue") else "",
-                                       item["time"], " ".join(item["title"].split())[:55])))
+                    line = " · ".join(filter(None, (brief_item_context(item, day), " ".join(item["title"].split())[:55])))
                     lines.append(compact_brief_line(line) if source == "wechat" else line)
         if len(items) > len(shown):
             lines.append(f"已按分类展示 {len(shown)} / {len(items)} 项。")
-    return {"date":anchor,"scope":args.get("scope","agenda"),"private":private,"counts":counts,"agenda_count":agenda,
-            "items":[] if private else [dict(item) for item in shown],"text":"\n".join(lines)}
+    return {"date":anchor,"scope":scope,"slot":slot,"private":private,"counts":counts,"agenda_count":agenda,
+            "items":[] if private else [dict(item) for item in shown],"text":"\n".join(lines),
+            **({"completion": {"total":progress.total,"completed":progress.completed,
+                               "remaining":progress.remaining,"percent":progress.percent}} if progress is not None else {})}
 
 
 def action_targets(gateway, args, context, source, message=None):

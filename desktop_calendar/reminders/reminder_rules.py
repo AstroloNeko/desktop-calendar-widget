@@ -16,6 +16,13 @@ def stored_event_rule(settings, event_id):
 
 
 def normalize_event_rule(rule):
+    normalized = _normalize_event_rule(rule)
+    if normalized and normalized["mode"] in ("relative", "absolute", "custom") and rule.get("explicit") is True:
+        normalized["explicit"] = True
+    return normalized
+
+
+def _normalize_event_rule(rule):
     if not isinstance(rule, dict):
         return None
     mode = rule.get("mode")
@@ -32,9 +39,11 @@ def normalize_event_rule(rule):
                 return None
             return {"mode": "absolute", "at": value}
         return None
+    if mode == "relative" and rule.keys() <= {"mode", "explicit"}:
+        return {"mode": "relative"}
     if mode == "relative" and "minutes" in rule:
         minutes = rule["minutes"]
-        if set(rule) == {"mode", "minutes"} and type(minutes) is int and 0 <= minutes <= MAX_MINUTES:
+        if rule.keys() <= {"mode", "minutes", "explicit"} and type(minutes) is int and 0 <= minutes <= MAX_MINUTES:
             return {"mode": "relative", "minutes": minutes}
         return None
     if mode in ("relative", "custom"):
@@ -53,4 +62,13 @@ def effective_mode(event, rule):
         return {"off": "disabled", "custom": "relative"}.get(rule["mode"], rule["mode"])
     if not event.has_time:
         return "default"
-    return "relative" if type(event.reminder) is int and 0 <= event.reminder <= MAX_MINUTES else "disabled"
+    return "default" if type(event.reminder) is int and 0 <= event.reminder <= MAX_MINUTES else "disabled"
+
+
+def rule_enabled(config, event, rule):
+    mode = effective_mode(event, rule)
+    if mode == "disabled":
+        return False
+    if mode == "default":
+        return config["enabled"]
+    return rule.get("explicit") is True or config["legacy_explicit"]

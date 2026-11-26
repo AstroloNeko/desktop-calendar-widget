@@ -7,6 +7,7 @@ from tkinter import ttk
 from types import SimpleNamespace
 
 from calendar_core import EVENT_TYPE_LABELS
+from desktop_calendar.reminders.notification_model import BRIEF_TITLES
 from desktop_calendar.reminders.reminder_widgets import ReminderButton, card, reminder_font
 from desktop_calendar.reminders.reminder_overview import batch_channel_statuses
 from desktop_calendar.ui.themed_controls import SettingsScroll
@@ -293,7 +294,7 @@ class ReminderPlanPanel(tk.Frame):
             when = batch["when"].replace("T", " ")[:16]
             if when.startswith(f"{now.year}-"):
                 when = when[5:]
-            records[key] = ("每日行程简报", "简报记录", when, *batch_channel_statuses(batch))
+            records[key] = (BRIEF_TITLES[batch.get("brief_slot", "morning")], "简报记录", when, *batch_channel_statuses(batch))
 
         old_keys = self.tree.get_children()
         self.tree.delete(*(key for key in old_keys if key not in records))
@@ -317,7 +318,7 @@ class ReminderPlanPanel(tk.Frame):
             self._hovered = None
 
         self._title(len(records))
-        prefix = "" if overview.enabled else "日程提醒已关闭 · "
+        prefix = "" if overview.enabled else "默认即时提醒关闭 · "
         self.summary.set(f"{prefix}Windows 已提交 {overview.submitted} · QQ 已发送 {overview.qq_sent}")
         if records:
             self.empty_label.place_forget()

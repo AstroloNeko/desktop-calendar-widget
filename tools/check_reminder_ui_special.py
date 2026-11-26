@@ -188,12 +188,12 @@ def run_case(app, theme, dpi, native, output):
             window.clock.set("07:40")
             window.tabs.select(1)
             pump(app, .19)
-            assert window.preview_heading.cget("text") == "早上好，今天有 3 项安排"
+            assert window.preview_heading.cget("text") == "早上好，今天有 3 项待办"
             window.preview_source.set("示例数据")
             window.brief["time"].set("19:10")
             assert window.preview_heading.cget("text").startswith("晚上好")
             _when, items = window.brief_preview_data(window._brief_values())
-            assert len({item["event_id"] for item in items}) == len(items) == 5
+            assert len({item["event_id"] for item in items}) == len(items) == 7
             assert "示例数据" in window.preview_date.cget("text")
             window.preview_source.set("本机日程")
             window.brief["time"].set("08:00")
@@ -216,6 +216,17 @@ def run_case(app, theme, dpi, native, output):
             window.brief["upcoming"].set(True)
             if dpi == native:
                 shot(window, output, f"{theme}-brief")
+            window.preview_slot.set("晚间预览")
+            window.preview_source.set("示例数据")
+            window.brief["evening_enabled"].set(True)
+            assert window.preview_heading.cget("text") == "今天辛苦了！"
+            assert window.brief_test_button.cget("text") == "发送晚间测试简报"
+            when, items, progress = window._brief_preview_content(window._brief_values())
+            assert when.hour == 18 and progress.total == 5 and progress.completed == 2
+            assert any(item["group"] == "today_ddl" for item in items)
+            assert "已启用" in window.preview_date.cget("text")
+            if dpi == native:
+                shot(window, output, f"{theme}-brief-evening")
             window.tabs.select(2)
             pump(app, .12)
             assert "尚未绑定" in window.qq_account.get()
@@ -316,7 +327,7 @@ def main():
             native = dpi_for_window(app)
             seed(app)
             cases = [run_case(app, theme, dpi, native, output)
-                     for dpi in dict.fromkeys((native, 96, 120, 144)) for theme in ("modern", "paper")]
+                     for dpi in dict.fromkeys((native, 96, 120, 144)) for theme in ("modern", "slate")]
             app.reminder_engine.configure({"enabled": False})
             app.open_reminder_plans()
             window = app.notification_settings_window

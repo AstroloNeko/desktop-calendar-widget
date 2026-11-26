@@ -52,13 +52,14 @@ def rule_label(event, plan, config, snoozed):
         text = f"固定提醒 · {rule['at'].replace('T', ' ')}"
     elif rule.get("mode") == "relative" and "days" in rule:
         text = f"单事项规则 · 提前 {rule['days']} 天 · {plan.when:%H:%M}"
-    elif rule.get("mode") == "relative" or event.has_time and rule.get("mode") != "default":
+    elif "minutes" in rule or event.has_time and not rule:
         minutes = rule.get("minutes", event.reminder)
-        source = "单事项规则" if rule else "事项编辑器"
+        source = "单事项规则" if rule else "默认规则（旧提前量）"
         text = f"{source} · 提前 {minutes} 分钟"
     else:
         days = config["ddl_days" if plan.ddl else "general_days"]
-        text = f"默认规则 · 提前 {days} 天 · {config['time']}"
+        source = "单事项明确提醒" if rule.get("mode") == "relative" else "默认规则"
+        text = f"{source} · 提前 {days} 天 · {config['time']}"
     return f"稍后提醒 · {text}" if snoozed else text
 
 

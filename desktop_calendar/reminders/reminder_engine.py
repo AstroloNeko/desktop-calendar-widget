@@ -15,10 +15,10 @@ import json
 from urllib.parse import parse_qs, urlencode
 
 from calendar_core import normalize_reminder_time
-from desktop_calendar.reminders.notification_model import brief_settings
+from desktop_calendar.reminders.notification_model import brief_enabled, brief_settings
 from desktop_calendar.reminders.reminder_config import LEADS as LEADS, ReminderError as ReminderError, active_qq, verify_plan
 from desktop_calendar.reminders.reminder_rules import (
-    CONFIG_KEY as CONFIG_KEY, MAX_MINUTES, effective_mode, normalize_event_rule,
+    CONFIG_KEY as CONFIG_KEY, MAX_MINUTES, effective_mode, normalize_event_rule, rule_enabled,
 )
 
 STATE_KEY = "native_reminder_state"
@@ -39,6 +39,7 @@ def normalize_config(raw):
                   time=normalize_reminder_time(raw.get("time")) or "09:00")
     for key in ("windows", "aggregate", "merge_backlog", "qq"):
         result[key] = raw.get(key, key != "qq") is True
+    result["legacy_explicit"] = raw.get("legacy_explicit", raw.get("enabled")) is True
     result["brief"] = brief_settings(raw.get("brief"))
     for key in ("general_days", "ddl_days"):
         value = raw.get(key, result[key])
@@ -80,11 +81,11 @@ def snoozed_plan(plan, entry):
     return ReminderPlan(plan.event_id, key, when, plan.anchor, plan.ddl)
 
 
-def _plan_for_event(store, event, config, rule=None):
+def _plan_for_event(store, event, config, rule=None, *, preview=False):
     if event.done:
         return None
     rule = config["events"].get(event.id, {}) if rule is None else rule
-    if rule.get("mode") == "off":
+    if rule.get("mode") == "off" or not preview and not rule_enabled(config, event, rule):
         return None
     ddl = store.event_has_deadline(event)
     anchor = store.event_end_date(event) if ddl else store.event_start_date(event)
@@ -99,7 +100,7 @@ def _plan_for_event(store, event, config, rule=None):
                        event.due_at.time() if mode == "relative" and event.has_time else
                        time.fromisoformat(config["time"]))
         when = datetime.combine(anchor, anchor_time) - timedelta(days=rule["days"])
-    elif mode == "relative" or event.has_time and mode != "default":
+    elif "minutes" in rule or event.has_time and not mode:
         # Preserve existing explicit minute-based editor settings. Invalid old
         # reminder metadata is skipped, not rewritten or passed to timedelta.
         minutes = rule.get("minutes", event.reminder)
@@ -120,12 +121,13 @@ def _plan_for_event(store, event, config, rule=None):
 def describe_event_reminder(store, event, config, rule, now, *, engine=None, preview=False):
     """Project the rule without submitting notifications or touching the ledger."""
     rule = normalize_event_rule(rule) or {}
-    plan = _plan_for_event(store, event, config, rule)
+    plan = _plan_for_event(store, event, config, rule, preview=True)
+    enabled = rule_enabled(config, event, rule)
     now = local_wall(now)
     past = bool(plan and plan.when <= now)
     channels = [key for key in ("windows", "qq") if config[key]]
     # A configured QQ channel alone does not prove this plan can use the verified route.
-    catchup = bool(config["enabled"] and past and now - plan.when < CATCHUP and "windows" in channels)
+    catchup = bool(enabled and past and now - plan.when < CATCHUP and "windows" in channels)
     snoozed_at = None
     if engine and plan:
         from desktop_calendar.reminders.notification_dispatch import MAX_ATTEMPTS
@@ -139,7 +141,7 @@ def describe_event_reminder(store, event, config, rule, now, *, engine=None, pre
             eligible_channels = {"windows"} if config["windows"] else set()
             if config["qq"] and engine.delivery.qq_eligible(plan, state, now):
                 eligible_channels.add("qq")
-            catchup = bool(config["enabled"] and past and now - plan.when < CATCHUP and eligible_channels)
+            catchup = bool(enabled and past and now - plan.when < CATCHUP and eligible_channels)
             if batch:
                 catchup &= any(channel in eligible_channels and entry.get("status") in ("pending", "failed")
                                and entry.get("attempts", 0) < MAX_ATTEMPTS
@@ -151,14 +153,12 @@ def describe_event_reminder(store, event, config, rule, now, *, engine=None, pre
             catchup = False
     return {"mode": effective_mode(event, rule), "rule": rule,
             "planned_at": plan.when.isoformat(timespec="minutes") if plan else None,
-            "global_enabled": config["enabled"], "past": past, "catchup_eligible": catchup, "snoozed_at": snoozed_at,
+            "global_enabled": config["enabled"], "rule_enabled": enabled, "past": past, "catchup_eligible": catchup, "snoozed_at": snoozed_at,
             "schedule_status": "preview" if preview else "pending" if engine is None or engine.dirty else "recalculated"}
 
 
 def plans_for_store(store, config):
     """Called on invalidation, never on every timer tick. Reuse effective dates."""
-    if not config["enabled"]:
-        return ()
     plans = []
     for event in store.events:
         try:
@@ -279,6 +279,7 @@ class ReminderEngine:
         # Retain unrecognized settings and unrelated event overrides.
         raw = self.store.settings.get(CONFIG_KEY)
         stored = deepcopy(raw) if isinstance(raw, dict) else {}
+        stored["legacy_explicit"] = updated["legacy_explicit"]
         for field, edit in plan["fields"].items():
             if field.startswith("brief.") and not isinstance(stored.get("brief"), dict):
                 stored["brief"] = {}
@@ -316,7 +317,7 @@ class ReminderEngine:
 
     def invalidate(self):
         self.dirty = True
-        self.delivery.cancel_changed_qq_members()
+        self.delivery.cancel_changed_notices()
 
     def replan(self, event_ids):
         """Rebuild after a commit. A later tick retries a failed rebuild."""
@@ -349,6 +350,15 @@ class ReminderEngine:
             if not isinstance(entry, dict) or current is None or entry.get("base") != current.key:
                 if isinstance(entry, dict) and isinstance(entry.get("key"), str):
                     self.backend.remove(entry["key"][:16])
+                    event = self.store.event_by_id(identifier)
+                    if event is not None and event.done and "base_delivery" in entry:
+                        from desktop_calendar.reminders.reminder_runtime import may_have_sent
+                        if not may_have_sent(state, entry["key"]):
+                            original = entry["base_delivery"]
+                            if isinstance(original, dict):
+                                state["deliveries"][entry["base"]] = original
+                            elif original is None:
+                                state["deliveries"].pop(entry["base"], None)
                 del state["snoozes"][identifier]
                 changed = True
         self.delivery.remove_stale(state, refresh_brief=refresh_brief)
@@ -542,7 +552,8 @@ class ReminderEngine:
         config = self.config()
         kind = batch.get("kind")
         prefs = config["brief"] if kind == "brief" else config
-        if (not prefs["enabled"] or not prefs["qq"] or batch.get("scope") != binding.scope
+        enabled = brief_enabled(prefs, batch.get("brief_slot", "morning")) if kind == "brief" else True
+        if (not enabled or not prefs["qq"] or batch.get("scope") != binding.scope
                 or kind not in ("event", "ddl", "brief") or qq.get("status") != "sent"
                 or read_time(batch.get("expires"), now) <= now):
             raise ReminderError("提醒交互已失效")

@@ -480,7 +480,7 @@ class NotificationContractTests(unittest.TestCase):
         path, token, body = client.request.call_args.args
         self.assertEqual((path, token), ('/api/notifications/session', fixture.CONFIG['remote_token']))
         self.assertEqual(json.loads(body), {
-            'interaction_schema_version': 2, 'client_version': __version__,
+            'interaction_schema_version': 2, 'client_version': __version__, 'brief_context_version': 1,
             'capabilities': ['business_receipt', 'action', 'reference', 'quick_query',
                              'proactive_action','reminder_quick_query','reminder_receipt'],
         })
@@ -492,6 +492,17 @@ class NotificationContractTests(unittest.TestCase):
         self.assertNotIn(SHORT_TOKEN, repr(credentials))
         self.assertEqual(FirebaseNotificationContract().notification_session(
             client, fixture.CONFIG['remote_token']).stream_url, credentials.stream_url)
+
+    def test_brief_context_requires_explicit_verified_server_support(self):
+        client = Mock()
+        contract = FirebaseNotificationContract()
+        proactive = {"enabled": True, "protocol_version": 1, "endpoint": "/api/notifications/proactive",
+                     "supported_actions": []}
+        for value, expected in ((None, 0), (True, 0), ("1", 0), (1, 1), (2, 0)):
+            client.request.return_value = self.document(
+                interaction_schema_version=2, proactive_notifications={**proactive, "brief_context_version": value})
+            result = contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
+            self.assertEqual(result.brief_context_version, expected)
 
     def test_display_name_and_negotiated_capabilities_are_optional(self):
         client = Mock()

@@ -29,6 +29,7 @@ class VerifiedAccount:
     interaction_capabilities: tuple = LEGACY_CAPABILITIES
     proactive_enabled: bool = False
     proactive_actions: tuple = ()
+    brief_context_version: int = 0
 
 
 def sse_events(chunks):
@@ -241,7 +242,8 @@ class NotificationListener:
                                                                 credentials.interaction_version,
                                                                 credentials.interaction_capabilities,
                                                                 credentials.proactive_enabled,
-                                                                credentials.proactive_actions)) is False:
+                                                                credentials.proactive_actions,
+                                                                credentials.brief_context_version)) is False:
                         raise Unavailable
                     if not stop.is_set() and self.stream(credentials, stop, ready, wake):
                         delay = self.retry[0]

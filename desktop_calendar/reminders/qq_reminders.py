@@ -7,7 +7,7 @@ import threading
 import uuid
 
 from desktop_calendar.remote_transport import Client, StatusError, Unavailable
-from desktop_calendar.reminders.notification_model import Notice, identity, select_brief_items
+from desktop_calendar.reminders.notification_model import Notice, identity, legacy_brief_projection, select_brief_items
 
 PATH = "/api/notifications/proactive"
 ACTIONS = {
@@ -26,6 +26,7 @@ class VerifiedBinding:
     token: str = field(repr=False)
     account: str
     supported_actions: tuple = ()
+    brief_context_version: int = 0
 
     @property
     def scope(self):
@@ -48,11 +49,17 @@ def notice_payload(notice, binding, private):
     elif notice.kind == "brief":
         selected, brief_counts = select_brief_items(notice.items)
         fallback = notice.summary(20, selected=selected)
+        selected, brief_counts = legacy_brief_projection(selected, brief_counts)
     else:
         selected = () if private else notice.items[:50]
         fallback = notice.summary(20)[:3800]
         if notice.kind in ("event","ddl") and len(notice.items) > 20:
             fallback += f"\n共 {len(notice.items)} 项。知道了作用于本批仍有效的全部提醒。超过 20 项时请按编号引用或到桌面端稍后处理。"
+    context = {}
+    if notice.kind == "brief" and binding.brief_context_version == 1:
+        context["slot"] = notice.brief_slot
+        if not private and notice.progress is not None:
+            context["completion"] = {"total": notice.progress.total, "completed": notice.progress.completed}
     wire_items = [
         {**{key: item[key] for key in ("title", "group", "date", "time") if key in item}, "index": index}
         for index, item in enumerate(selected, 1)
@@ -65,7 +72,8 @@ def notice_payload(notice, binding, private):
         "private": private, "count": len(notice.items),
         "items": wire_items,
         **({"brief_counts": brief_counts} if brief_counts is not None else {}),
-        "fallback_text": ("【测试简报】\n" + fallback) if notice.manual_test else fallback,
+        **({"brief_context": context} if context else {}),
+        "fallback_text": (("【测试" + notice.title + "】\n") if notice.manual_test else "") + fallback,
         **({"is_test": True} if notice.manual_test else {}),
         "actions": [{"action": action, "target": notice.key} for action in ACTIONS[notice.kind]
                     if not notice.manual_test and action in binding.supported_actions and (not private or action == "acknowledge")],
@@ -99,7 +107,8 @@ class QQReminderBackend:
                 if worker._current(worker.generation) and getattr(worker,"proactive_enabled",False) is True:
                     url, token, _scope, account = worker.config
                     if account:
-                        return VerifiedBinding(worker, worker.generation, url, token, account, worker.proactive_actions)
+                        return VerifiedBinding(worker, worker.generation, url, token, account, worker.proactive_actions,
+                                               getattr(worker, "brief_context_version", 0))
         return None
 
     def send(self, notice, binding, private):

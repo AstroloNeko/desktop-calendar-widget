@@ -1,4 +1,5 @@
 """Display-only fields from verified reminder and brief business responses."""
+from desktop_calendar.reminders.notification_model import legacy_brief_projection
 from desktop_calendar.reminders.reminder_config import FIELDS, impacts
 
 
@@ -58,12 +59,18 @@ def reminder_fields(receipt, response):
         receipt.update(result_type='message' if query.get('item_details') else 'reminder_query', reminders=rows,
                        reminder_summary={'enabled':query['enabled'],'total':query['total'],'shown':len(rows)})
     if brief := response.get('brief_result'):
-        items = [{**{key:item[key] for key in ('group','title','date','time')},'index':index}
-                 for index,item in enumerate(brief['items'][:30],1)]
-        receipt.update(result_type='brief', brief={
-            **{key:brief[key] for key in ('date','scope','private','counts','agenda_count')},
-            'total':sum(brief['counts'].values()), 'items':items,
-        })
+        if brief.get('slot') == 'evening' or brief['scope'] == 'remaining':
+            # v2 cloud renderers cannot represent completion or the remaining scope.
+            # Returning a message keeps the generated local text intact.
+            receipt['result_type'] = 'message'
+        else:
+            projected, counts = legacy_brief_projection(brief['items'], brief['counts'])
+            items = [{**{key:item[key] for key in ('group','title','date','time')},'index':index}
+                     for index,item in enumerate(projected[:30],1)]
+            receipt.update(result_type='brief', brief={
+                **{key:brief[key] for key in ('date','scope','private','agenda_count')},
+                'counts':counts, 'total':sum(counts.values()), 'items':items,
+            })
     result = response.get('operation_result') or {}
     preview = (response.get('pending_operation') or {}).get('preview',{})
     if result.get('action') == 'reminder_action' and result.get('goal_satisfied') is True:

@@ -83,7 +83,7 @@ from win_integration import (
     set_autostart,
 )
 from timeline_model import TimelineItem, TimelineMonth, TimelineSelection, build_month_timeline
-from event_commands import BatchChange, EventChange, EventCommandHistory, EventPreview
+from event_commands import BatchChange, EventChange, EventCommandHistory, EventPreview, KEEP_REMINDER_RULE
 from calendar_event_service import event_service, EventOperationResult
 from calendar_mutation_service import mutation_service
 from event_selection import EventSelection
@@ -1000,9 +1000,20 @@ class EventEditor(tk.Toplevel):
         self.color_var = tk.StringVar(
             value=master.store.effective_event_color(event) if event else COLORS["海盐蓝"]
         )
-        reminder_value = event.reminder if event else None
-        reminder_label = next((label for label, value in REMINDERS.items() if value == reminder_value), "不提醒")
+        self.default_reminder_choice = "使用默认即时提醒"
+        self.explicit_reminder_choice = "按默认时间明确提醒"
+        self.off_reminder_choice = "不进行即时提醒"
+        self.reminder_choices = {label: value for label, value in REMINDERS.items() if value is not None}
+        from desktop_calendar.reminders.reminder_rules import normalize_event_rule, stored_event_rule
+        rule = normalize_event_rule(stored_event_rule(master.store.settings, event.id)) if event else None
+        if rule and rule["mode"] not in ("default", "off"):
+            reminder_label = "保留当前即时提醒规则"
+        elif (rule and rule["mode"] == "off") or (not rule and event and event.has_time and event.reminder is None):
+            reminder_label = self.off_reminder_choice
+        else:
+            reminder_label = self.default_reminder_choice
         self.reminder_var = tk.StringVar(value=reminder_label)
+        self.reminder_changed = False
         self._drag_origin: Optional[tuple[int, int, int, int]] = None
         self.color_canvases: list[tuple[tk.Canvas, str]] = []
         self._hover_color: Optional[str] = None
@@ -1187,15 +1198,17 @@ class EventEditor(tk.Toplevel):
         reminder_row.pack(fill="x", pady=(0, 10))
         reminder_col = tk.Frame(reminder_row, bg=CARD)
         reminder_col.pack(side="left", fill="x", expand=True)
-        self._field_label(reminder_col, "提醒（需填写时间）")
+        self._field_label(reminder_col, "即时提醒（按分钟提前需填写事项时间）")
         reminder_box = ttk.Combobox(
             reminder_col,
             textvariable=self.reminder_var,
-            values=tuple(REMINDERS),
+            values=(self.default_reminder_choice, self.explicit_reminder_choice, self.off_reminder_choice,
+                    *self.reminder_choices),
             state="readonly",
             font=(FONT, 9),
         )
         reminder_box.pack(fill="x", pady=(4, 0))
+        reminder_box.bind("<<ComboboxSelected>>", lambda _event: setattr(self, "reminder_changed", True))
 
         color_heading = tk.Frame(shell, bg=CARD)
         color_heading.pack(fill="x")
@@ -1533,10 +1546,21 @@ class EventEditor(tk.Toplevel):
             category_id=self._selected_category().id if self._selected_category() else None,
             color_mode=self.color_mode_var.get(),
             event_type=self.event_type_var.get(),
-            reminder=REMINDERS[self.reminder_var.get()] if has_time else None,
             notes=self.notes.get("1.0", "end").strip(),
             done=self.event.done if self.event else False,
         )
+        rule = KEEP_REMINDER_RULE
+        if not self.event or self.reminder_changed:
+            selection = self.reminder_var.get()
+            if selection == self.default_reminder_choice:
+                rule = {"mode": "default"}
+            elif selection == self.explicit_reminder_choice:
+                rule = {"mode": "relative", "explicit": True}
+            elif selection == self.off_reminder_choice:
+                rule = {"mode": "off"}
+            else:
+                rule = {"mode": "relative", "minutes": self.reminder_choices[selection], "explicit": True}
+            values["reminder"] = rule.get("minutes")
         from event_input import build_event_candidate, EventInputError
         try:
             item = build_event_candidate(values, current=self.event,
@@ -1544,7 +1568,7 @@ class EventEditor(tk.Toplevel):
         except EventInputError as exc:
             owned_messagebox(self, messagebox.showinfo, APP_NAME, str(exc))
             return
-        if self.master_app.upsert_event(item):
+        if self.master_app.upsert_event(item, reminder_rule=rule):
             self.close()
 
     def delete(self) -> None:
@@ -6575,8 +6599,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if change.ddl_changed and self.ddl_list_window and self.ddl_list_window.winfo_exists():
             self.ddl_list_window.refresh()
 
-    def upsert_event(self, event: Event) -> bool:
-        return self._run_event_command(lambda: event_service(self.event_commands).upsert(event), focus_result=True)
+    def upsert_event(self, event: Event, *, reminder_rule=KEEP_REMINDER_RULE) -> bool:
+        return self._run_event_command(
+            lambda: event_service(self.event_commands).upsert(event, reminder_rule=reminder_rule), focus_result=True)
 
     def commit_event_preview(self, preview: EventPreview, *, focus_result: bool = False) -> bool:
         """Shared mouse-release endpoint for future Flow and Timeline dragging."""

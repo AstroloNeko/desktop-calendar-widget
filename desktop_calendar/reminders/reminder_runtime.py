@@ -69,7 +69,7 @@ def live_instances(engine, plans, state, events=None):
             continue
         entry = state["deliveries"].get(plan.key, {})
         event = events.get(plan.event_id)
-        if event is not None and isinstance(entry, dict) and entry.get("status") != "snoozed":
+        if event is not None and not event.done and isinstance(entry, dict) and entry.get("status") != "snoozed":
             current[plan.key] = (plan, instance_revision(engine, event, plan, state))
     return current
 

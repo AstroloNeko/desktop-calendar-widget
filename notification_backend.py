@@ -224,6 +224,12 @@ class WindowsNotificationBackend:
                             permission = None  # Unknown, not Enabled; Windows still applies policy.
                         if permission is not None and permission != 0:
                             raise RuntimeError(f"Windows 已限制通知（状态 {permission}）；未派发。")
+                        with self._policy_lock:
+                            cancelled = tag in self._cancelled_tags
+                        if cancelled:
+                            if not testing and isinstance(plan, Notice):
+                                self.events.put(("notice_delivery", (plan.key, plan.attempt, "cancelled", "")))
+                            continue
                         transport.show(tag, toast_xml(title, text, arguments,
                                                            self.root / "assets/calendar.png", actions))
                         if not testing and isinstance(plan, Notice):

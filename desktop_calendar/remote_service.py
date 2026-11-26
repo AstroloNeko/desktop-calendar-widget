@@ -196,6 +196,7 @@ class RemoteWorker:
         self.interaction_capabilities = ()
         self.proactive_enabled = False
         self.proactive_actions = ()
+        self.brief_context_version = 0
         self.last_cloud_ok = None
         self.cloud_unavailable = False
         self.processing_id = ''
@@ -398,6 +399,7 @@ class RemoteWorker:
                                                       if cap in profile.interaction_capabilities)
                 self.proactive_enabled = profile.proactive_enabled and self.interaction_version == 2
                 self.proactive_actions = profile.proactive_actions if self.proactive_enabled else ()
+                self.brief_context_version = profile.brief_context_version if self.proactive_enabled else 0
                 self.account_verified = True
                 self.condition.notify_all()
                 self._notify_status_change()

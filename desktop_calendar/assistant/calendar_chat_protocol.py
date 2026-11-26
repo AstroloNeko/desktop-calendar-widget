@@ -144,7 +144,7 @@ def reminder_line(row):
         return ''
     rule = plan['rule']
     mode = plan['mode']
-    label = {'default':'默认提醒', 'relative':'相对提醒', 'absolute':'固定时刻提醒', 'disabled':'不提醒'}[mode]
+    label = {'default':'默认提醒', 'relative':'相对提醒', 'absolute':'固定时刻提醒', 'disabled':'不进行即时提醒'}[mode]
     fields = [label]
     if mode == 'relative':
         minutes = rule.get('minutes', row.get('reminder'))
@@ -158,14 +158,14 @@ def reminder_line(row):
         fields.append('提醒时刻 '+plan['planned_at'].replace('T', ' '))
     elif mode != 'disabled':
         fields.append('当前无有效触发时间')
-    if plan.get('global_enabled') is False:
-        fields.append('全局提醒已关闭')
+    if plan.get('rule_enabled') is False and mode != 'disabled':
+        fields.append('该规则当前未启用')
     if plan.get('snoozed_at'):
         fields.append('当前稍后提醒 '+plan['snoozed_at'].replace('T', ' '))
     if plan.get('past'):
         fields.append('已到或已过提醒时刻')
         fields.append('符合当前补发条件' if plan.get('catchup_eligible') else '当前不符合补发条件')
-    if plan['schedule_status'] == 'pending' and (mode != 'disabled' or plan.get('global_enabled') is not False):
+    if plan['schedule_status'] == 'pending':
         fields.append('规则已保存，等待调度重算')
     return ' · '.join(fields)
 

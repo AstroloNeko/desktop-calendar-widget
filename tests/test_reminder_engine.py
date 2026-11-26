@@ -109,6 +109,25 @@ class ReminderEngineTests(unittest.TestCase):
         self.assertEqual(config["time"], "09:00")
         self.assertEqual(config["events"], {})
 
+    def test_rule_priority_and_migration_from_legacy_disabled(self):
+        for identifier in ("legacy_default", "old_override", "relative", "absolute", "requested", "disabled"):
+            self.event(id=identifier, has_time=True, reminder=60, due="2026-10-23T10:00")
+        raw = {"enabled": False, "events": {
+            "old_override": {"mode": "absolute", "at": "2026-10-23T09:00"},
+            "relative": {"mode": "relative", "minutes": 60, "explicit": True},
+            "absolute": {"mode": "absolute", "at": "2026-10-23T09:00", "explicit": True},
+            "requested": {"mode": "relative", "explicit": True},
+            "disabled": {"mode": "off"},
+        }}
+        self.engine.configure(raw)
+        self.assertEqual({p.event_id for p in plans_for_store(self.store, self.engine.config())},
+                         {"relative", "absolute", "requested"})
+        from desktop_calendar.reminders.reminder_config import config_plan
+        self.engine.apply_configuration(config_plan(self.engine.configuration_snapshot(), {"enabled": True}), self.now)
+        self.assertEqual({p.event_id for p in plans_for_store(self.store, self.engine.config())},
+                         {"legacy_default", "relative", "absolute", "requested"})
+        self.assertEqual(self.engine.config()["events"]["old_override"], raw["events"]["old_override"])
+
     def test_future_reminder_preferences_rejected(self):
         with self.assertRaises(ReminderError):
             normalize_config({"version": 999})

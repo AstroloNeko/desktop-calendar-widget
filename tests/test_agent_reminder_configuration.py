@@ -105,6 +105,19 @@ class AgentReminderConfigurationTests(TestCase):
         self.assertFalse(self.history.can_undo_operation(result["operation_result"]["operation_id"]))
         self.assertIn("不进入日历撤销",result["assistant_message"])
 
+    def test_morning_evening_config_has_field_scope_and_confirmation(self):
+        self.save({"brief":{"enabled":True,"time":"08:00"}})
+        reply = self.proposal({"brief":{"evening_enabled":True,"evening_time":"18:30"}})
+        self.assertFalse(self.engine.config()["brief"]["evening_enabled"])
+        self.assertEqual(set(reply["pending_operation"]["preview"]["configuration_plan"]["fields"]),
+                         {"brief.evening_enabled", "brief.evening_time"})
+        self.engine.apply_configuration(self.form({"brief":{"time":"07:45"}}), self.now)
+        self.assertEqual(self.send("确认")["status"], "succeeded")
+        self.assertEqual(self.engine.config()["brief"]["time"], "07:45")
+        self.assertEqual(self.engine.config()["brief"]["evening_time"], "18:30")
+        self.save({"brief":{"evening_enabled":False}})
+        self.assertTrue(self.engine.config()["brief"]["enabled"])
+
     def test_brief_switch_and_channels_are_independent(self):
         self.save({"brief":{"enabled":True,"time":"11:00","windows":False,"overdue":False}})
         config = self.engine.config()

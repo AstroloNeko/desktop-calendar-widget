@@ -227,18 +227,19 @@ class AgentEventReminderTests(TestCase):
         reopened.load()
         self.assertEqual(stored_event_rule(reopened.settings,'old'),{'mode':'custom','days':3,'time':'07:00'})
 
-    def test_disabled_master_and_reply_text_do_not_claim_delivery(self):
+    def test_explicit_rule_bypasses_default_switch_without_claiming_delivery(self):
         self.engine.configure(dict(self.engine.config(),enabled=False))
         response = self.create('明天下午三点开组会，提前15分钟提醒我。',
                                dict(title='组会',date='2026-11-27',time='15:00',
                                     reminder_rule=dict(mode='relative',minutes=15)))
         row = self.result(response,'relative','2026-11-27T14:45')
         self.assertFalse(row['reminder_plan']['global_enabled'])
-        self.assertNotIn(row['id'],self.engine.plans)
+        self.assertTrue(row['reminder_plan']['rule_enabled'])
+        self.assertIn(row['id'],self.engine.plans)
         business = {'schema_version':1,'events':[]}
         payload, _ = make_receipt(response,business=business)
         receipt = json.loads(payload)
         self.assertEqual(receipt['business_receipt'],business)
-        self.assertIn('全局提醒已关闭',receipt['reply_text'])
+        self.assertNotIn('该规则当前未启用',receipt['reply_text'])
         self.assertIn('2026-11-27 14:45',receipt['reply_text'])
         self.backend.send.assert_not_called()

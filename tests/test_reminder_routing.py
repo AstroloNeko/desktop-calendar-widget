@@ -89,11 +89,12 @@ class ReminderRoutingTests(unittest.TestCase):
             self.assertEqual(self.app.reminder_engine.snooze.call_args.args[2], minutes)
         self.app._activate_search_result.assert_not_called()
 
-    def test_queued_action_after_global_off_is_ignored(self):
+    def test_current_explicit_action_works_with_default_switch_off(self):
         self.app.reminder_engine.config.return_value = {"enabled": False}
         self.app.send(notification_arguments(self.plan))
         self.app.poll_native_notifications()
-        self.app.restore_from_tray.assert_not_called()
+        self.app.reminder_engine.activation_is_current.assert_called_once_with(self.plan.event_id, self.plan.key)
+        self.app._activate_search_result.assert_called_once()
 
     def test_reentry_restore_failure_keeps_action_for_later(self):
         self.app.restore_from_tray.return_value = False

@@ -12,7 +12,7 @@ class ReminderError(ValueError):
 
 LEADS = (0, 1, 3)
 FIELDS = {
-    "enabled": ("日程提醒总开关", bool),
+    "enabled": ("默认即时提醒", bool),
     "time": ("默认提醒时间", str),
     "general_days": ("一般及紧急事项提前天数", LEADS),
     "ddl_days": ("DDL及末日DDL提前天数", LEADS),
@@ -21,8 +21,11 @@ FIELDS = {
     "windows": ("日程及DDL发 Windows", bool),
     "qq": ("日程及DDL发 QQ", bool),
     "private": ("通知隐私保护", bool),
-    "brief.enabled": ("每日简报开关", bool),
-    "brief.time": ("每日简报发送时间", str),
+    "brief.enabled": ("晨间简报开关", bool),
+    "brief.time": ("晨间简报发送时间", str),
+    "brief.evening_enabled": ("晚间简报开关", bool),
+    "brief.evening_time": ("晚间简报发送时间", str),
+    "brief.completion": ("晚间显示完成统计", bool),
     "brief.timed": ("简报显示定时事项", bool),
     "brief.untimed": ("简报显示全天及无具体时间事项", bool),
     "brief.unfinished": ("简报显示其他未完成事项", bool),
@@ -85,13 +88,15 @@ def patched(config, values):
 
 
 def active_qq(config):
-    return (config["enabled"] and config["qq"], config["brief"]["enabled"] and config["brief"]["qq"])
+    brief = config["brief"]
+    return (config["qq"], brief["enabled"] and brief["qq"], brief["evening_enabled"] and brief["qq"])
 
 
 def remote_risk(before, after):
     return (before["private"] and not after["private"]
             or not before["qq"] and after["qq"]
             or not before["brief"]["qq"] and after["brief"]["qq"]
+            or not before["enabled"] and after["enabled"] and after["qq"]
             or any(new and not old for old, new in zip(active_qq(before), active_qq(after))))
 
 
@@ -143,8 +148,10 @@ def impacts(fields):
     if fields.keys() & {"time", "general_days", "ddl_days"}:
         groups.append("重新计算依赖默认时间或提前天数的提醒，保留各事项的自定义规则")
     if any(field.startswith("brief.") for field in fields):
-        groups.append("每日简报及其当日发送计划")
-    if fields.keys() & {"enabled", "aggregate", "merge_backlog", "windows", "qq"}:
+        groups.append("晨间或晚间简报及当日发送计划")
+    if "enabled" in fields:
+        groups.append("使用默认规则的即时提醒")
+    if fields.keys() & {"aggregate", "merge_backlog", "windows", "qq"}:
         groups.append("日程和DDL的计划或待发送任务")
     if "private" in fields:
         groups.append("日程和简报的 Windows 与 QQ 通知内容")
