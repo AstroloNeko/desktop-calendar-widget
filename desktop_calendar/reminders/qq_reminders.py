@@ -53,9 +53,10 @@ def notice_payload(notice, binding, private):
         "expires_at": notice.expires.astimezone().isoformat(),
         "private": private, "count": len(notice.items),
         "items": wire_items,
-        "fallback_text": fallback,
+        "fallback_text": ("【测试简报】\n" + fallback) if notice.manual_test else fallback,
+        **({"is_test": True} if notice.manual_test else {}),
         "actions": [{"action": action, "target": notice.key} for action in ACTIONS[notice.kind]
-                    if action in binding.supported_actions and (not private or action == "acknowledge")],
+                    if not notice.manual_test and action in binding.supported_actions and (not private or action == "acknowledge")],
     }
 
 
@@ -122,7 +123,8 @@ class QQReminderBackend:
                     result = "unknown", "远程发送结果未知"
             with self.lock:
                 self.cancelled.discard(key)
-            self.events.put((notice.key, notice.attempt, *result))
+            event_id = "brief-test:" + notice.key if notice.manual_test else notice.key
+            self.events.put((event_id, notice.attempt, *result))
 
     def submit(self, notice, binding, payload):
         if datetime.now() >= notice.expires:

@@ -188,6 +188,37 @@ class ReminderRoutingTests(unittest.TestCase):
             self.app._refresh_reminder_views()
         dialog.refresh.assert_called_once()
 
+    def test_manual_brief_receipts_bypass_reminder_ledger(self):
+        self.app.reminder_engine.config.return_value = {"private": True}
+        self.app.notification_backend.send_test.return_value = "e" * 32
+        binding = SimpleNamespace(scope="verified")
+        with patch.object(self.app.qq_reminder_backend, "binding", return_value=binding), \
+                patch.object(self.app.qq_reminder_backend, "send") as send:
+            self.app.send_brief_test(({"title": "private appointment"},), ("windows", "qq"), False)
+        self.assertNotIn("private appointment", self.app.notification_backend.send_test.call_args.kwargs["text"])
+        notice, target, private = send.call_args.args
+        self.assertIs(target, binding)
+        self.assertTrue(notice.manual_test and private)
+        self.assertEqual(notice.items, ({},))
+        self.app.notification_backend.events.put(("test_delivery", ("e" * 32, True)))
+        self.app.qq_reminder_backend.events.put(("brief-test:" + notice.key, 1, "failed", "HTTP 404"))
+        self.app.poll_native_notifications()
+        self.assertFalse(self.app._brief_attempts)
+        self.assertIn("已提交", self.app._brief_results["windows"][1])
+        self.assertIn("HTTP 404", self.app._brief_results["qq"][1])
+        self.app.reminder_engine.acknowledge.assert_not_called()
+        self.app.reminder_engine.delivery.acknowledge.assert_not_called()
+        self.app.reminder_engine.configure.assert_not_called()
+
+    def test_unavailable_qq_brief_does_not_disable_windows(self):
+        self.app.reminder_engine.config.return_value = {"private": False}
+        with patch.object(self.app.qq_reminder_backend, "binding", return_value=None), \
+                patch.object(self.app.qq_reminder_backend, "send") as send:
+            self.app.send_brief_test((), ("qq", "windows"), False)
+        self.assertIn("尚未绑定", self.app._brief_results["qq"][1])
+        send.assert_not_called()
+        self.app.notification_backend.send_test.assert_called_once()
+
     def test_native_test_failure_does_not_mark_real_reminders_failed(self):
         self.app._notification_test_token = "c" * 32
         self.app.notification_backend.events.put(("native", (2, "test" + "c" * 12 + ":error")))

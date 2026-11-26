@@ -1,20 +1,21 @@
 """Tk coordination and lightweight settings, separate from reminder calculations."""
 from collections import deque
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import queue
 import re
 import time
 from types import SimpleNamespace
+from uuid import uuid4
 import tkinter as tk
 from tkinter import ttk
 
-from calendar_core import normalize_reminder_time
+from calendar_core import Event, normalize_reminder_time
 from notification_backend import WindowsNotificationBackend
 from desktop_calendar.reminders.reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
 from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.reminders.qq_reminders import QQReminderBackend
-from desktop_calendar.reminders.notification_model import BRIEF_GROUP_LABELS, brief_items, brief_settings
+from desktop_calendar.reminders.notification_model import BRIEF_GROUP_LABELS, Notice, brief_items, brief_settings
 from desktop_calendar.ui.themed_controls import SettingsScroll, form_button, form_entry, themed_check
 from desktop_calendar.remote_presentation import CONNECTION_LABELS
 from desktop_calendar.reminders.reminder_widgets import COMBO, ReminderButton, card, combo_style, notebook_style, reminder_font
@@ -45,6 +46,8 @@ class NativeReminderMixin:
             return runtime.core.remote if runtime else None
         self.qq_reminder_backend = QQReminderBackend(remote_worker)
         self.reminder_engine = ReminderEngine(self.store, self.notification_backend, self.qq_reminder_backend)
+        self._brief_attempts = {}
+        self._brief_results = {}
         self._qq_test_token = None
         self._qq_test_scope = None
         self._qq_test_capability = None
@@ -113,10 +116,13 @@ class NativeReminderMixin:
                     engine.delivery.acknowledge(key, "windows", attempt, status, datetime.now(), reason)
                 elif kind == "test_error":
                     token, error = value
-                    if token == self._notification_test_token:
-                        self._set_test_status("测试未成功：" + str(error))
+                    if not self._finish_brief_test("windows", token, "提交失败 · " + str(error)):
+                        if token == self._notification_test_token:
+                            self._set_test_status("测试未成功：" + str(error))
                 elif kind == "test_delivery":
                     token, success = value
+                    if self._finish_brief_test("windows", token, "已提交给 Windows" if success else "提交失败"):
+                        continue
                     if token == self._notification_test_token:
                         self._notification_test_pending = False
                         if success and not self._notification_test_clicked:
@@ -151,13 +157,21 @@ class NativeReminderMixin:
                             self._notification_test_pending = False
                             self._set_test_status("Windows 报告测试通知失败，请检查通知权限或专注设置。")
                             continue
-                        engine.delivery.acknowledge_tag(tag, datetime.now(), "Windows 报告通知失败")
+                        brief_test = self._brief_attempts.get("windows")
+                        if brief_test and tag == "test" + brief_test[0][:12]:
+                            self._finish_brief_test("windows", brief_test[0], "Windows 报告通知失败")
+                            continue
+                        if not tag.startswith("test"):
+                            engine.delivery.acknowledge_tag(tag, datetime.now(), "Windows 报告通知失败")
             except (OSError, ValueError, RuntimeError) as error:
                 engine.error = str(error)
         if self._notification_test_pending and time.monotonic() >= self._notification_test_deadline:
             self._notification_test_pending = False
             self._set_test_status("暂未收到 Windows 提交结果；请检查通知设置后重试，不能据此确认已显示。")
         self._poll_qq_reminders(engine)
+        for channel, (token, deadline, _scope) in tuple(self._brief_attempts.items()):
+            if time.monotonic() >= deadline:
+                self._finish_brief_test(channel, token, "等待结果超时")
         self._refresh_reminder_views()
         if not self._pending_notification_actions:
             return
@@ -202,6 +216,13 @@ class NativeReminderMixin:
                 key, attempt, status, reason = self.qq_reminder_backend.events.get_nowait()
             except queue.Empty:
                 break
+            if key.startswith("brief-test:"):
+                token = key.removeprefix("brief-test:")
+                pending = self._brief_attempts.get("qq")
+                if pending and pending[0] == token and "HTTP 404" in reason:
+                    self._qq_test_capability = pending[2], "主动推送接口未提供（HTTP 404）"
+                self._finish_brief_test("qq", token, STATUS_LABELS[status] + (" · " + reason if reason else ""))
+                continue
             if key == self._qq_test_token:
                 self._qq_test_token = None
                 if self._qq_test_scope:
@@ -217,6 +238,53 @@ class NativeReminderMixin:
                     engine.delivery.acknowledge(key, "qq", attempt, status, datetime.now(), reason)
                 except (OSError, ValueError, RuntimeError) as error:
                     engine.error = str(error)
+
+    def _finish_brief_test(self, channel, token, result):
+        pending = self._brief_attempts.get(channel)
+        if not pending or pending[0] != token:
+            return False
+        del self._brief_attempts[channel]
+        self._brief_results[channel] = (pending[2], result)
+        dialog = self.notification_settings_window
+        if dialog and dialog.winfo_exists():
+            dialog.refresh_brief_test()
+        return True
+
+    def _brief_qq_issue(self, binding):
+        if not binding:
+            return "尚未绑定或核验远程服务账号"
+        capability = self._qq_test_capability
+        return capability[1] if capability and capability[0] == binding.scope and "HTTP 404" in capability[1] else ""
+
+    def send_brief_test(self, items, channels, private):
+        if self.lifecycle.exiting or self._brief_attempts:
+            return
+        self._brief_results.clear()
+        now = datetime.now()
+        # Use no event IDs or actions in a manual test. Respect saved privacy
+        # even when a draft temporarily turns privacy off.
+        private = private or self.reminder_engine.config()["private"]
+        items = tuple({} for _ in items) if private else items
+        notice = Notice(uuid4().hex + uuid4().hex, "brief", now, now + timedelta(minutes=2), items, manual_test=True)
+        if "windows" in channels:
+            try:
+                token = self.notification_backend.send_test(
+                    title="桌面月历 · 每日行程简报（测试）", text=notice.summary())
+                self._brief_attempts["windows"] = token, time.monotonic() + 15, None
+            except (OSError, ValueError, RuntimeError) as error:
+                self._brief_results["windows"] = None, str(error)
+        if "qq" in channels:
+            binding = self.qq_reminder_backend.binding()
+            scope = binding.scope if binding else None
+            issue = self._brief_qq_issue(binding)
+            if issue:
+                self._brief_results["qq"] = scope, issue
+            else:
+                try:
+                    self.qq_reminder_backend.send(notice, binding, private)
+                    self._brief_attempts["qq"] = notice.key, time.monotonic() + 45, scope
+                except (OSError, ValueError, RuntimeError) as error:
+                    self._brief_results["qq"] = scope, str(error)
 
     def _set_qq_test_status(self, text):
         self._qq_test_status = text
@@ -402,11 +470,35 @@ class ReminderSettingsDialog(tk.Toplevel):
     def _divider(self, parent, *, side="top", pady=8):
         tk.Frame(parent, height=self.dp(1), bg=self.theme.divider).pack(side=side, fill="x", pady=self.dp(pady))
 
-    def _section(self, parent, title):
+    def _section(self, parent, title, *, packed=True):
         border, body = card(parent, self.app)
-        border.pack(fill="x", pady=(0, self.dp(12)))
+        if packed:
+            border.pack(fill="x", pady=(0, self.dp(12)))
         self._label(body, title, size=11, bold=True).pack(fill="x", pady=(0, self.dp(7)))
         return body
+
+    def _paired_sections(self, parent, left_title, right_title):
+        dp = self.dp
+        pair = tk.Frame(parent, bg=self.theme.panel_background)
+        pair.pack(fill="x", pady=(0, dp(12)))
+        left = self._section(pair, left_title, packed=False)
+        right = self._section(pair, right_title, packed=False)
+        current = None
+
+        def arrange(event):
+            nonlocal current
+            wide = event.width >= dp(620)
+            if wide == current:
+                return
+            current = wide
+            pair.columnconfigure(0, weight=1, uniform="pair" if wide else "")
+            pair.columnconfigure(1, weight=int(wide), uniform="pair" if wide else "")
+            left.master.grid(row=0, column=0, sticky="nsew")
+            right.master.grid(row=0 if wide else 1, column=int(wide), sticky="nsew",
+                              padx=(dp(12), 0) if wide else 0, pady=0 if wide else (dp(12), 0))
+
+        pair.bind("<Configure>", arrange)
+        return left, right
 
     def _focus_scroll(self, widget, geometry=None):
         def reveal(_event):
@@ -426,11 +518,14 @@ class ReminderSettingsDialog(tk.Toplevel):
         self._focus_scroll(widget)
         return widget
 
-    def _field(self, parent, caption, variable, values=None, *, width=108, stretch=False):
+    def _field(self, parent, caption, variable, values=None, *, width=108, stretch=False, label_width=None):
         dp = self.dp
         row = tk.Frame(parent, bg=parent.cget("bg"))
         row.pack(fill="x", pady=dp(4))
-        self._label(row, caption).pack(side="left", padx=(0, dp(12)))
+        label = self._label(row, caption)
+        if label_width:
+            label.configure(width=label_width)
+        label.pack(side="left", padx=(0, dp(12)))
         slot = tk.Frame(row, bg=row.cget("bg"), width=dp(width), height=dp(34))
         slot.pack(side="right", fill="x" if stretch else "none", expand=stretch)
         if values is None:
@@ -450,26 +545,30 @@ class ReminderSettingsDialog(tk.Toplevel):
 
     def _build_rules(self, parent):
         leads = tuple(f"{day} 天" for day in LEADS)
-        body = self._section(parent, "日程提醒")
+        body, aggregate = self._paired_sections(parent, "日程提醒", "通知聚合")
         self._check(body, "启用日程提醒", self.enabled)
         self.clock_field = self._field(body, "默认提醒时间", self.clock)
-        self.general_field = self._field(body, "一般 / 紧急事项提前天数", self.general, leads)
-        self.ddl_field = self._field(body, "DDL / 末日 DDL 提前天数", self.ddl, leads)
+        self.general_field = self._field(body, "一般 / 紧急提前", self.general, leads)
+        self.ddl_field = self._field(body, "DDL / 末日 DDL 提前", self.ddl, leads)
         self._note(body, "有具体时间的事项沿用事项编辑器中的提醒提前量。")
 
-        body = self._section(parent, "通知聚合")
-        self._check(body, "合并同一分钟触发的同类提醒", self.aggregate)
-        self._check(body, "恢复运行时合并有效的积压提醒", self.merge_backlog)
-        self._note(body, "聚合后可以从一条通知查看其中的所有事项。")
+        self._check(aggregate, "合并同一分钟触发的同类提醒", self.aggregate)
+        self._check(aggregate, "恢复运行时合并有效的积压提醒", self.merge_backlog)
+        self._divider(aggregate)
+        example, content = card(aggregate, self.app, padding=8, surface=self.theme.input_background)
+        example.pack(fill="x")
+        self._label(content, "示例 · 3 项日程合并为 1 条通知",
+                    size=9, bold=True, color=self.theme.accent).pack(fill="x")
+        self._note(content, "项目组会、整理实验记录、提交阶段报告")
 
         body = self._section(parent, "单事项规则")
-        selector = self._field(body, "选择事项", self.event_choice, tuple(self.event_labels), stretch=True)
+        selector = self._field(body, "选择事项", self.event_choice, tuple(self.event_labels), stretch=True, label_width=12)
         selector.bind("<<ComboboxSelected>>", self.select_event)
-        self.mode_field = self._field(body, "提醒规则", self.rule_mode, tuple(self.MODES), width=178)
+        self.mode_field = self._field(body, "提醒规则", self.rule_mode, tuple(self.MODES), stretch=True, label_width=12)
         self.mode_field.bind("<<ComboboxSelected>>", lambda _e: self.update_custom())
         self.custom = tk.Frame(body, bg=body.cget("bg"))
-        self._field(self.custom, "提前天数", self.rule_days, leads)
-        self._field(self.custom, "提醒时间", self.rule_clock)
+        self._field(self.custom, "提前天数", self.rule_days, leads, label_width=12)
+        self._field(self.custom, "提醒时间", self.rule_clock, label_width=12)
         self.rule_hint = self._note(body, "请先选择事项。")
 
     def _build_brief(self, parent):
@@ -487,18 +586,27 @@ class ReminderSettingsDialog(tk.Toplevel):
         options.pack(fill="x")
         self.option_widgets = [self._check(options, title, self.brief[key], packed=False)
                                for key, title in (("timed", "当天定时日程"), ("untimed", "全天或无具体时间"),
-                                                  ("unfinished", "当天未完成事项"), ("upcoming", "近期未完成 DDL"),
+                                                  ("unfinished", "其余当天未完成事项"), ("upcoming", "近期未完成 DDL"),
                                                   ("overdue", "已逾期 DDL"), ("send_empty", "无安排仍发送"))]
         self.brief_days = self._field(body, "DDL 展望天数", self.brief["days"],
                                       tuple(f"{day} 天" for day in range(1, 31)))
 
         body = self._section(settings, "发送通道")
-        self._check(body, "Windows 通知", self.brief["windows"])
-        self._check(body, "QQ 推送", self.brief["qq"])
-        self._note(body, "此处只控制每日简报。错过发送时间后可在当天四小时内补发。")
+        channels = tk.Frame(body, bg=body.cget("bg"))
+        channels.pack(fill="x")
+        for channel, title in (("windows", "Windows 通知"), ("qq", "QQ 推送")):
+            self._check(channels, title, self.brief[channel], packed=False).pack(side="left", padx=(0, dp(8)), pady=dp(3))
+        self._note(body, "错过发送时间后，可在当天四小时内补发。")
+        self.brief_test_button = ReminderButton(body, self.app, "发送测试简报", self.test_brief)
+        self.brief_test_button.pack(anchor="w", pady=(dp(8), 0))
+        self._focus_scroll(self.brief_test_button)
+        self.brief_test_status = tk.StringVar(self)
+        self._note(body, variable=self.brief_test_status)
 
         self.preview_card, preview = card(columns, self.app, surface=theme.input_background)
-        self._label(preview, "每日行程简报 · 本地预览", color=theme.accent, size=9, bold=True).pack(fill="x")
+        self.preview_source = tk.StringVar(self, value="本机日程")
+        self._field(preview, "简报预览", self.preview_source, ("本机日程", "示例数据"), width=110)
+        self._divider(preview, pady=4)
         self.preview_heading = self._label(preview, size=12, bold=True)
         self.preview_heading.pack(fill="x", pady=(dp(6), dp(3)))
         self.preview_date = self._label(preview, muted=True)
@@ -513,10 +621,9 @@ class ReminderSettingsDialog(tk.Toplevel):
             label = tk.Label(previews, text=title, bg=theme.accent_soft, fg=theme.accent,
                              padx=dp(10), pady=dp(5), font=reminder_font(self.app, 8))
             label.pack(side="left", padx=(0, dp(6)))
-        self._note(preview, "上方为简报中的按钮样式预览。")
         self._brief_layout = None
         columns.bind("<Configure>", self._layout_brief)
-        for control in (*self.brief.values(), self.private):
+        for control in (*self.brief.values(), self.private, self.preview_source):
             control.trace_add("write", self.refresh_preview)
 
     def _layout_brief(self, event):
@@ -546,26 +653,27 @@ class ReminderSettingsDialog(tk.Toplevel):
         self.qq_account = tk.StringVar(self)
         self.qq_connection = tk.StringVar(self)
         self.qq_availability = tk.StringVar(self)
+        self.qq_status_line = tk.StringVar(self)
         self.scan_state = tk.StringVar(self)
-        body = self._section(parent, "Windows 系统通知")
+        body, qq_body = self._paired_sections(parent, "Windows 系统通知", "QQ 主动推送")
         self._check(body, "启用日程与 DDL 的 Windows 通知", self.windows)
+        self._divider(body)
         self._note(body, variable=self.windows_state)
+        self._note(body, variable=self.test_status)
         self.test_button = ReminderButton(body, app, "发送 Windows 测试通知", app.test_native_notification)
         self.test_button.configure(state="disabled" if app._notification_test_pending else "normal")
-        self.test_button.pack(anchor="w", pady=(dp(8), 0))
+        self.test_button.pack(side="bottom", anchor="w", pady=(dp(8), 0))
         self._focus_scroll(self.test_button)
-        self._note(body, variable=self.test_status)
 
-        body = self._section(parent, "QQ 主动推送")
+        body = qq_body
         self._check(body, "启用日程与 DDL 的 QQ 推送", self.qq)
+        self._divider(body)
         self._note(body, variable=self.qq_account)
-        self._note(body, variable=self.qq_connection)
-        self._note(body, variable=self.qq_availability)
-        self.test_prefs = self._note(body)
+        self.qq_status_labels = tuple(self._note(body, variable=value) for value in
+                                      (self.qq_status_line, self.qq_test_status))
         self.qq_test_button = ReminderButton(body, app, "发送 QQ 测试通知", app.test_qq_reminder)
-        self.qq_test_button.pack(anchor="w", pady=(dp(8), 0))
+        self.qq_test_button.pack(side="bottom", anchor="w", pady=(dp(8), 0))
         self._focus_scroll(self.qq_test_button)
-        self._note(body, variable=self.qq_test_status)
         self.qq.trace_add("write", lambda *_: self.refresh_channel_status())
 
         body = self._section(parent, "隐私保护")
@@ -574,12 +682,15 @@ class ReminderSettingsDialog(tk.Toplevel):
 
         body = self._section(parent, "后台运行")
         self._note(body, variable=self.scan_state)
-        self._note(body, "关闭主窗口后" + ("在托盘中继续运行。" if app.lifecycle.close_hides else "退出客户端。"))
-        self._note(body, "客户端运行时调度有效。唤醒后检查仍在有效期内的积压提醒。")
+        policy = "关闭主窗口后在托盘中继续运行。" if app.lifecycle.close_hides else "关闭主窗口后退出客户端。"
+        self._note(body, policy + "唤醒后检查仍在有效期内的积压提醒。")
 
     def _status_tick(self):
-        if self.tabs.index("current") == 2:
+        current = self.tabs.index("current")
+        if current == 2:
             self.refresh_channel_status()
+        elif current == 1:
+            self.refresh_brief_test()
         self.after(1000, self._status_tick)
 
     def refresh_channel_status(self):
@@ -595,7 +706,7 @@ class ReminderSettingsDialog(tk.Toplevel):
         if binding:
             self.qq_account.set(f"已核验账号  {binding.account}")
         else:
-            self.qq_account.set("当前绑定尚未通过核验" if configured else "尚未绑定远程服务账号")
+            self.qq_account.set("当前绑定尚未通过核验" if configured else "尚未绑定远程服务，绑定后可使用 QQ 主动推送。")
         if worker:
             connection = worker.snapshot().connection
             self.qq_connection.set(CONNECTION_LABELS.get(connection, ("远程服务连接状态未知",))[0])
@@ -608,15 +719,20 @@ class ReminderSettingsDialog(tk.Toplevel):
         else:
             availability = "主动推送接口尚未验证"
         self.qq_availability.set(availability)
+        self.qq_status_line.set(f"{self.qq_connection.get()} · {availability}" if binding else self.qq_connection.get())
         test_scope = getattr(app, "_qq_test_scope", None)
         current_test = not test_scope or binding is not None and binding.scope == test_scope
         self.qq_test_status.set(app._qq_test_status if current_test else "当前绑定尚未测试")
-        preference = "启用" if self.qq.get() else "关闭"
-        self.test_prefs.configure(text=f"日程提醒  {preference}   ·   DDL 提醒  {preference}（共用上方开关）")
+        for index, label in enumerate(self.qq_status_labels):
+            visible = (bool(worker) or configured) if index == 0 else bool(binding)
+            if visible and not label.winfo_manager():
+                label.pack(fill="x", pady=(self.dp(4), 0))
+            elif not visible:
+                label.pack_forget()
         self.qq_test_button.configure(state="normal" if binding and not app._qq_test_token else "disabled")
         last = getattr(app, "_reminder_scan_at", None)
         error = getattr(app, "_reminder_scan_error", "")
-        scan = f"调度扫描失败  {error}" if error else ("调度器运行中" if last else "等待首次调度扫描")
+        scan = "上次调度扫描未成功" if error else ("调度器运行中" if last else "等待首次调度扫描")
         if last:
             scan += f" · 最近成功 {last:%m-%d %H:%M:%S}"
         self.scan_state.set(scan)
@@ -697,6 +813,69 @@ class ReminderSettingsDialog(tk.Toplevel):
         elif current == 2:
             self.refresh_channel_status()
 
+    def brief_preview_data(self, raw):
+        clock = normalize_reminder_time(raw["time"])
+        if clock is None:
+            raise ValueError("请填写有效的发送时间")
+        today = self.clock_now()
+        samples = self.preview_source.get() == "示例数据"
+        if samples:
+            today = datetime(2031, 4, 16)
+        hour, minute = map(int, clock.split(":"))
+        when = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        events = None
+        if samples:
+            events = tuple(Event(id=f"brief-preview-{index}", title=title, due=due.isoformat(),
+                                 has_time=timed, event_type=kind)
+                           for index, (title, due, timed, kind) in enumerate((
+                               ("项目组会", today.replace(hour=9), True, "general"),
+                               ("准备项目材料", today.replace(hour=14), True, "general"),
+                               ("整理实验记录", today, False, "general"),
+                               ("提交阶段报告", today + timedelta(days=2), False, "ddl"),
+                               ("交付数据说明", today - timedelta(days=2), False, "ddl"),
+                           )))
+        return when, brief_items(self.app.store, when, brief_settings(raw), False, events=events)
+
+    def test_brief(self):
+        raw = self._brief_values()
+        channels = [channel for channel in ("windows", "qq") if raw[channel]]
+        try:
+            _when, items = self.brief_preview_data(raw)
+        except ValueError as error:
+            self.brief_test_status.set(str(error))
+            return
+        if not channels:
+            return
+        # Selecting the button explicitly sends the selected preview to the chosen channels.
+        self.app.send_brief_test(items, channels, self.private.get())
+        self.refresh_brief_test()
+
+    def refresh_brief_test(self):
+        app = self.app
+        pending = app._brief_attempts
+        results = app._brief_results
+        qq_selected = self.brief["qq"].get()
+        binding = app.qq_reminder_backend.binding() if qq_selected or "qq" in pending or "qq" in results else None
+        issue = app._brief_qq_issue(binding) if qq_selected else ""
+        messages = []
+        for channel, name in (("windows", "Windows"), ("qq", "QQ")):
+            if channel in pending:
+                scope = pending[channel][2]
+                result = "正在提交"
+            elif channel in results:
+                scope, result = results[channel]
+            else:
+                continue
+            if scope and (not binding or binding.scope != scope):
+                result = "当前账号尚未试发"
+            messages.append(f"{name} · {result}")
+        can_send = self.brief["windows"].get() or qq_selected and not issue
+        if issue and "qq" not in pending and "qq" not in results:
+            messages.append(f"QQ · {issue}")
+        self.brief_test_status.set("\n".join(messages) if messages else
+                                   ("试发当前预览到所选通道。" if can_send else "请选择试发通道。"))
+        self.brief_test_button.configure(state="normal" if can_send and not pending else "disabled")
+
     def refresh_preview(self, *_args):
         if self._closing or self.tabs.index("current") != 1:
             return
@@ -704,40 +883,56 @@ class ReminderSettingsDialog(tk.Toplevel):
         self.brief_days.configure(state="readonly" if raw["upcoming"] else "disabled")
         for child in self.preview_body.winfo_children():
             child.destroy()
-        today = self.clock_now()
-        clock = normalize_reminder_time(raw["time"])
-        demo = getattr(self.app, "_reminder_preview_clock", None) is not None
-        source = "演示数据" if demo else "本机日程"
-        mode = "已启用" if raw["enabled"] else "未启用"
-        self.preview_date.configure(text=f"{today:%Y-%m-%d}  {clock or '—'}  ·  {source}  ·  {mode}")
-        if clock is None:
-            self.preview_heading.configure(text="请填写有效的发送时间")
+        try:
+            when, items = self.brief_preview_data(raw)
+        except ValueError as error:
+            self.preview_heading.configure(text=str(error))
+            self.refresh_brief_test()
             return
-        hour, minute = map(int, clock.split(":"))
-        when = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        items = brief_items(self.app.store, when, brief_settings(raw), self.private.get())
-        greeting = "早上好" if hour < 11 else "下午好" if hour < 18 else "晚上好"
-        self.preview_heading.configure(text=f"{greeting}，简报共 {len(items)} 项")
+        self.refresh_brief_test()
+        if self.preview_source.get() == "示例数据":
+            source = "示例数据"
+        else:
+            source = "验收日历" if getattr(self.app, "_reminder_preview_clock", None) is not None else "本机日程"
+        mode = "已启用" if raw["enabled"] else "未启用"
+        self.preview_date.configure(text=f"{when:%Y-%m-%d %H:%M}  ·  {source}  ·  {mode}")
+        hour = when.hour
+        greeting = "凌晨好" if hour < 5 else "早上好" if hour < 11 else "中午好" if hour < 13 else "下午好" if hour < 18 else "晚上好"
+        today_count = sum(item["group"] in ("timed", "untimed", "unfinished") for item in items)
+        self.preview_heading.configure(text=f"{greeting}，今天有 {today_count} 项安排" if today_count else f"{greeting}，今天暂无安排")
         if not items:
             self._note(self.preview_body, "暂无符合条件的事项。" if raw["send_empty"] else "无事项时跳过发送。")
             return
-        if self.private.get():
+        if self.private.get() or self.app.reminder_engine.config()["private"]:
+            self.preview_heading.configure(text=f"{greeting}，简报共 {len(items)} 项")
             self._note(self.preview_body, "隐私保护已开启，仅显示事项总数。")
             return
         dp = self.dp
+        had_group = False
         for group, title in BRIEF_GROUP_LABELS.items():
             group_items = [item for item in items if item["group"] == group]
             if not group_items:
                 continue
+            if had_group:
+                self._divider(self.preview_body, pady=4)
+            had_group = True
+            is_ddl = group in ("upcoming", "overdue")
             color = {"upcoming": self.theme.event_type_urgent, "overdue": self.theme.danger}.get(group, self.theme.accent)
-            self._label(self.preview_body, title, bold=True, color=color).pack(fill="x", pady=(dp(4), dp(2)))
+            heading = f"{title} · {len(group_items)} 项" if is_ddl else title
+            self._label(self.preview_body, heading, bold=True, color=color).pack(fill="x", pady=(dp(3), dp(2)))
             for item in group_items[:3]:
                 row = tk.Frame(self.preview_body, bg=self.preview_body.cget("bg"))
                 row.pack(fill="x", pady=(0, dp(2)))
-                context = item["date"][5:] if group in ("upcoming", "overdue") else item["time"]
+                days = (date.fromisoformat(item["date"]) - when.date()).days
+                if group == "upcoming":
+                    context = f"剩余 {days} 天" if days else "今天到期"
+                elif group == "overdue":
+                    context = f"逾期 {-days} 天" if days < 0 else "今天逾期"
+                else:
+                    context = item["time"]
                 if context:
                     context_label = self._label(row, context, muted=True)
-                    context_label.configure(width=6)
+                    context_label.configure(width=10 if is_ddl else 6)
                     context_label.pack(side="left", padx=(0, dp(6)))
                 title = self._label(row, item["title"].replace("\n", " "))
                 title.pack(side="left", fill="x", expand=True)

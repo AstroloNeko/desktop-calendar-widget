@@ -40,6 +40,7 @@ class Notice:
     event_id: str = ""
     attempt: int = 1
     scope: str = ""
+    manual_test: bool = False
 
     @property
     def tag(self):
@@ -83,12 +84,12 @@ def event_items(store, members, private):
                  for event_id, _key in members if (event := store.event_by_id(event_id)) is not None)
 
 
-def brief_items(store, now, config, private):
+def brief_items(store, now, config, private, *, events=None):
     """Each item goes to the first enabled section it matches."""
     today = now.date()
     end = today + timedelta(days=config["days"])
     groups = {key: [] for key in ("timed", "untimed", "unfinished", "upcoming", "overdue")}
-    for event in store.events:
+    for event in store.events if events is None else events:
         try:
             occurs_today = store.event_covers(event, today)
             deadline = store.event_has_deadline(event) and not event.done

@@ -124,11 +124,11 @@ class WindowsNotificationBackend:
         self._cancelled_tags.discard(plan.tag)
         self._jobs.put(("show", (plan, title, text, actions)))
 
-    def send_test(self):
+    def send_test(self, *, title=None, text=None):
         """Explicit synthetic test, independent of opt-in and event ledgers."""
         self.start()
         token = uuid.uuid4().hex
-        self._jobs.put(("test", token))
+        self._jobs.put(("test", (token, title, text)))
         return token
 
     def remove(self, tag):
@@ -187,9 +187,11 @@ class WindowsNotificationBackend:
                 if action in ("show", "test"):
                     testing = action == "test"
                     if testing:
+                        value, title, text = value
                         tag, arguments = "test" + value[:12], "test=" + value
-                        title = "桌面月历 · 测试通知"
-                        text = "这是一条不含日历数据的测试通知。点击可确认接收；不会修改事项或提醒计划。"
+                        title = title or "桌面月历 · 测试通知"
+                        if text is None:
+                            text = "这是一条不含日历数据的测试通知。点击可确认接收；不会修改事项或提醒计划。"
                         actions = []
                     else:
                         plan, title, text, actions = value

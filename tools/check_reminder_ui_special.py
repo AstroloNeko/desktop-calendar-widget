@@ -88,13 +88,28 @@ def run_case(app, theme, dpi, native, output):
             pump(app, .25)
             window.title("后台与提醒 · 验收夹具")
             verify_layout(app, window)
+            assert window.scroll_canvas.yview() == (0.0, 1.0), window.scroll_canvas.yview()
             size = window.winfo_width(), window.winfo_height()
             if dpi == native:
                 shot(window, output, f"{theme}-rules")
             window.clock.set("07:40")
             window.tabs.select(1)
             pump(app, .19)
-            assert window.preview_heading.cget("text").startswith("早上好")
+            assert window.preview_heading.cget("text") == "早上好，今天有 3 项安排"
+            window.preview_source.set("示例数据")
+            window.brief["time"].set("19:10")
+            assert window.preview_heading.cget("text").startswith("晚上好")
+            _when, items = window.brief_preview_data(window._brief_values())
+            assert len({item["event_id"] for item in items}) == len(items) == 5
+            assert "示例数据" in window.preview_date.cget("text")
+            window.preview_source.set("本机日程")
+            window.brief["time"].set("08:00")
+            window.brief["windows"].set(False)
+            window.brief["qq"].set(True)
+            assert "尚未绑定" in window.brief_test_status.get()
+            assert window.brief_test_button.cget("state") == "disabled"
+            window.brief["windows"].set(True)
+            window.brief["qq"].set(False)
             labels = [str(widget.cget("text")) for widget in window.preview_body.winfo_children()
                       if isinstance(widget, window.preview_heading.__class__)]
             assert any("近期" in label for label in labels) and any("逾期" in label for label in labels), labels
@@ -111,6 +126,7 @@ def run_case(app, theme, dpi, native, output):
             window.tabs.select(2)
             pump(app, .12)
             assert "尚未绑定" in window.qq_account.get()
+            assert window.channel_canvas.yview() == (0.0, 1.0), window.channel_canvas.yview()
             assert window.qq_test_button.cget("state") == "disabled"
             assert window.test_button.winfo_width() < window.winfo_width() // 2
             if dpi == native:
@@ -125,6 +141,8 @@ def run_case(app, theme, dpi, native, output):
                 assert "demo-verified-account" in window.qq_account.get()
                 assert "已通过" in window.qq_availability.get()
                 assert "实时在线" in window.qq_connection.get()
+                pump(app, .15)
+                assert window.channel_canvas.yview() == (0.0, 1.0), window.channel_canvas.yview()
                 if dpi == native:
                     shot(window, output, f"{theme}-channels-verified-fixture")
                 app.notification_backend.status = "Windows 通知受限（状态 2）"
@@ -174,6 +192,13 @@ def run_case(app, theme, dpi, native, output):
             window.tabs.select(1)
             pump(app, .18)
             assert window._brief_layout == (False, False)
+            for tab, canvas, name in ((0, window.scroll_canvas, "rules"), (2, window.channel_canvas, "channels")):
+                window.tabs.select(tab)
+                pump(app, .12)
+                assert canvas.yview()[1] < 1
+                if dpi == native:
+                    shot(window, output, f"{theme}-{name}-small")
+            window.tabs.select(1)
             if dpi == native:
                 shot(window, output, f"{theme}-brief-small")
             return {"theme": theme, "layout_dpi": dpi, "normal_pixels": size,
