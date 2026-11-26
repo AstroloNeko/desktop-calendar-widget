@@ -8,6 +8,8 @@ from calendar_event_service import EventOperationError
 from desktop_calendar.assistant.calendar_chat_protocol import SPECIFIC_DELETE_STAGE, ChatError, fail, require_calendar_write
 from desktop_calendar.assistant.operation_plan import compile_proposal
 from desktop_calendar.reminders.reminder_rules import stored_event_rule
+from desktop_calendar.reminders.reminder_engine import ReminderError
+from desktop_calendar.storage.calendar_repository import RepositoryConflictError
 
 
 def event_action(record):
@@ -37,6 +39,36 @@ def event_result(record, ids, *, changed, committed, verified, details=(), recov
         result.update(task_id=record['operation_id'], events=details)
     elif details:
         result.update(event=details[0],event_id=ids[0],deleted=False)
+    return result
+
+
+def reminder_result(record, proof, *, pending=False):
+    return dict(action="reminder_action", operation_id=record["operation_id"], kind=proof["action"],
+                count=proof["count"], until=proof["until"], changed=proof["changed"],
+                committed=True, goal_satisfied=True, scheduling_pending=pending)
+
+
+def execute_reminder(gateway, journal, record, owner):
+    """Claim via the shared Pending journal; commit a proof in the reminder ledger."""
+    engine = gateway.reminders
+    if engine is None:
+        fail("当前没有本地提醒引擎。", "reminder_unavailable")
+    if record["status"] != "ready":
+        fail("提醒操作尚未确认。", "operation_conflict")
+    require_calendar_write()
+    before = {"status":"ready","revision":record["revision"]}
+    record.update(status="executing",execution_protocol=1)
+    journal.transition("operation",record["operation_id"],owner,before,record)
+    require_calendar_write()
+    plan = record["preview"]
+    try:
+        proof = engine.apply_runtime_action(plan["action_plan"],plan["instances"],gateway.reminder_now(),
+                                            operation_id=record["operation_id"])
+    except (ReminderError, RepositoryConflictError) as error:
+        fail(str(error), "reminder_conflict")
+    result = reminder_result(record,proof,pending=proof["action"] != "acknowledge" and engine.dirty)
+    record.update(status="succeeded",operation_result=result)
+    journal.put("operation",record["operation_id"],owner,record)
     return result
 
 

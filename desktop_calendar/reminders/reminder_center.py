@@ -414,9 +414,9 @@ class ReminderPlanPanel(tk.Frame):
         row = self.selected_row()
         if row and row.snoozed:
             try:
-                self.app.reminder_engine.cancel_snooze(row.event_id)
+                changed = self.app.reminder_engine.cancel_snooze(row.event_id, key=row.plan_key)
                 self.refresh()
-                self.app._show_feedback("已取消稍后提醒")
+                self.app._show_feedback("已取消稍后提醒" if changed else "提醒已变化，请重新选择")
             except (OSError, ValueError) as error:
                 self.detail.set("取消未完成：" + str(error))
 

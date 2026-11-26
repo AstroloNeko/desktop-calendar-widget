@@ -119,6 +119,7 @@ class DeliveryQueue:
             triggered = min(plan.when for plan in plans)
             expiry = min(plan.when + CATCHUP for plan in plans)
             record = self.new_record(kind, triggered, expiry, members, channels, qq_scope)
+            record["planned_at"] = {plan.key: plan.when.isoformat() for plan in plans}
             for _, key in members:
                 legacy = state["deliveries"].get(key, {})
                 if isinstance(legacy, dict) and legacy.get("status") == "failed" and "windows" in channels:
@@ -197,6 +198,8 @@ class DeliveryQueue:
                                 members[0][0] if len(members) == 1 and len(record["members"]) == 1 else "",
                                 attempt, record["scope"])
                 entry.update(status="dispatching", attempts=attempt, at=now.isoformat(), reason="", tag=notice.tag)
+                if not is_brief:
+                    entry["members"] = [list(member) for member in members]
                 dispatched.append((channel, notice, members, binding))
                 changed = True
 

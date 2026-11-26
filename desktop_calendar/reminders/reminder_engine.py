@@ -219,7 +219,7 @@ class ReminderEngine:
             raise ReminderError("提醒记录版本不兼容，已停止提醒；日历数据未改变。")
         return {"version": 1, **{
             key: deepcopy(raw[key]) if isinstance(raw.get(key), dict) else {}
-            for key in ("deliveries", "snoozes", "batches", "qq_cutover")
+            for key in ("deliveries", "snoozes", "batches", "qq_cutover", "handled", "runtime_actions")
         }}
 
     def _save(self, key, value):
@@ -333,16 +333,28 @@ class ReminderEngine:
     def overview(self, now):
         """Detached read-only projection; no rebuild, writes, send or removal."""
         from desktop_calendar.reminders.reminder_overview import build_overview
+        config, plans, state = self.read_snapshot()
+        return build_overview(self.store, tuple(plans.values()), state, local_wall(now), config)
+
+    def read_snapshot(self):
         config, state = self.config(), self._state()
-        plans = plans_for_store(self.store, config)
-        self._import_legacy({plan.event_id: plan for plan in plans}, state)
-        return build_overview(self.store, plans, state, local_wall(now), config)
+        plans = {plan.event_id: plan for plan in plans_for_store(self.store, config)}
+        self._import_legacy(plans, state)
+        return config, plans, state
+
+    def runtime_snapshot(self, now):
+        from desktop_calendar.reminders.reminder_runtime import runtime_snapshot
+        return runtime_snapshot(self, now)
+
+    def runtime_receipt(self, operation_id):
+        return self._state()["runtime_actions"].get(operation_id)
 
     def tick(self, now):
         self.delivery.tick(local_wall(now))
         return 2000
 
     def acknowledge(self, key, success, now, attempt=None, reason=""):
+        """Record the Windows submission result."""
         if attempt is None:
             attempt = self._state()["batches"].get(key, {}).get("channels", {}).get("windows", {}).get("attempts")
         if attempt is not None:
@@ -365,24 +377,91 @@ class ReminderEngine:
     def _snooze_many(self, members, minutes, now):
         if minutes not in SNOOZES:
             raise ReminderError("不支持的延后时间")
-        if self.dirty:
-            self._rebuild()
-        state = self._state()
-        when = now + timedelta(minutes=minutes)
-        current = self.delivery.current_members({"members": members}, state)
-        for event_id, key in current:
-            plan = self.plans[event_id]
-            snooze_key = hashlib.sha256(f"{plan.key}:snooze:{when.isoformat()}".encode()).hexdigest()
-            marker = {"status": "snoozed", "at": now.isoformat(), "attempts": 0}
-            state["deliveries"][plan.key] = marker
-            state["deliveries"][key] = marker
-            state["snoozes"][event_id] = {"base": plan.key, "key": snooze_key, "at": when.isoformat()}
-        if current:
+        result = self.apply_runtime_action({"action":"snooze","minutes":minutes},
+            [{"key":key,"event_id":identifier} for identifier,key in members], now, strict=False)
+        return result["count"]
+
+    def apply_runtime_action(self, action, targets, now, *, operation_id=None, strict=True, qq_batch=None):
+        """Revalidate and commit the runtime-only patch and its proof in one save."""
+        from desktop_calendar.reminders.reminder_runtime import live_instances, snooze_time
+        now = local_wall(now)
+        _, plans, state = self.read_snapshot()
+        current = live_instances(self, plans, state)
+        if operation_id and operation_id in state["runtime_actions"]:
+            return state["runtime_actions"][operation_id]
+        kind = action["action"]
+        if kind not in ("snooze", "cancel_snooze", "acknowledge"):
+            raise ReminderError("不支持的提醒操作。")
+        if strict and not targets:
+            raise ReminderError("没有可操作的提醒实例。")
+        checked = []
+        for target in targets:
+            match = current.get(target["key"])
+            valid = (match and match[0].event_id == target["event_id"] and
+                     (not strict or target.get("revision") == match[1]) and
+                     (kind != "cancel_snooze" or match[0].key != plans[match[0].event_id].key) and
+                     (kind == "cancel_snooze" or now - match[0].when < CATCHUP))
+            if not valid:
+                if strict:
+                    raise ReminderError("提醒已变化、失效或过期，请重新查询。")
+                continue
+            checked.append(match[0])
+        if len({plan.event_id for plan in checked}) != len(checked):
+            raise ReminderError("同一事项有重复提醒目标。")
+        when = None
+        if kind == "snooze":
+            times = {snooze_time(action, now, plan.when if strict else None) for plan in checked}
+            if len(times) > 1:
+                raise ReminderError("这些提醒的预计延后时刻不同，请分别操作或指定同一个时刻。")
+            when = next(iter(times), None)
+        changed = False
+        for plan in checked:
+            base = plans[plan.event_id]
+            if kind == "snooze":
+                if plan.key != base.key and when == plan.when:
+                    continue
+                old = state["snoozes"].get(plan.event_id, {})
+                original = (old.get("base_delivery") if old.get("base") == base.key
+                            else state["deliveries"].get(base.key))
+                nonce = operation_id or now.isoformat()
+                key = hashlib.sha256(f"{base.key}:snooze:{plan.key}:{when.isoformat()}:{nonce}".encode()).hexdigest()
+                marker = {"status":"snoozed","at":now.isoformat(),"attempts":0}
+                state["deliveries"][base.key] = state["deliveries"][plan.key] = marker
+                state["snoozes"][plan.event_id] = {"base":base.key,"key":key,"at":when.isoformat()}
+                if "base_delivery" in old or strict and old.get("base") != base.key:
+                    state["snoozes"][plan.event_id]["base_delivery"] = original
+                changed = True
+            elif kind == "cancel_snooze":
+                previous = state["snoozes"].pop(plan.event_id)
+                state["deliveries"][plan.key] = {"status":"snoozed","at":now.isoformat(),"attempts":0}
+                if "base_delivery" in previous and now - base.when < CATCHUP:
+                    original = previous["base_delivery"]
+                    if original is None:
+                        state["deliveries"].pop(base.key, None)
+                    elif isinstance(original, dict):
+                        state["deliveries"][base.key] = original
+                changed = True
+            elif plan.key not in state["handled"]:
+                state["handled"][plan.key] = now.isoformat()
+                changed = True
+        if qq_batch and checked and kind == "acknowledge":
+            entry = state["batches"][qq_batch]["channels"]["qq"]
+            if not entry.get("acknowledged_at"):
+                entry["acknowledged_at"] = now.isoformat()
+                entry["handled_keys"] = [plan.key for plan in checked]
+                changed = True
+        result = dict(action=kind, count=len(checked), changed=changed, keys=[plan.key for plan in checked], recorded_at=now.isoformat(),
+                      until=when.isoformat(timespec="seconds") if when else None)
+        if operation_id:
+            state["runtime_actions"][operation_id] = result
+            while len(state["runtime_actions"]) > 256:
+                state["runtime_actions"].pop(min(state["runtime_actions"],
+                    key=lambda key:state["runtime_actions"][key].get("recorded_at","")))
+        if changed or operation_id:
             self._save(STATE_KEY, state)
-            for _event_id, key in current:
-                self.backend.remove(key[:16])
-            self.invalidate()
-        return len(current)
+        if changed and kind != "acknowledge":
+            self.replan(plan.event_id for plan in checked)
+        return result
 
     def apply_qq_action(self, identifier, action, binding, now):
         """Called on the calendar owner thread by the verified remote-action adapter."""
@@ -398,34 +477,45 @@ class ReminderEngine:
                 or batch.get("kind") not in ("event", "ddl") or qq.get("status") != "sent"
                 or read_time(batch.get("expires"), now) <= now):
             raise ReminderError("提醒交互已失效")
+        members = qq.get("members")
+        if members is None:
+            if qq.get("attempts") != 1:
+                raise ReminderError("旧通知没有可核验的发送成员，请按事项查询。")
+            members = batch["members"]
         if action == "acknowledge":
-            if not qq.get("acknowledged_at"):
-                qq["acknowledged_at"] = now.isoformat()
-                self._save(STATE_KEY, state)
-            return {"acknowledged": True}
+            result = self.apply_runtime_action({"action":"acknowledge"},
+                [{"event_id":event_id,"key":key} for event_id,key in members],
+                now, strict=False, qq_batch=identifier)
+            return {"acknowledged": bool(result["count"])}
         if config["private"]:
             raise ReminderError("当前通知已启用隐私保护")
         if action == "snooze_10m":
-            return {"snoozed": self._snooze_many(batch["members"], 10, now)}
+            return {"snoozed": self._snooze_many(members, 10, now)}
         if action == "view_items":
             from desktop_calendar.reminders.notification_model import event_items
-            return {"items": event_items(self.store, self.batch_members(identifier), False)}
+            return {"items": event_items(self.store, self.delivery.current_members({"members":members},state), False)}
         raise ReminderError("不支持的提醒交互")
 
-    def cancel_snooze(self, event_id):
-        state = self._state()
-        if event_id not in state["snoozes"] and self.config()["enabled"]:
-            # A read-only plan view can expose a legacy Snooze before the first
-            # scheduling tick. Cancel it atomically without ticking/sending.
-            plans = {plan.event_id: plan for plan in plans_for_store(self.store, self.config())
-                     if plan.event_id == event_id}
-            self._import_legacy(plans, state)
-        previous = state["snoozes"].pop(event_id, None)
-        if previous:
+    def cancel_snooze(self, event_id, *, key=None, now=None):
+        _, plans, state = self.read_snapshot()
+        base = plans.get(event_id)
+        record = state["snoozes"].get(event_id)
+        if base is None or record is None:
+            return False
+        try:
+            current = snoozed_plan(base, record)
+        except (ValueError, TypeError, KeyError):
+            # The local reminder center can clear a malformed legacy record.
+            if key is not None and key != base.key:
+                return False
+            del state["snoozes"][event_id]
             self._save(STATE_KEY, state)
-            if isinstance(previous, dict) and isinstance(previous.get("key"), str):
-                self.backend.remove(previous["key"][:16])
-            self.invalidate()
+            self.replan((event_id,))
+            return True
+        if current.key == base.key or key is not None and key != current.key:
+            return False
+        return bool(self.apply_runtime_action({"action":"cancel_snooze"},
+            [{"event_id":event_id,"key":current.key}], now or datetime.now(), strict=False)["count"])
 
     def activation_is_current(self, event_id, key):
         if self.dirty:

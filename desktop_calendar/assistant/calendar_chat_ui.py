@@ -433,6 +433,8 @@ class _ChatWidgets:
         if self.candidates:
             types = {'general': '一般', 'urgent': '紧急', 'ddl': 'DDL'}
             for index, event in enumerate(self.candidates, 1):
+                if event.get('object_type') == 'reminder':
+                    continue  # The deterministic numbered reminder list is already in the transcript.
                 if event.get('object_type') == 'habit':
                     self.append(f"{index}. {event['title']} · {event['schedule']}")
                     continue
@@ -475,6 +477,10 @@ class _ChatWidgets:
             self.input.focus_set()
 
     def render_operation(self, operation):
+        if operation['preview'].get('object_type') == 'reminder':
+            preview = operation['preview']
+            self.append(f"{preview['description']} · 待确认 · {len(preview['instances'])} 项", 'preview')
+            return
         if operation['preview'].get('object_type') == 'event_batch':
             self.append('待确认批量事项\n' + '\n'.join(
                 f"{item['date']} · {item['title']} · {item['color']} · " +

@@ -105,18 +105,22 @@ def make_receipt(response, request_text='', *, business=None):
     task = response.get('task') or {}
     result = response.get('operation_result') or {}
     preview = op.get('preview', {})
+    reminder_text = (response.get('plain_reminder') or preview.get('object_type') == 'reminder'
+                     or result.get('action') == 'reminder_action')
+    if reminder_text:
+        business = None
     ok = status in ('ok', 'succeeded', 'completed', 'clarification_required',
                     'confirmation_required', 'cancelled', 'needs_clarification', 'pending')
     error = None if ok else response.get('error_code') or status
     prompt = response.get('assistant_message') if ok else response.get('error_message') or response.get('assistant_message')
-    rows = response.get('candidates') or response.get('habit_candidates') or []
+    rows = [] if reminder_text else response.get('candidates') or response.get('habit_candidates') or []
     instruction = ''
     if status in ('ok', 'succeeded', 'completed') and result.get('goal_satisfied') is True and result.get('action') in (
             'create', 'update', 'complete', 'delete'):
         explicit = requested_fields(request_text) | set(
             preview.get('field_provenance', {}).get('explicit', preview.get('requested_fields', ())))
         prompt = receipt_message(result, concise=True, explicit=explicit) or prompt
-    if op.get('status') == 'pending' and status in ('confirmation_required', 'pending'):
+    if not reminder_text and op.get('status') == 'pending' and status in ('confirmation_required', 'pending'):
         if preview.get('before') and event_action(op) == 'delete':
             rows = []
             prompt = wechat_delete_review(op) or '删除清单过长，请回复“取消”，缩小范围后再预览。'
@@ -621,7 +625,10 @@ class RemoteWorker:
 
     def _set_receipt(self, record, response):
         business = None
-        if record.get('interaction_version') == INTERACTION_VERSION:
+        preview = (response.get('pending_operation') or {}).get('preview', {})
+        runtime = ((response.get('operation_result') or {}).get('action') == 'reminder_action'
+                   or preview.get('object_type') == 'reminder' or response.get('plain_reminder'))
+        if record.get('interaction_version') == INTERACTION_VERSION and not runtime:
             try:
                 business, record['interaction_reply'] = build_business_receipt(self.service, record, response)
             except (ChatError, KeyError, ValueError, TypeError, OSError, sqlite3.Error):

@@ -46,6 +46,18 @@ def fingerprint(value):
 
 
 def receipt_message(result, *, concise=False, explicit=()):
+    if result.get('action') == 'reminder_action':
+        label = {'snooze':'已设置稍后提醒','cancel_snooze':'已取消稍后提醒',
+                 'acknowledge':'已标记提醒已处理'}[result['kind']]
+        text = f"{label}（{result['count']} 项）"
+        if result.get('until'):
+            text += ' · '+result['until'].replace('T',' ')
+        if result.get('scheduling_pending'):
+            text += ' · 等待调度重算'
+        if result['kind'] == 'cancel_snooze':
+            text += '。原规则按现有补发和去重策略重新评估。'
+        text += '。事项时间、截止时间、完成状态和长期规则不受影响。此类运行操作不进入日历撤销历史。'
+        return text
     if 'committed' in result and result.get('goal_satisfied') is None:
         if result['committed'] is None:
             return '执行结果暂时无法确认，未自动重试。'

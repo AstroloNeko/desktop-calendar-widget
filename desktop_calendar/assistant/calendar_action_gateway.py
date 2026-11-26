@@ -13,7 +13,8 @@ from event_search import EventSearchIndex, capture_search_store
 from desktop_calendar.assistant.calendar_chat_protocol import fail, fingerprint as fingerprint, require_calendar_write
 from desktop_calendar.assistant.calendar_chat_tools import iso_day, reference_today, validate_call
 from desktop_calendar.assistant.calendar_habit_gateway import prepare_habit
-from desktop_calendar.assistant.operation_engine import deletion_outcome, execute as execute_plan, recovered
+from desktop_calendar.assistant.operation_engine import (deletion_outcome, execute as execute_plan, execute_reminder,
+                                                          recovered, reminder_result)
 from desktop_calendar.reminders.reminder_engine import CONFIG_KEY, describe_event_reminder, normalize_config
 from desktop_calendar.reminders.reminder_rules import MAX_MINUTES, effective_mode, normalize_event_rule, stored_event_rule
 
@@ -335,6 +336,8 @@ class CalendarActionGateway:
         if not self.writable():
             fail('请先关闭当前编辑器或等待数据操作结束，再确认。', 'execution_failed')
         preview = operation['preview']
+        if preview.get('object_type') == 'reminder':
+            return execute_reminder(self, journal, operation, owner)
         if preview.get('object_type') == 'event_batch':
             hashes = [fingerprint(self._state(i)) for i in preview['event_ids']]
             if hashes != preview['before_hashes']:
@@ -414,4 +417,13 @@ class CalendarActionGateway:
             if operation['preview']['after'] is None:
                 return deletion_outcome(self,operation,recovered=True)['status'] == 'succeeded'
             return recovered(self, operation, [operation['preview']['after']])
+        return self.dispatch(check)
+
+    def recover_reminder(self, operation):
+        def check():
+            if self.reminders is None:
+                return None
+            proof = self.reminders.runtime_receipt(operation['operation_id'])
+            return (reminder_result(operation,proof,pending=proof['action']!='acknowledge' and self.reminders.dirty)
+                    if proof is not None else None)
         return self.dispatch(check)

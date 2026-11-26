@@ -8,6 +8,7 @@ import time
 import uuid
 
 from desktop_calendar.assistant import calendar_batch_delete
+from desktop_calendar.assistant import calendar_reminder_tools
 from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
 from desktop_calendar.assistant.calendar_chat_intent import requested_fields
 from desktop_calendar.assistant.calendar_chat_model import MAX_REPAIRS, MAX_ROUNDS as MAX_ROUNDS, run_model_turn
@@ -92,6 +93,15 @@ class CalendarChatService:
         if operation['status'] in ('executing', 'confirmed', 'uncertain'):
             # Restart/crash recovery is observation-only, NEVER re-execution.
             original_status = operation['status']
+            if operation['preview'].get('object_type') == 'reminder':
+                result = self.gateway.recover_reminder(operation)
+                if result is None:
+                    operation.update(status='uncertain',error_code='execution_uncertain',
+                                     error_message='没有可核验的提醒回执，未重试。')
+                else:
+                    operation.update(status='succeeded',operation_result=result,error_code=None,error_message=None)
+                self.journal.transition('operation',operation_id,owner,{'status':original_status},operation)
+                return operation
             if event_action(operation)=='delete':
                 operation.update(self.gateway.dispatch(lambda: deletion_outcome(self.gateway,operation,recovered=True)))
                 self.journal.transition('operation',operation_id,owner,{'status':original_status},operation)
@@ -124,7 +134,7 @@ class CalendarChatService:
         waiting = session.get('event_input')
         if waiting and waiting.get('plan') and waiting['expires'] >= self.clock():
             return envelope(session_id,status='clarification_required',candidates=session['candidates'],
-                            selection_revision=waiting['revision'])
+                            selection_revision=waiting['revision'],plain_reminder=waiting.get('kind') == 'reminder')
         return envelope(session_id)
 
     def _audit(self, op, owner, source):
@@ -148,19 +158,25 @@ class CalendarChatService:
             if self.stopped:
                 fail('AI服务已停止。', 'service_stopped')
             op = self._operation(session_id, operation_id, owner)
-            if revision is not None and revision != op.get('revision'):
+            runtime_reminder = op['preview'].get('object_type') == 'reminder'
+            if runtime_reminder and op.get('source') != source:
+                fail('请在原来源确认提醒操作。', 'authentication_failed')
+            if (revision is not None or runtime_reminder) and revision != op.get('revision'):
                 fail('预览已经更新，请查看最新卡片后再确认。', 'operation_conflict')
             if op['status'] == 'ready':
                 self._operation(session_id, operation_id, owner, resume_ready=True)
             if op['status'] != 'pending':
                 return self.get_operation_result(session_id, operation_id, owner)
+            if runtime_reminder and automatic:
+                fail('提醒运行操作必须由用户确认。','operation_conflict')
             if trigger_request_id:
                 op['execution_request_id'] = trigger_request_id
             if op['preview'].get('object_type')=='batch_delete':
                 return calendar_batch_delete.confirm(self,op,owner,revision,automatic)
             if event_action(op) == 'delete' and automatic:
                 fail('删除必须由用户明确确认。', 'operation_conflict')
-            event_plan = op['preview'].get('object_type', 'event') in ('event', 'event_batch') and op['preview']['after'] is not None
+            event_plan = (runtime_reminder or op['preview'].get('object_type', 'event') in ('event', 'event_batch')
+                          and op['preview']['after'] is not None)
             op['status'] = 'ready' if event_plan else 'confirmed'
             if automatic:
                 op['authorization'] = 'single_event_policy'
@@ -194,6 +210,8 @@ class CalendarChatService:
     def cancel_operation(self, session_id, operation_id, owner=OWNER, source='desktop'):
         with self.lock:
             op = self._operation(session_id, operation_id, owner)
+            if op['preview'].get('object_type') == 'reminder' and op.get('source') != source:
+                fail('请在原来源取消提醒操作。', 'authentication_failed')
             if op['status'] in ('ready','pending'):
                 previous_status = op['status']
                 op['status'] = 'cancelled'
@@ -279,6 +297,37 @@ class CalendarChatService:
 
     def _tool(self, name, args, session, owner, request_id, source, message='', diagnostic=None, continuation=(), target_lock=None, *, structured=False, preview_only=False, expected_before=None):
         validate_call(name, args)
+        sid = session['session_id']
+        if name == 'query_reminders':
+            result = self.gateway.dispatch(lambda: calendar_reminder_tools.query_reminders(self.gateway,args,source))
+            rows = result['rows']
+            session['reminder_context'] = dict(source=source,expires=self.clock()+calendar_reminder_tools.TTL,
+                total=result['total'],rows=[{'key':row['key'],'revision':row['revision'],'title':row['title'],
+                                            'when':row['when']} for row in rows])
+            text = f"查询到 {result['total']} 条提醒实例。"
+            if not result['enabled']:
+                text += ' 全局日程提醒已关闭，仍可查看历史记录。'
+            if rows:
+                text += '\n'+'\n'.join(f"{index}. {calendar_reminder_tools.row_text(row)}"
+                                      for index,row in enumerate(rows,1))
+            if result['total'] > len(rows):
+                text += '\n已展示前 10 条。'
+            if result['item_details']:
+                text += '\n'+'\n'.join(f"{item['title']} · {reminder_line(item)}" for item in result['item_details'])
+            return envelope(sid,request_id,assistant_message=text,reminder_query=result,plain_reminder=True)
+        if name == 'query_brief':
+            result = self.gateway.dispatch(lambda: calendar_reminder_tools.query_brief(self.gateway,args,source))
+            return envelope(sid,request_id,assistant_message=result['text'],brief_result=result,plain_reminder=True)
+        if name == 'propose_reminder_action':
+            try:
+                action, rows, whole = self.gateway.dispatch(lambda: calendar_reminder_tools.action_targets(
+                    self.gateway,args,session.get('reminder_context'),source,message))
+            except ChatError as error:
+                if error.code != 'clarification_required':
+                    raise
+                return envelope(sid,request_id,status='clarification_required',
+                                assistant_message=str(error),plain_reminder=True)
+            return calendar_reminder_tools.preview_or_select(self,session,owner,request_id,source,action,rows,whole)
         if name == 'revise_event_target':
             draft = session.get('awaiting_target')
             if not draft or draft['revision']!=args['revision'] or draft['expires']<self.clock():
@@ -747,6 +796,9 @@ class CalendarChatService:
                         assistant_message='请先核对当前待删除事项，再确认或取消。')
 
     def _conversation(self, session, message, request_id, owner, source, diagnostic):
+        command = {'/reminders':'query_reminders','/brief':'query_brief'}.get(message.strip().casefold())
+        if command and source != 'wechat':
+            return self._tool(command,{},session,owner,request_id,source)
         session.pop('member_dates', None)
         session.pop('clarification_anchor', None)
         draft = session.pop('awaiting_create', None)
@@ -829,6 +881,19 @@ class CalendarChatService:
                 prior = prior['text']
             message = prior + '。' + message
         waiting = session.pop('event_input', None)
+        if waiting and waiting.get('kind') == 'reminder':
+            from desktop_calendar.assistant.operation_plan import selected_reply
+            chosen = selected_reply(message,session['candidates'])
+            if chosen and chosen in waiting['ids']:
+                if waiting['source'] != source or waiting['expires'] < self.clock():
+                    fail('提醒候选已过期，请重新查询。','reminder_conflict')
+                action, rows, _ = self.gateway.dispatch(lambda: calendar_reminder_tools.action_targets(
+                    self.gateway,{**waiting['plan'],'target':{'key':chosen}},
+                    {**waiting,'total':len(waiting['rows'])},source))
+                return calendar_reminder_tools.preview_or_select(
+                    self,session,owner,request_id,source,action,rows)
+            session.update(candidates=[],selected=None,selected_kind='event')
+            waiting = None
         if waiting:
             chosen, color = choice_with_color(message, session['candidates'], self.gateway.categories()['palette'])
             if chosen and waiting['expires'] < self.clock():
@@ -942,6 +1007,10 @@ class CalendarChatService:
                      category_catalog=self.gateway.categories(), awaiting_target=session.get('awaiting_target'),
                      recent_task=session.get('recent_task'), delete_intent=session.get('delete_intent',False),
                      clarified_query=session.get('clarified_query'), clarification=session.get('clarification'), pending=pending_context)
+        reminder_context = session.get('reminder_context')
+        if reminder_context and reminder_context['source'] == source and reminder_context['expires'] >= self.clock():
+            state['reminder_candidates'] = [{'index':index,'title':row['title'],'when':row['when']}
+                                            for index,row in enumerate(reminder_context['rows'],1)]
 
         update_intent = bool(requested_fields(message) and re.search(r'改|换|调整|设置|提前|推迟', message))
         multiple_matches = False
@@ -997,5 +1066,7 @@ class CalendarChatService:
             with request_reference(datetime.fromisoformat(context['now'])):
                 return run_model_turn(self.provider, state, session['messages'], diagnostic, dispatch=dispatch_tool,
                                       on_no_tools=on_no_tools, stopped=lambda: self.stopped)
+        scoped = ([tool_definition(name) for name in ('query_reminders', 'clarify')]
+                  if calendar_reminder_tools.is_reminder_lookup(message) else None)
         return run_model_turn(self.provider, state, session['messages'], diagnostic, dispatch=dispatch_tool,
-                              on_no_tools=on_no_tools, stopped=lambda: self.stopped)
+                              on_no_tools=on_no_tools, stopped=lambda: self.stopped, tools=scoped)

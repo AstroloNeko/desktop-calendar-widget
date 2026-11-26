@@ -61,6 +61,20 @@ SCHEMAS = {
                          "category_id": {"type": ["string", "null"]}, "done": {"type": "boolean"},
                          "ddl_only": {"type": "boolean"}}),
     "get_event": obj({"event_id": text(100)}, ("event_id",)),
+    "query_reminders": obj({
+        "filter":{"type":"string","enum":["all","next","attention","missed","snoozed","failed","unknown","last_notification"]},
+        "start":text(10), "end":text(10), "at":text(16), "title":text(300),
+        "channel":{"type":"string","enum":["windows","qq"]},
+    }),
+    "query_brief": obj({"date":text(10), "scope":{"type":"string","enum":["agenda","ddl"]}}),
+    "propose_reminder_action": obj({
+        "action":{"type":"string","enum":["snooze","cancel_snooze","acknowledge"]},
+        "target":obj({"title":text(300),"at":text(16),"key":text(64),
+                      "index":{"type":"integer","minimum":1,"maximum":30},
+                      "context":{"type":"string","enum":["last_query","last_notification"]},
+                      "quantity":{"type":"string","enum":["one","notification_all"]}}),
+        "minutes":{"type":"integer","minimum":1,"maximum":1440}, "until":text(16),
+    }, ("action","target")),
     "preview_create": obj(FIELDS, ("title", "date")),
     "preview_update": obj({"event_id": text(100), "changes": obj(FIELDS)}, ("event_id", "changes")),
     "preview_complete": obj({"event_id": text(100), "done": {"type": "boolean"}}, ("event_id", "done")),
@@ -89,6 +103,9 @@ DESCRIPTIONS = {
     "list_categories": "读取现有分类的稳定ID和名称，供筛选及创建事项使用；不修改分类。",
     "query_events": "查询真实事项；日期为含端点 YYYY-MM-DD，范围最多366天。无条件查询仅本月。多结果不可自行选择。",
     "get_event": "读取本会话查询过的稳定Event ID的详情；不允许猜ID。",
+    "query_reminders": "只读并结束本轮，不能作为运行操作的前置搜索。读取真实提醒实例和通知状态。无条件默认今日；start/end为提醒触发日期，at为本地YYYY-MM-DDTHH:MM。按标题查询不必补日期。next只取下一次。失败、未知、错过分别用failed、unknown、missed。last_notification仅能使用本机当前通知关联。",
+    "query_brief": "仅用于生成行程或DDL简报，不能用来回答通知或提醒查询。默认本地今日。最近未完成DDL使用scope=ddl。宿主直接返回最终文本。",
+    "propose_reminder_action": "稍后、取消稍后、标记提醒已处理的唯一提案入口。直接提交用户给的事项名称或原提醒时刻，宿主自行搜索并确认；无需先调用任何查询工具。snooze须给minutes或本地YYYY-MM-DDTHH:MM的until。取消稍后用cancel_snooze，知道了用acknowledge。当前查询序号或刚才那个使用index或last_query；明确说最近通知使用last_notification。仅用户明确要求整条最近通知时用notification_all。不要猜key。",
     "preview_create": "仅预览一个新建事项，不执行。只提供用户明确给出的字段：默认只需title/date。不要补全持续天数、颜色、分类、提醒等默认值；无时间省略time，无分类省略category_id/color_mode。日期时间歧义先clarify。",
     "preview_update": "仅预览一个已明确定位事项的局部changes Patch；只传用户本次要求修改的字段！改名只传title，绝不重发完整Event或默认值。可合并同事项尚未确认变更；不执行。",
     "preview_complete": "仅预览完成或取消完成已明确定位的事项；不执行。",
@@ -96,10 +113,10 @@ DESCRIPTIONS = {
     "clarify": "信息不明确时向用户澄清，尤其日期/时间或相对提醒；不能宣称写入成功。",
 }
 TASK_TOOLS = {'batch_create_events','batch_update_events','batch_set_completion'}
-READ_TOOLS = {'list_categories', 'query_events', 'get_event', 'query_habits', 'get_habit'}
+READ_TOOLS = {'list_categories', 'query_events', 'get_event', 'query_habits', 'get_habit', 'query_reminders', 'query_brief'}
 PROPOSAL_TOOLS = {'preview_create', 'preview_update', 'preview_complete', 'preview_delete', 'preview_create_habit', 'preview_update_habit'}
 PROPOSAL_TOOLS |= TASK_TOOLS
-PROPOSAL_TOOLS.update(('delete_events_batch', 'propose_events','revise_event_target'))
+PROPOSAL_TOOLS.update(('delete_events_batch', 'propose_events','revise_event_target','propose_reminder_action'))
 
 EVENT_ADAPTERS = {'preview_create', 'preview_update', 'preview_complete',
                   'batch_create_events', 'batch_update_events', 'batch_set_completion',

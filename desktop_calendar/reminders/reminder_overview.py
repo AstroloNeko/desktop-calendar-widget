@@ -23,6 +23,7 @@ class ReminderRow:
     qq: str = "—"
     rule: str = ""
     reason: str = ""
+    plan_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,7 @@ def rule_label(event, plan, config, snoozed):
     return f"稍后提醒 · {text}" if snoozed else text
 
 
-def build_overview(store, plans, state, now, config):
+def build_overview(store, plans, state, now, config, *, include_legacy=False):
     rows, old_submitted = [], 0
     events = {event.id: event for event in store.events}
     for base in plans:
@@ -75,7 +76,7 @@ def build_overview(store, plans, state, now, config):
         except (ValueError, TypeError, KeyError):
             rows.append(ReminderRow(base.event_id, str(event.title), base.when, base.anchor, base.ddl,
                                     "attention", "稍后提醒记录异常", "未派发，请取消稍后提醒后重新设置。", True,
-                                    rule=rule_label(event, base, config, True)))
+                                    rule=rule_label(event, base, config, True), plan_key=base.key))
             continue
         entry = state["deliveries"].get(plan.key, {})
         entry = entry if isinstance(entry, dict) else {}
@@ -107,10 +108,14 @@ def build_overview(store, plans, state, now, config):
                               if value.get("reason") and value["status"] in ("failed", "unknown", "expired", "cancelled"))
             rows.append(ReminderRow(plan.event_id, str(event.title), plan.when, plan.anchor, plan.ddl,
                                     group, " / ".join(statuses), "\n".join(details), is_snoozed and (sending or needs_attention),
-                                    retry, batch_id, windows, qq, rule_label(event, base, config, is_snoozed), reason))
+                                    retry, batch_id, windows, qq, rule_label(event, base, config, is_snoozed), reason, plan.key))
             continue
         if status == "accepted":
             old_submitted += 1
+            if include_legacy:
+                rows.append(ReminderRow(plan.event_id, str(event.title), plan.when, plan.anchor, plan.ddl,
+                                        "processed", "旧记录 · Windows 已提交", "", windows="已提交",
+                                        rule=rule_label(event, base, config, is_snoozed), plan_key=plan.key))
             continue
         if status == "snoozed":
             continue  # Superseded/cancelled; never promise another dispatch.
@@ -153,7 +158,7 @@ def build_overview(store, plans, state, now, config):
         qq = "未列入" if status else (waiting if config["qq"] else "未启用")
         rows.append(ReminderRow(plan.event_id, str(event.title), plan.when, plan.anchor, plan.ddl,
                                 group, text, detail, is_snoozed, next_attempt, windows=windows, qq=qq,
-                                rule=rule_label(event, base, config, is_snoozed)))
+                                rule=rule_label(event, base, config, is_snoozed), plan_key=plan.key))
     order = {"attention": 0, "snoozed": 1, "upcoming": 2, "processed": 3}
     rows.sort(key=lambda row: (order[row.group], row.next_attempt or row.when, row.when))
     submitted = sum(batch["channels"].get("windows", {}).get("status") == "submitted"

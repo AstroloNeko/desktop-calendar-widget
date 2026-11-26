@@ -204,6 +204,9 @@ class ReminderOverviewTests(unittest.TestCase):
         self.assertEqual(self.row().group, "attention")
         self.assertTrue(self.row().snoozed)
         self.assertIsNone(self.row().next_attempt)
+        self.assertFalse(self.engine.cancel_snooze(event.id, key="stale", now=self.now))
+        self.assertTrue(self.engine.cancel_snooze(event.id, key=plan.key, now=self.now))
+        self.assertFalse(self.row().snoozed)
 
     def test_deleted_and_completed_snoozes_not_in_view(self):
         event = self.event()

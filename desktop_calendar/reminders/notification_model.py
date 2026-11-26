@@ -84,9 +84,10 @@ def event_items(store, members, private):
                  for event_id, _key in members if (event := store.event_by_id(event_id)) is not None)
 
 
-def brief_items(store, now, config, private, *, events=None):
+def brief_items(store, now, config, private, *, events=None, overdue_at=None):
     """Each item goes to the first enabled section it matches."""
     today = now.date()
+    overdue_at = now if overdue_at is None else overdue_at
     end = today + timedelta(days=config["days"])
     groups = {key: [] for key in ("timed", "untimed", "unfinished", "upcoming", "overdue")}
     for event in store.events if events is None else events:
@@ -94,7 +95,7 @@ def brief_items(store, now, config, private, *, events=None):
             occurs_today = store.event_covers(event, today)
             deadline = store.event_has_deadline(event) and not event.done
             last_day = store.event_end_date(event) if deadline else today
-            overdue = deadline and store.is_event_overdue(event, now)
+            overdue = deadline and store.is_event_overdue(event, overdue_at)
             clock = event.due_at.strftime("%H:%M") if event.has_time else ""
         except (ValueError, TypeError, OverflowError):
             continue
