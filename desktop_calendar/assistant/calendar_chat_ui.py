@@ -636,7 +636,7 @@ class AISettings(tk.Toplevel):
         self.configure(bg=bg)
         width, height, x, y = dialog_geometry(self.app.dpi.work_area(), self.app.dpi.dpi,
             (owner.winfo_rootx(), owner.winfo_rooty(), owner.winfo_width(), owner.winfo_height()),
-            preferred=(550, 640))
+            preferred=(580, 720))
         self.geometry(f'{width}x{height}{x:+d}{y:+d}')
         self.minsize(min(width, dp(320)), min(height, dp(260)))
         self.inputs = {}
@@ -661,16 +661,33 @@ class AISettings(tk.Toplevel):
 
         style = ttk.Style(self)
         style.configure('CalendarAI.TNotebook', background=bg, borderwidth=0, tabmargins=(0, 0, 0, 0))
-        style.configure('CalendarAI.TNotebook.Tab', font=(font, 9), padding=(dp(12), dp(6)))
-        style.map('CalendarAI.TNotebook.Tab', background=[('selected', theme.accent_soft), ('!selected', bg)],
-                  foreground=[('selected', theme.text_primary), ('!selected', theme.text_secondary)])
+        style.layout('CalendarAI.TNotebook.Tab', [])
+        tab_strip = tk.Frame(self, bg=bg)
+        tab_strip.pack(fill='x', padx=dp(12), pady=(dp(7), dp(9)))
+        tk.Frame(self, height=dp(1), bg=theme.divider).pack(fill='x', padx=dp(12))
         self.tabs = ttk.Notebook(self, style='CalendarAI.TNotebook')
-        self.tabs.pack(fill='both', expand=True, padx=dp(16), pady=(dp(7), 0))
+        self.tabs.pack(fill='both', expand=True, padx=dp(12), pady=(dp(2), 0))
         forms = []
+        tab_buttons = []
 
         def add_tab(title):
             page = tk.Frame(self.tabs, bg=bg)
             self.tabs.add(page, text=title)
+            column = len(tab_buttons)
+            tab_strip.grid_columnconfigure(column, weight=1, uniform='settings_tabs')
+            shell = (RoundedCardShell(tab_strip, theme, dp, bg, surface=bg, outline=bg)
+                     if theme.rounded_widget_shells else None)
+            button = tk.Button(shell or tab_strip, text=title, command=lambda: self.tabs.select(page),
+                               bg=bg, fg=theme.text_secondary, activebackground=theme.control_hover,
+                               activeforeground=theme.text_primary, font=(font, 9), bd=0, relief='flat',
+                               highlightthickness=0 if shell else dp(1), highlightbackground=bg,
+                               highlightcolor=theme.input_focus, pady=dp(5), cursor='hand2')
+            if shell:
+                button.pack(fill='both', expand=True, padx=dp(7), pady=dp(2))
+                button.bind('<FocusIn>', lambda _e: shell.set_outline(theme.input_focus))
+                button.bind('<FocusOut>', lambda _e: shell.set_outline(button.cget('bg')))
+            (shell or button).grid(row=0, column=column, sticky='ew', padx=dp(2))
+            tab_buttons.append((page, button, shell))
             scroll = SettingsScroll(page, self.app)
             scroll.pack(fill='both', expand=True)
             forms.append(scroll)
@@ -744,7 +761,20 @@ class AISettings(tk.Toplevel):
 
         form, content = remote_form, remote_form.content
         self.remote_enabled = tk.BooleanVar(value=self.old['remote_enabled'])
-        self.remote_enable_check = option(content, '启用私人远程服务', self.remote_enabled)
+        remote_header = tk.Frame(content, bg=bg)
+        remote_header.pack(fill='x', pady=(dp(10), dp(6)))
+        self.remote_enable_check = themed_check(
+            remote_header, theme, dp, text='启用', variable=self.remote_enabled, bg=bg,
+            fg=theme.text_primary, activebackground=bg, activeforeground=theme.text_primary,
+            font=(font, 9), cursor='hand2')
+        self.remote_enable_check.pack(side='right')
+        self.remote_enable_check.bind('<FocusIn>', lambda _e: remote_form.reveal(remote_header), add='+')
+        tk.Label(remote_header, text='私人远程服务', bg=bg, fg=theme.text_primary,
+                 font=(font, 11, 'bold'), anchor='w').pack(fill='x')
+        remote_intro = tk.Label(remote_header, text='通过即时通讯平台使用本机 AI 助理。',
+                                bg=bg, fg=theme.text_secondary, font=(font, 8), anchor='w', justify='left')
+        remote_intro.pack(fill='x', pady=(dp(2), 0))
+        wrapped.append(remote_intro)
         self.remote_status = tk.StringVar(self)
         self.connection_detail = tk.StringVar(self)
         self.binding_state = tk.StringVar(self)
@@ -767,7 +797,8 @@ class AISettings(tk.Toplevel):
                           fg=theme.text_secondary, font=(font, 8), anchor='w', justify='left')
         detail.pack(fill='x', pady=(dp(2), dp(6)))
         wrapped.append(detail)
-        for label, variable in (('绑定状态', self.binding_state), ('日历账号', self.account_name), ('AI 助理', self.ai_state),
+        tk.Frame(details, height=dp(1), bg=theme.divider).pack(fill='x', pady=(dp(3), dp(6)))
+        for label, variable in (('绑定账户', self.account_name), ('设备状态', self.binding_state), ('AI 助理', self.ai_state),
                                 ('最近成功检查', self.last_check_time), ('检查结果', self.check_result),
                                 ('最近处理', self.latest_result)):
             row = tk.Frame(details, bg=status_bg)
@@ -777,11 +808,12 @@ class AISettings(tk.Toplevel):
                      wraplength=dp(230), justify='right').pack(side='right')
         actions = tk.Frame(details, bg=status_bg)
         actions.pack(fill='x', pady=(dp(6), 0))
+        actions.grid_columnconfigure((0, 1), weight=1, uniform='remote_actions')
         self.manual_check_button, manual_check = form_button(actions, self.app, '手动检查', self.check_remote_jobs)
-        manual_check.pack(side='left', padx=(0, dp(6)))
+        manual_check.grid(row=0, column=0, sticky='ew', padx=(0, dp(4)))
         self.manual_check_button.bind('<FocusIn>', lambda _e: form.reveal(manual_check), add='+')
         self.rebind_button, rebind = form_button(actions, self.app, '重新绑定', self.start_rebinding)
-        rebind.pack(side='left')
+        rebind.grid(row=0, column=1, sticky='ew', padx=(dp(4), 0))
         self.rebind_button.bind('<FocusIn>', lambda _e: form.reveal(rebind), add='+')
         self.copy_rebinding_button, self.copy_rebinding_control = form_button(
             details, self.app, '复制「重新获取激活码」', self.copy_rebinding_command, quiet=True)
@@ -796,23 +828,39 @@ class AISettings(tk.Toplevel):
         self.remote_mode_anchor = tk.Frame(content, bg=bg)
         self.remote_mode_anchor.pack(fill='x')
 
-        history = self.add_fold(content, '最近远程处理', form, expanded=True)
-        history_row = tk.Frame(history, bg=bg)
-        history_row.pack(fill='x', pady=(0, dp(3)))
-        self.history_view = tk.Text(history_row, height=9, width=1, wrap='word', state='disabled',
+        history = self.add_fold(content, '最近远程处理记录', form, expanded=True)
+        history_card = (RoundedCardShell(history, theme, dp, status_bg, surface=bg, outline=theme.input_border,
+                                         cursor='arrow') if theme.rounded_widget_shells else
+                        tk.Frame(history, bg=status_bg, highlightthickness=dp(1), highlightbackground=theme.input_border))
+        history_card.pack(fill='x', pady=(0, dp(3)))
+        history_row = tk.Frame(history_card, bg=status_bg)
+        history_row.pack(fill='x', padx=dp(5), pady=dp(5))
+        self.history_view = tk.Text(history_row, height=8, width=1, wrap='word', state='disabled',
                                     bg=theme.input_background, fg=theme.text_primary, font=(font, 9),
-                                    padx=dp(8), pady=dp(5), bd=0, highlightthickness=dp(1),
-                                    highlightbackground=theme.input_border)
-        bar = ttk.Scrollbar(history_row, orient='vertical', command=self.history_view.yview)
-        bar.pack(side='right', fill='y')
-        self.history_view.configure(yscrollcommand=bar.set)
+                                    padx=dp(6), pady=dp(2), bd=0, highlightthickness=0,
+                                    tabstyle='wordprocessor')
+        bar = ttk.Scrollbar(history_row, orient='vertical', command=self.history_view.yview,
+                            style='Global.Vertical.TScrollbar')
+
+        def update_history_scroll(first, last):
+            bar.set(first, last)
+            if float(first) == 0 and float(last) == 1:
+                bar.pack_forget()
+            elif not bar.winfo_manager():
+                bar.pack(side='right', fill='y', before=self.history_view)
+
+        self.history_view.configure(yscrollcommand=update_history_scroll)
         self.history_view.pack(side='left', expand=True, fill='x')
-        self.history_view.tag_configure('secondary', foreground=theme.text_secondary, spacing3=dp(3))
+        self.history_view.bind('<Configure>', lambda event: self.history_view.configure(
+            tabs=(max(dp(60), event.width - dp(13)), 'right')))
+        self.history_view.tag_configure('channel', foreground=theme.accent)
+        self.history_view.tag_configure('time', foreground=theme.text_secondary)
+        self.history_view.tag_configure('secondary', foreground=theme.text_secondary, spacing3=dp(6))
         self.history_view.bind('<MouseWheel>', self.scroll_history)
         self.paint_history()
         tk.Label(history, text='最近 20 条本机记录', bg=bg, fg=theme.text_secondary,
                  font=(font, 8), anchor='w').pack(fill='x', pady=(0, dp(5)))
-        help_body = self.add_fold(content, '绑定与使用说明', form)
+        help_body = self.add_fold(content, '远程绑定与使用说明', form)
         for title, description in REMOTE_HELP:
             section(help_body, title, description)
 
@@ -852,9 +900,24 @@ class AISettings(tk.Toplevel):
         clear_remote.pack(side='left', padx=(dp(6), 0))
         self.clear_remote_button.bind('<FocusIn>', lambda _e: form.reveal(clear_remote), add='+')
         self.show_remote_mode()
+
+        def paint_tabs(_event=None):
+            selected = self.tabs.select()
+            for page, button, shell in tab_buttons:
+                active = str(page) == selected
+                fill = theme.accent if active else bg
+                color = theme.text_on_accent if active else theme.text_secondary
+                button.configure(bg=fill, fg=color, activeforeground=color,
+                                 activebackground=theme.accent_hover if active else theme.control_hover)
+                if shell:
+                    shell.set_fill(fill)
+                    shell.set_outline(theme.input_focus if button.focus_get() == button else fill)
+
+        self.tabs.bind('<<NotebookTabChanged>>', paint_tabs, add='+')
         self.tabs.bind('<<NotebookTabChanged>>', self.refresh_remote_panel, add='+')
         if show_remote:
             self.tabs.select(self.remote_tab)
+        paint_tabs()
         self.watch_remote_status()
         for key in ('timeout', 'port'):
             self.fields[key].configure(width=11)
@@ -917,7 +980,9 @@ class AISettings(tk.Toplevel):
                 body.pack_forget()
 
         button, control = form_button(section, self.app, ('▾  ' if expanded else '▸  ') + title, toggle, quiet=True)
-        control.pack(anchor='w')
+        button.configure(anchor='w', fg=self.app.theme.text_primary, activeforeground=self.app.theme.text_primary,
+                         font=(self.app.search_font, 9, 'bold'))
+        control.pack(fill='x')
         button.bind('<FocusIn>', lambda _e: scroll.reveal(control), add='+')
         if expanded:
             body.pack(fill='x')
@@ -1025,7 +1090,9 @@ class AISettings(tk.Toplevel):
         if not self.history_rows:
             view.insert('end', '本机记录暂不可读取。' if unavailable else '暂无本机处理记录。', 'secondary')
         for row in self.history_rows:
-            view.insert('end', f'{self.history_time(row.received_at)}  ·  {channel_name(row.channel)}  ·  {row.result}\n')
+            view.insert('end', channel_name(row.channel), 'channel')
+            view.insert('end', f'  {row.result}\t')
+            view.insert('end', f'{self.history_time(row.received_at)}\n', 'time')
             delivery = ' · '.join(filter(None, (row.upload, row.notification)))
             view.insert('end', f'{delivery}\n', 'secondary')
         view.configure(state='disabled')
