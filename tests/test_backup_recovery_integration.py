@@ -221,11 +221,16 @@ class RecoveryIntegrationTests(unittest.TestCase):
 
     def test_updater_gate_copy_and_restart_are_ordered(self):
         import updater
+        from uuid import uuid4
         from types import SimpleNamespace
         from desktop_calendar.storage.calendar_storage_lifecycle import DirectoryLease
         source = self.root/'payload';source.mkdir()
         before = self.manager.state_path.read_bytes()
-        with tempfile.TemporaryDirectory() as install:
+        # Exercise the real guard without contending with an installed calendar.
+        nonce = uuid4().hex
+        with tempfile.TemporaryDirectory() as install, \
+                patch('desktop_calendar.updates.update_state.APP_MUTEX', f'Local\\CalendarTestApp-{nonce}'), \
+                patch('desktop_calendar.updates.update_state.UPDATE_MUTEX', f'Local\\CalendarTestUpdate-{nonce}'):
             args = SimpleNamespace(pid=123, archive=self.root/'download.zip', install_dir=Path(install), executable='DesktopCalendar.exe')
             for compatible, copy_fails in ((False,False),(True,True),(True,False)):
                 if compatible:

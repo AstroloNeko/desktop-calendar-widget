@@ -47,15 +47,32 @@ def inside(child, outer, *, minimum_width=None):
 
 def clickable(button):
     # Geometry alone missed buttons painted underneath a sibling frame.
-    x = button.winfo_rootx() + button.winfo_width() // 2
-    y = button.winfo_rooty() + button.winfo_height() // 2
-    assert button.winfo_containing(x, y) is button, str(button)
+    owner = button.winfo_toplevel()
+    topmost = owner.attributes('-topmost')
+    try:
+        for _ in range(3):
+            x = button.winfo_rootx() + button.winfo_width() // 2
+            y = button.winfo_rooty() + button.winfo_height() // 2
+            hit = button.winfo_containing(x, y)
+            if hit is button:
+                return
+            if hit is not None and hit.winfo_toplevel() is owner:
+                break
+            # Lift only our disposable QA window, never interact with an overlapping app.
+            owner.attributes('-topmost', True)
+            owner.lift()
+            pump(owner, .12)
+    finally:
+        if owner.attributes('-topmost') != topmost:
+            owner.attributes('-topmost', topmost)
+    raise AssertionError((str(button), str(hit), (x, y)))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--screenshots', type=Path)
     parser.add_argument('--theme', choices=ACTIVE_THEME_NAMES, default='modern')
+    parser.add_argument('--dpi', type=int, choices=(96, 192))
     args = parser.parse_args()
     if args.screenshots:
         from tools.check_habit_schedules import capture_own_window
@@ -71,6 +88,10 @@ def main():
         store.save()
         with patch.object(CalendarApp, 'check_reminders'):
             app = CalendarApp(store)
+            if args.dpi:
+                dpi_override = patch.object(app.dpi, 'current_window_dpi', return_value=args.dpi)
+                dpi_override.start()
+                app._apply_dpi_change(args.dpi)
             errors = []
             app.report_callback_exception = lambda *parts: errors.append(str(parts))
             try:
@@ -92,6 +113,16 @@ def main():
                 assert side.winfo_width() == app.dpi.px(GLOBAL_TIMELINE_LAYOUT.detail_panel_width(logical_width))
                 if app.dpi.logical(app.global_workspace.winfo_width()) >= side.DOCK_BELOW:
                     assert side.winfo_manager() == 'grid'
+                    timeline_width = app.global_timeline_canvas.winfo_width()
+                    side.toggle_drawer()
+                    pump(app)
+                    assert not side.winfo_manager() and not side.snapshot()[5]
+                    assert side.drawer_button.text == '展开右栏'
+                    assert app.global_timeline_canvas.winfo_width() > timeline_width
+                    app._focus_quick_entry()
+                    pump(app)
+                    assert side.winfo_manager() == 'grid' and side.snapshot()[5]
+                    assert side.drawer_button.text == '收起右栏'
                     old_width = side.winfo_width()
                     side._resize_from_left(SimpleNamespace(x_root=side.winfo_rootx()-app.dpi.px(18)))
                     pump(app)
@@ -191,6 +222,8 @@ def main():
                 pump(app, .2)
                 assert side.winfo_manager() == 'place'
                 assert side.winfo_width() == app.dpi.px(side.MIN_WIDTH)
+                assert side.winfo_rootx() + side.winfo_width() == (
+                    app.global_workspace.winfo_rootx() + app.global_workspace.winfo_width())
                 active_tab = side.tabs['assistant']
                 if app.theme.rounded_widget_shells:
                     _, _, right, _ = active_tab.bbox('all')
@@ -280,6 +313,8 @@ def main():
                 if blocker and hasattr(blocker, 'close'):
                     blocker.close()
                 cleanup(app)
+                if args.dpi:
+                    dpi_override.stop()
 
 
 if __name__ == '__main__':

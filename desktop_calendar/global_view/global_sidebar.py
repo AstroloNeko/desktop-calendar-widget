@@ -20,7 +20,8 @@ class GlobalSidebar(tk.Frame):
                          highlightbackground=theme.workspace_grid, highlightcolor=theme.workspace_grid)
         self.pack_propagate(False)
         mode, self.preferred_width, self.drawer_open, self.session_id, self.draft = (
-            snapshot or ("day", None, False, None, ""))
+            snapshot[:5] if snapshot else ("day", None, False, None, ""))
+        self.dock_open = snapshot[5] if snapshot and len(snapshot) > 5 else True
         self.mode = "day"
         self.chat = None
         self.day_dirty = True
@@ -30,10 +31,11 @@ class GlobalSidebar(tk.Frame):
         self.drawer_button = drawer_button
 
         grip = tk.Frame(self, width=dp(4), bg=theme.workspace_grid, cursor="sb_h_double_arrow")
+        self.grip = grip
         grip.pack(side="left", fill="y")
         grip.bind("<B1-Motion>", self._resize_from_left)
         grip.bind("<Enter>", lambda _e: grip.configure(bg=theme.input_focus))
-        grip.bind("<Leave>", lambda _e: grip.configure(bg=theme.workspace_grid))
+        grip.bind("<Leave>", lambda _e: grip.configure(bg=self._grip_color()))
         body = tk.Frame(self, bg=bg)
         body.pack(side="left", fill="both", expand=True)
 
@@ -164,32 +166,39 @@ class GlobalSidebar(tk.Frame):
         if drawer != self._drawer:
             # Keep focused input visible when shrinking across the breakpoint.
             focused = self.focus_get()
-            if drawer and self._drawer is False and (
+            if drawer and self._drawer is False and self.dock_open and (
                 self.mode == "assistant" or (focused and str(focused).startswith(str(self) + "."))
             ):
                 self.drawer_open = True
-            if drawer:
-                self.grid_forget()
-            else:
-                self.place_forget()
-                self.grid(row=0, column=2, sticky="nsew", padx=(dp(self.app.theme.metrics.workspace_gap), 0))
+            self.grid_forget()
+            self.place_forget()
             self._drawer = drawer
+            self.grip.configure(bg=self._grip_color())
         maximum = min(self.MAX_WIDTH, max(self.MIN_WIDTH, logical - 560)) if not drawer else self.MAX_WIDTH
         preferred = self.preferred_width or GLOBAL_TIMELINE_LAYOUT.detail_panel_width(logical)
         pixels = min(max(1, width - dp(12)), dp(max(self.MIN_WIDTH, min(maximum, preferred))))
         if not drawer:
             if int(self.cget("width")) != pixels:
                 self.configure(width=pixels)
+            if self.dock_open and not self.winfo_manager():
+                self.grid(row=0, column=2, sticky="nsew", padx=(dp(self.app.theme.metrics.workspace_gap), 0))
+            elif not self.dock_open:
+                self.grid_forget()
         elif self.drawer_open:
-            inset = dp(self.app.theme.metrics.workspace_padding)
-            self.place(relx=1, rely=0, anchor="ne", x=-inset, width=pixels, relheight=1)
+            gap = dp(self.app.theme.metrics.workspace_gap)
+            self.place(relx=1, y=gap, anchor="ne", width=pixels, relheight=1,
+                       height=-2 * gap, bordermode="outside")
             self.lift()
         else:
             self.place_forget()
         if self.drawer_button is not None:
-            label = "收起右栏" if drawer and self.drawer_open else "打开右栏" if drawer else "当日详情"
+            label = "收起右栏" if (self.drawer_open if drawer else self.dock_open) else "展开右栏"
             if self.drawer_button.text != label:
                 self.drawer_button.set_text(label)
+
+    def _grip_color(self):
+        theme = self.app.theme
+        return theme.window_border_outer if self._drawer else theme.workspace_grid
 
     def _resize_from_left(self, event):
         width = self.winfo_rootx() + self.winfo_width() - event.x_root
@@ -199,19 +208,20 @@ class GlobalSidebar(tk.Frame):
     def show(self, *, mode=None):
         if mode is not None:
             self.switch(mode)
+        self.dock_open = True
         self.drawer_open = True
         self.arrange(self.workspace_width or self.master.winfo_width())
 
     def toggle_drawer(self):
         if self._drawer:
             self.drawer_open = not self.drawer_open
-            self.arrange(self.workspace_width)
-            if not self.drawer_open:
-                self.app.focus_set()
         else:
-            self.switch("day", focus=True)
+            self.dock_open = not self.dock_open
+        self.arrange(self.workspace_width or self.master.winfo_width())
+        if not (self.drawer_open if self._drawer else self.dock_open):
+            self.app.focus_set()
 
     def snapshot(self):
         session = self.chat.session_id if self.chat else self.session_id
         draft = self.chat.input.get("1.0", "end-1c") if self.chat else self.draft
-        return self.mode, self.preferred_width, self.drawer_open, session, draft
+        return self.mode, self.preferred_width, self.drawer_open, session, draft, self.dock_open

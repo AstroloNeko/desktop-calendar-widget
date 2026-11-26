@@ -2541,7 +2541,7 @@ class DayDetailDialog(tk.Toplevel):
             anchor="w",
         )
         title.pack(fill="x")
-        meta_text = "习惯 · 每个工作日" if item.kind == "habit" else "待办 · 完成一次即结束"
+        meta_text = "习惯 · " + schedule_label(item) if item.kind == "habit" else "待办 · 完成一次即结束"
         if done:
             meta_text += " · 已完成"
         tk.Label(content, text=meta_text, bg=background, fg=current_theme().schedule_time_text, font=(FONT, 8), anchor="w").pack(fill="x", pady=(2, 0))

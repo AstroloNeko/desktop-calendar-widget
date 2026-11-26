@@ -63,7 +63,11 @@ class PaletteList(tk.Canvas):
         return str(self.index)
 
     def see(self, value):
-        row = next((row for row in self.rows if row.index == int(value)), None)
+        index = int(value)
+        if index == 0:
+            self.yview_moveto(0)
+            return
+        row = next((row for row in self.rows if row.index == index), None)
         if row is None:
             return
         top, height = self.canvasy(0), self.winfo_height()
