@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Optional
 
 from holiday_data import is_workday as system_is_workday
-from desktop_preferences import DEFAULT_THEME_NAME, normalize_theme_name
+from desktop_preferences import DEFAULT_THEME_NAME, normalize_stored_theme_name
 from habit_schedule import habit_scheduled_on, normalize_schedule, rule_on, preserve_schedule_history
 from copy import deepcopy
 from data_compat import DATA_SCHEMA_VERSION, DataCompatibilityError
@@ -484,7 +484,7 @@ class Store:
             settings = raw.get("settings", {})
             if isinstance(settings, dict):
                 self.settings.update(settings)
-            self.settings["theme"] = normalize_theme_name(self.settings.get("theme"))
+            self.settings["theme"] = normalize_stored_theme_name(self.settings.get("theme"))
             # Migrate the first prototype's settings without changing the data.
             if "topmost" in settings and "window_mode" not in settings:
                 # The redesigned gadget intentionally defaults to the desktop layer,

@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, Store
 from dpi_utils import WorkArea, dpi_for_window
 from desktop_calendar.reminders.reminder_engine import STATE_KEY, plans_for_store
@@ -107,7 +108,7 @@ def main():
                 failed = plans["synthetic-0"]
                 app.reminder_engine._save(STATE_KEY, {"version": 1, "deliveries": {
                     failed.key: {"status": "failed", "attempts": 1, "at": datetime.now().isoformat()}}})
-                for theme in ("modern", "aero", "paper", "frutiger"):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for view in ("compact", "global"):
                         (app.enter_global_view if view == "global" else app.return_to_compact_view)()

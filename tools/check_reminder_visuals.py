@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, Store
 from dpi_utils import WorkArea, dpi_for_window
 from desktop_calendar.reminders.reminder_engine import STATE_KEY, plans_for_store
@@ -49,7 +50,7 @@ def main():
                 for dpi in (96, 120, 144, 168, 192):
                     with patch.object(app.dpi, 'current_window_dpi', return_value=dpi):
                         app._apply_dpi_change(dpi)
-                        for theme in ('modern', 'aero', 'paper', 'frutiger'):
+                        for theme in ACTIVE_THEME_NAMES:
                             app.set_theme(theme)
                             pump(app, .08)
                             case_before = store.data_file.read_bytes()

@@ -1,52 +1,67 @@
 import unittest
+from unittest.mock import Mock, patch
 
-from desktop_calendar.ui.ui_theme import DEFAULT_THEME_NAME, FRUTIGER, PAPER, THEMES, WIN7_AERO, get_theme, normalize_theme_name
+from desktop_preferences import ACTIVE_THEME_NAMES, ARCHIVED_THEME_FALLBACKS, DEFAULT_THEME_NAME, normalize_stored_theme_name
+from desktop_calendar.ui.ui_theme import ACTIVE_THEMES, THEMES, get_theme, normalize_theme_name
 
 
 class ThemeRegistryTests(unittest.TestCase):
     def test_only_modern_and_slate_use_rounded_widget_shells(self):
-        self.assertEqual({t.name for t in THEMES.values() if t.rounded_widget_shells}, {"modern", "slate"})
+        self.assertEqual({t.name for t in ACTIVE_THEMES.values() if t.rounded_widget_shells}, {"modern", "slate"})
 
     def test_only_slate_opts_out_of_the_deadline_ring(self):
-        self.assertEqual([t.name for t in THEMES.values() if t.ddl_marker_style == "dot"], ["slate"])
-        self.assertTrue(all(t.ddl_marker_style == "ring" for t in THEMES.values() if t.name != "slate"))
+        self.assertEqual(get_theme("slate").ddl_marker_style, "dot")
+        self.assertEqual(get_theme("modern").ddl_marker_style, "ring")
 
-    def test_slate_is_opt_in_and_appended_in_menu_order(self):
-        self.assertEqual(tuple(THEMES), ("modern", "aero", "paper", "frutiger", "slate"))
-        self.assertEqual(get_theme("slate").display_name, "Slate")
-        self.assertIs(get_theme("gemini_reviewing"), get_theme("slate"))
+    def test_active_registry_leaves_archived_definitions_available(self):
+        self.assertEqual(tuple(ACTIVE_THEMES), ("modern", "slate"))
+        self.assertEqual(set(THEMES) - set(ACTIVE_THEMES), set(ARCHIVED_THEME_FALLBACKS))
         self.assertEqual(DEFAULT_THEME_NAME, "modern")
-        self.assertEqual(WIN7_AERO.display_name, "Windows 7 Glass")
-        self.assertEqual(PAPER.display_name, "Paper")
-        self.assertEqual(PAPER.style, "paper")
-        self.assertEqual(FRUTIGER.display_name, "Frutiger Aero")
-        self.assertEqual(FRUTIGER.style, "frutiger")
-
-    def test_paper_has_an_independent_visual_palette(self):
-        modern = get_theme("modern")
-        aero = get_theme("aero")
-        self.assertNotEqual(PAPER.panel_background, modern.panel_background)
-        self.assertNotEqual(PAPER.panel_background, aero.panel_background)
-        self.assertNotEqual(PAPER.accent, modern.accent)
-        self.assertNotEqual(PAPER.date_selected_background, aero.date_selected_background)
-
-    def test_frutiger_has_an_independent_visual_palette(self):
-        modern = get_theme("modern")
-        aero = get_theme("aero")
-        self.assertNotEqual(FRUTIGER.panel_background, modern.panel_background)
-        self.assertNotEqual(FRUTIGER.header_gradient_mid, aero.header_gradient_mid)
-        self.assertNotEqual(FRUTIGER.accent, aero.accent)
-        self.assertNotEqual(FRUTIGER.date_selected_background, aero.date_selected_background)
-        self.assertNotEqual(FRUTIGER.environment_haze, FRUTIGER.schedule_background)
-        self.assertNotEqual(FRUTIGER.environment_accent, FRUTIGER.accent)
+        self.assertEqual({name: THEMES[name].display_name for name in ARCHIVED_THEME_FALLBACKS},
+                         {"aero": "Windows 7 Glass", "paper": "Paper", "frutiger": "Frutiger Aero"})
 
     def test_legacy_theme_aliases_and_invalid_fallback(self):
-        self.assertEqual(normalize_theme_name("aero"), "aero")
-        self.assertEqual(normalize_theme_name("win7_aero"), "aero")
-        self.assertEqual(normalize_theme_name("paper"), "paper")
-        self.assertEqual(normalize_theme_name("frutiger"), "frutiger")
-        self.assertEqual(normalize_theme_name("unknown"), DEFAULT_THEME_NAME)
-        self.assertEqual(normalize_theme_name(None), DEFAULT_THEME_NAME)
+        for saved, canonical in (("aero", "aero"), ("win7_aero", "aero"),
+                                 ("paper", "paper"), ("frutiger", "frutiger")):
+            with self.subTest(saved=saved):
+                self.assertEqual(normalize_stored_theme_name(saved), canonical)
+                self.assertIs(get_theme(saved), get_theme("modern"))
+        self.assertIs(get_theme("gemini_reviewing"), get_theme("slate"))
+        for invalid in ("unknown", None, []):
+            self.assertEqual(normalize_theme_name(invalid), DEFAULT_THEME_NAME)
+
+    def test_main_menu_lists_and_dispatches_only_active_themes(self):
+        from app import CalendarApp
+
+        app = Mock(theme_name="modern", theme=get_theme("modern"), view_mode="compact", window_mode="desktop")
+        app.store.settings = {}
+        app.attributes.return_value = 1.0
+        app.menu_button.winfo_rooty.return_value = 0
+        app.menu_button.winfo_height.return_value = 24
+        menu, theme_menu, opacity_menu, data_menu = (Mock() for _ in range(4))
+        with patch("app.themed_popup_menu", side_effect=(menu, theme_menu, opacity_menu, data_menu)), \
+                patch("app.tk.StringVar"), patch("app.tk.DoubleVar"), patch("app.tk.BooleanVar"), \
+                patch("app.is_autostart_enabled", return_value=False):
+            CalendarApp.show_main_menu(app)
+        options = [entry.kwargs for entry in theme_menu.add_radiobutton.call_args_list]
+        self.assertEqual([(entry["value"], entry["label"]) for entry in options],
+                         [("modern", "Modern"), ("slate", "Slate")])
+        for entry in options:
+            entry["command"]()
+            app.set_theme.assert_called_with(entry["value"])
+
+    def test_theme_selection_persists_each_active_choice(self):
+        from app import CalendarApp
+
+        app = Mock(theme_name="modern", quick_placeholder_active=False)
+        app.store.settings = {"unrelated": "preserved"}
+        with patch("app.activate_theme") as activate:
+            for name in reversed(ACTIVE_THEME_NAMES):
+                CalendarApp.set_theme(app, name)
+                self.assertEqual(app.theme_name, name)
+                activate.assert_called_with(ACTIVE_THEMES[name])
+                self.assertEqual(app.store.settings, {"theme": name, "unrelated": "preserved"})
+        self.assertEqual(app.store.save.call_count, len(ACTIVE_THEME_NAMES))
 
 
 if __name__ == "__main__":

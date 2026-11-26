@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from dpi_utils import dpi_for_window
 from habit_ui import CHOICES
@@ -70,7 +71,7 @@ def main():
                 pump(app, .2)
                 native_dpi = dpi_for_window(app)
                 print("Native monitor DPI:", native_dpi, flush=True)
-                for theme in ("modern", "aero", "paper", "frutiger"):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for view in ("compact", "global"):
                         if view == "global":

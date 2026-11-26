@@ -78,6 +78,21 @@ class SqliteSpecificTests(TestCase):
         return Event(identifier,'Synthetic','2026-11-20T23:59',has_time=False,
                      duration_days=3,skip_non_working_days=True,end_as_ddl=True)
 
+    def test_archived_theme_fallback_preserves_preferences_and_event(self):
+        from desktop_preferences import normalize_theme_name
+
+        event = self.event()
+        self.events.upsert(event)
+        self.store.settings.update(theme='paper', unrelated={'preserve': True})
+        self.store.save()
+        loaded = self.open()
+        self.addCleanup(loaded.repository.close)
+        self.addCleanup(self.repo.close)
+        self.assertEqual(loaded.settings['theme'], 'paper')
+        self.assertEqual(normalize_theme_name(loaded.settings['theme']), 'modern')
+        self.assertEqual(loaded.settings['unrelated'], {'preserve': True})
+        self.assertEqual(loaded.events[0].id, event.id)
+
     def test_two_connections_stale_service_rejected(self):
         other = self.open()
         service = CalendarEventService(EventCommandHistory(other))

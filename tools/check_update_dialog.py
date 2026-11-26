@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from dpi_utils import WorkArea, dpi_for_window
 from tools.check_interactions import cleanup, pump
@@ -47,7 +48,7 @@ def main():
                 native_dpi = dpi_for_window(app)
                 long_notes = ("## 本轮更新\n\n- **中文** English 123 🙂\n1. `Ctrl+K` 搜索\n\n" * 100
                               + "最后一段 FINAL RELEASE NOTE END")
-                for theme in ("modern", "aero", "paper", "frutiger"):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for mode in ("compact", "global"):
                         if mode == "global":

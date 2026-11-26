@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from dpi_utils import dpi_for_window, enable_dpi_awareness
 from repair_launcher import RepairWindow, RepairNotesDialog
@@ -53,7 +54,7 @@ def main():
             try:
                 pump(app, .2)
                 native = dpi_for_window(app)
-                for theme in ("modern", "aero", "paper", "frutiger"):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for view in ("compact", "global"):
                         (app.enter_global_view if view == "global" else app.return_to_compact_view)()

@@ -2,9 +2,11 @@
 import os
 from pathlib import Path
 
-VALID_THEME_NAMES = ('modern', 'aero', 'paper', 'frutiger', 'slate')
+ACTIVE_THEME_NAMES = ('modern', 'slate')
 DEFAULT_THEME_NAME = 'modern'
 LEGACY_THEME_ALIASES = {'win7_aero': 'aero', 'gemini_reviewing': 'slate'}
+# Glass, Paper and Frutiger Aero all have light content surfaces.
+ARCHIVED_THEME_FALLBACKS = dict.fromkeys(('aero', 'paper', 'frutiger'), DEFAULT_THEME_NAME)
 SQLITE_UPGRADE_DECLINED = '.sqlite-upgrade-declined'
 
 
@@ -24,8 +26,17 @@ def decline_sqlite_upgrade(directory):
             raise
 
 
-def normalize_theme_name(value: object) -> str:
+def normalize_stored_theme_name(value: object) -> str:
+    """Keep recognized historical IDs in the storage and backup contract."""
     if not isinstance(value, str):
         return DEFAULT_THEME_NAME
     normalized = LEGACY_THEME_ALIASES.get(value, value)
-    return normalized if normalized in VALID_THEME_NAMES else DEFAULT_THEME_NAME
+    if normalized in ACTIVE_THEME_NAMES or normalized in ARCHIVED_THEME_FALLBACKS:
+        return normalized
+    return DEFAULT_THEME_NAME
+
+
+def normalize_theme_name(value: object) -> str:
+    """Resolve the active theme to display without rewriting saved data."""
+    stored_name = normalize_stored_theme_name(value)
+    return ARCHIVED_THEME_FALLBACKS.get(stored_name, stored_name)

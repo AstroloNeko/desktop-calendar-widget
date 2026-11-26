@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from dpi_utils import dpi_for_window
 from tools.check_interactions import cleanup, pump
@@ -81,7 +82,7 @@ def source_checks(sqlite=False):
                 tray = app.tray_icon
                 assert registered(tray._hwnd), "Shell does not know the icon"
                 print("Actual Shell icon registered; native DPI", dpi_for_window(app), flush=True)
-                for theme in ("modern", "aero", "paper", "frutiger"):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for view in ("compact", "global"):
                         (app.enter_global_view if view == "global" else app.return_to_compact_view)()
@@ -357,7 +358,7 @@ def packaged_checks(executable):
         environment = dict(os.environ, APPDATA=str(folder))
         for index in range(10):
             settings = json.loads(data.read_bytes())
-            theme = ("modern", "aero", "paper", "frutiger")[index % 4]
+            theme = ACTIVE_THEME_NAMES[index % len(ACTIVE_THEME_NAMES)]
             pinned = bool(index % 2)
             settings["settings"].update(theme=theme, window_mode="pinned" if pinned else "desktop")
             data.write_text(json.dumps(settings), encoding="utf-8")

@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from desktop_storage_startup import StartupOptions, create_desktop_app
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from tools.check_interactions import pump, cleanup
@@ -65,7 +66,7 @@ def main():
             try:
                 assert isinstance(app.store.repository, SqliteCalendarRepository)
                 assert len(app.store.events) == len(fixture['events'])
-                for theme in ('modern', 'aero', 'paper', 'frutiger'):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for mode in ('compact', 'global'):
                         (app.enter_global_view if mode == 'global' else app.return_to_compact_view)()

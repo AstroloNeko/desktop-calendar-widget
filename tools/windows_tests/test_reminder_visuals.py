@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 
 from desktop_calendar.reminders.reminder_ui import reminder_button
-from desktop_calendar.ui.ui_theme import get_theme
+from desktop_calendar.ui.ui_theme import ACTIVE_THEMES, get_theme
 
 
 class ReminderControlTests(unittest.TestCase):
@@ -18,8 +18,7 @@ class ReminderControlTests(unittest.TestCase):
                                search_font='Segoe UI')
 
     def test_active_theme_primary_control_uses_semantic_colors(self):
-        # Match main's routine QA scope while v0.14 keeps its current theme registry.
-        for name in ('modern', 'slate'):
+        for name in ACTIVE_THEMES:
             app = self.app(name)
             button = reminder_button(self.root, app, '保存设置', lambda: None, primary=True)
             self.assertEqual(button.cget('bg'), app.theme.accent)

@@ -21,6 +21,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import CalendarApp, messagebox
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from dpi_utils import dpi_for_window, scaled_geometry
 from desktop_calendar.global_view.global_header import header_layout
@@ -254,6 +255,7 @@ def main():
     parser.add_argument("--taskbar", action="store_true")
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--shell-only", action="store_true")
+    parser.add_argument("--themes", nargs="+", choices=ACTIVE_THEME_NAMES, default=ACTIVE_THEME_NAMES)
     options = parser.parse_args()
     if os.name != "nt":
         raise SystemExit("Windows GUI session required")
@@ -295,7 +297,7 @@ def main():
                     taskbar_restore(app, app_id)
                     wait_until(app, lambda: app.state() == "normal", "initial taskbar restore")
                     assert app.state() == "normal"
-                for theme in (() if options.shell_only else ("modern", "aero", "paper", "frutiger")):
+                for theme in (() if options.shell_only else options.themes):
                     app.set_theme(theme)
                     pump(app, .2)
                     for dpi in (96, 120, 144, 168, 192):

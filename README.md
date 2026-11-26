@@ -221,9 +221,13 @@ powershell -ExecutionPolicy Bypass -File .\build_release.ps1
 
 ## 测试
 
+日常开发选择与改动直接相关的测试。用 `--list` 查看选中的用例，离线回归和真实 Windows / Live 验收使用不同入口。
+
 ```powershell
-py -3 -m unittest discover -s tests -v
+py -3 tools/run_tests.py -p test_ui_theme.py -k main_menu
 ```
+
+完整离线回归和需要授权的专项验收命令见[测试指南](docs/testing.md)。目前可选主题为 Modern 和 Slate，历史 FA、Glass 和 Paper 配置会以 Modern 显示。
 
 ## License
 

@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, Store
 from dpi_utils import dpi_for_window
 from desktop_calendar.reminders.reminder_engine import notification_arguments
@@ -37,7 +38,7 @@ def main():
             try:
                 pump(app, .4)
                 native_dpi = dpi_for_window(app)
-                for theme in ("modern", "aero", "paper", "frutiger"):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for view in ("compact", "global"):
                         (app.enter_global_view if view == "global" else app.return_to_compact_view)()
