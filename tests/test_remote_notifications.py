@@ -480,8 +480,9 @@ class NotificationContractTests(unittest.TestCase):
         path, token, body = client.request.call_args.args
         self.assertEqual((path, token), ('/api/notifications/session', fixture.CONFIG['remote_token']))
         self.assertEqual(json.loads(body), {
-            'interaction_schema_version': 1, 'client_version': __version__,
-            'capabilities': ['business_receipt', 'action', 'reference', 'quick_query'],
+            'interaction_schema_version': 2, 'client_version': __version__,
+            'capabilities': ['business_receipt', 'action', 'reference', 'quick_query',
+                             'proactive_action','reminder_quick_query','reminder_receipt'],
         })
         self.assertEqual(credentials.interaction_capabilities, ())
         self.assertEqual(credentials.stream_url,
@@ -507,7 +508,7 @@ class NotificationContractTests(unittest.TestCase):
                                                         interaction_capabilities=advertised)
             verified = contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
             self.assertEqual(verified.interaction_capabilities, expected)
-        for value in (None, '1', True, 2):
+        for value in (None, '1', True, 99):
             client.request.return_value = self.document(display_name='无效\n名称', interaction_schema_version=value)
             verified = contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
             self.assertEqual((verified.display_name, verified.interaction_version), ('', 0))
@@ -914,8 +915,8 @@ class WorkerTriggerTests(unittest.TestCase):
         for path, declaration in claims[:3]:
             self.assertEqual(path, CLAIM_PATH)
             self.assertEqual(declaration, {
-                'interaction_schema_version': 1, 'client_version': __version__,
-                'capabilities': ['business_receipt', 'action', 'reference', 'quick_query'],
+                'interaction_schema_version': 0, 'client_version': __version__,
+                'capabilities': [],
             })
         self.assertTrue(worker.notification_online)
 

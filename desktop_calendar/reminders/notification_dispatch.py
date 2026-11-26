@@ -13,11 +13,12 @@ from desktop_calendar.reminders.reminder_engine import (
 
 ACK_TIMEOUT = timedelta(seconds=45)
 MAX_ATTEMPTS = 3
-TERMINAL = {"submitted", "sent", "unknown", "expired", "cancelled", "skipped"}
+TERMINAL = {"submitted", "sent", "unknown", "expired", "cancelled", "skipped", "user_opt_out"}
 STATUS_LABELS = {
     "pending": "待发送", "dispatching": "待发送 · 等待结果", "submitted": "Windows 已提交",
     "sent": "QQ 发送成功", "failed": "明确发送失败", "unknown": "发送结果不确定",
     "expired": "已过期", "cancelled": "已取消", "skipped": "无事项，已跳过",
+    "rate_limited": "发送受限频", "user_opt_out": "用户已关闭主动通知",
 }
 
 
@@ -130,7 +131,26 @@ class DeliveryQueue:
                 self.qq.cancel(*task)
                 del self.qq_notices[task]
 
+    def cancel_changed_qq_members(self):
+        """Invalidate queued QQ payloads after an owner-thread event mutation."""
+        if not self.qq_notices:
+            return
+        from desktop_calendar.reminders.reminder_runtime import delivery_member_revision
+        state = self.engine._state()
+        for task, (members, _private, kind) in list(self.qq_notices.items()):
+            if kind == "brief":
+                continue
+            identifier, attempt = task
+            qq = state["batches"][identifier]["channels"]["qq"]
+            versions = qq.get("member_revisions",{})
+            if versions and any(versions[key] != delivery_member_revision(self.engine.store,event_id,key)
+                                for event_id,key in members):
+                self.replace_on_cancel.add((identifier,"qq",attempt))
+                self.qq.cancel(*task)
+                del self.qq_notices[task]
+
     def tick(self, now):
+        from desktop_calendar.reminders.reminder_runtime import delivery_member_revision
         e = self.engine
         config = e.config()
         brief = config["brief"]
@@ -263,8 +283,11 @@ class DeliveryQueue:
                     continue
                 if is_brief and read_time(record.get("when"), now) > now:
                     continue
-                if status == "failed" and read_time(entry["at"], now) + RETRY > now:
-                    continue
+                if status in ("failed","rate_limited"):
+                    if not entry.get("retryable", channel == "windows"):
+                        continue
+                    if read_time(entry.get("retry_at"),read_time(entry["at"],now)+RETRY) > now:
+                        continue
                 members = self.current_members(record, state)
                 if not is_brief and not members:
                     entry.update(status="cancelled", reason="原事项提醒已失效")
@@ -289,6 +312,9 @@ class DeliveryQueue:
                 entry.update(status="dispatching", attempts=attempt, at=now.isoformat(), reason="", tag=notice.tag)
                 if not is_brief:
                     entry["members"] = [list(member) for member in members]
+                    if channel == "qq":
+                        entry["member_revisions"] = {key:delivery_member_revision(e.store,event_id,key)
+                                                     for event_id,key in members}
                 dispatched.append((channel, notice, members, binding))
                 changed = True
 
@@ -312,7 +338,9 @@ class DeliveryQueue:
                     self.qq.send(notice, binding, config["private"])
             except Exception:
                 try:
-                    self.acknowledge(notice.key, channel, notice.attempt, "failed", now, "通知无法加入发送队列")
+                    from desktop_calendar.reminders.qq_reminders import DeliveryDetail
+                    self.acknowledge(notice.key, channel, notice.attempt, "failed", now,
+                                     DeliveryDetail("通知无法加入发送队列"))
                 except (OSError, ValueError, RuntimeError) as error:
                     e.error = str(error)
 
@@ -389,6 +417,14 @@ class DeliveryQueue:
         if status == "cancelled" and replace and attempt < MAX_ATTEMPTS:
             status = "pending"
         entry.update(status=status, at=now.isoformat(), reason=reason[:200])
+        if status in ("failed", "rate_limited"):
+            entry["retryable"] = getattr(reason,"retryable",status == "failed")
+            delay = getattr(reason,"delay",None)
+            entry["retry_at"] = (now + (timedelta(seconds=min(delay,172800)) if delay else RETRY)).isoformat()
+        if actual_attempt := getattr(reason,"attempt",None):
+            entry["delivery_attempt"] = actual_attempt
+        if submission := getattr(reason,"submission",None):
+            entry["submission"] = submission
         self.engine._save(STATE_KEY, state)
         self.inflight.discard(task)
         self.replace_on_cancel.discard(task)

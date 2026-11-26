@@ -1,0 +1,521 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Desktop Calendar Remote Interaction Protocol v2 (v0.14.0 Reminder & Proactive Extension)",
+  "oneOf": [
+    { "$ref": "#/$defs/businessReceiptV2" },
+    { "$ref": "#/$defs/interactionV2" },
+    { "$ref": "#/$defs/clientCapabilityDeclarationV2" },
+    { "$ref": "#/$defs/serverSessionCapabilitiesV2" }
+  ],
+  "$defs": {
+    "msgId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "actionId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{24,64}$"
+    },
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "localMinute": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?$"
+    },
+    "capabilityNameV2": {
+      "type": "string",
+      "enum": [
+        "business_receipt",
+        "action",
+        "reference",
+        "quick_query",
+        "proactive_action",
+        "reminder_quick_query",
+        "reminder_receipt"
+      ]
+    },
+    "clientCapabilityDeclarationV2": {
+      "type": "object",
+      "description": "Declared by v0.14.0+ clients on POST /api/notifications/session and EVERY POST /api/jobs/claim request.",
+      "additionalProperties": false,
+      "properties": {
+        "interaction_schema_version": {
+          "type": "integer",
+          "enum": [0, 1, 2]
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capabilityNameV2" }
+        },
+        "client_version": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "serverSessionCapabilitiesV2": {
+      "type": "object",
+      "description": "Server capability fields advertised on POST /api/notifications/session response. Clients declaring version 1 receive version 1 and v1 capabilities for strict backward compatibility.",
+      "properties": {
+        "interaction_schema_version": {
+          "type": "integer",
+          "enum": [0, 1, 2]
+        },
+        "interaction_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capabilityNameV2" }
+        },
+        "supported_interaction_versions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "integer", "enum": [1, 2] }
+        },
+        "proactive_notifications": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "protocol_version", "endpoint", "supported_actions"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "protocol_version": { "type": "integer", "const": 1 },
+            "endpoint": { "type": "string", "const": "/api/notifications/proactive" },
+            "supported_actions": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "acknowledge",
+                  "view_items",
+                  "snooze_10m",
+                  "view_today",
+                  "view_week",
+                  "view_ddl"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "eventReminderPlan": {
+      "type": "object",
+      "description": "Projected event reminder mode and computed local trigger time (matches describe_event_reminder).",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["default", "relative", "absolute", "disabled"]
+        },
+        "planned_at": {
+          "oneOf": [
+            { "$ref": "#/$defs/localMinute" },
+            { "type": "null" }
+          ]
+        },
+        "snoozed_at": {
+          "oneOf": [
+            { "$ref": "#/$defs/localMinute" },
+            { "type": "null" }
+          ]
+        },
+        "global_enabled": { "type": "boolean" },
+        "past": { "type": "boolean" },
+        "catchup_eligible": { "type": "boolean" },
+        "schedule_status": {
+          "type": "string",
+          "enum": ["recalculated", "pending", "preview"]
+        },
+        "rule_summary": {
+          "type": "string",
+          "maxLength": 120
+        }
+      }
+    },
+    "eventV2": {
+      "type": "object",
+      "required": ["index", "title", "date"],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "title": { "type": "string" },
+        "date": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "end": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "time": { "type": ["string", "null"], "pattern": "^[0-9]{2}:[0-9]{2}$" },
+        "done": { "type": "boolean" },
+        "event_type": { "enum": ["general", "urgent", "ddl"] },
+        "deadline": { "type": ["string", "null"], "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "reminder_plan": { "$ref": "#/$defs/eventReminderPlan" }
+      }
+    },
+    "channelDeliveryState": {
+      "type": "object",
+      "required": ["status", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "waiting",
+            "pending",
+            "dispatching",
+            "submitted",
+            "sent",
+            "failed",
+            "unknown",
+            "expired",
+            "cancelled",
+            "skipped",
+            "exhausted",
+            "not_included"
+          ]
+        },
+        "label": { "type": "string", "maxLength": 64 },
+        "reason": { "type": "string", "maxLength": 200 }
+      }
+    },
+    "reminderInstance": {
+      "type": "object",
+      "description": "Display-only reminder runtime row; internal event_id, plan_key, and revision stay on desktop.",
+      "required": ["index", "title", "when", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "title": { "type": "string", "maxLength": 200 },
+        "when": { "$ref": "#/$defs/localMinute" },
+        "status": { "type": "string", "maxLength": 64 },
+        "group": {
+          "type": "string",
+          "enum": ["attention", "snoozed", "upcoming", "processed", "history"]
+        },
+        "snoozed": { "type": "boolean" },
+        "missed": { "type": "boolean" },
+        "processed": { "type": "boolean" },
+        "event_done": { "type": "boolean" },
+        "next_attempt": {
+          "oneOf": [
+            { "$ref": "#/$defs/localMinute" },
+            { "type": "null" }
+          ]
+        },
+        "channels": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "windows": { "$ref": "#/$defs/channelDeliveryState" },
+            "qq": { "$ref": "#/$defs/channelDeliveryState" }
+          }
+        }
+      }
+    },
+    "reminderSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "total": { "type": "integer", "minimum": 0 },
+        "shown": { "type": "integer", "minimum": 0 },
+        "action_kind": {
+          "type": ["string", "null"],
+          "enum": ["snooze", "cancel_snooze", "acknowledge", null]
+        },
+        "until": {
+          "oneOf": [
+            { "$ref": "#/$defs/localMinute" },
+            { "type": "null" }
+          ]
+        },
+        "count": { "type": ["integer", "null"], "minimum": 0 },
+        "scheduling_pending": { "type": "boolean" }
+      }
+    },
+    "briefItem": {
+      "type": "object",
+      "required": ["index", "group", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "group": {
+          "type": "string",
+          "enum": ["timed", "untimed", "unfinished", "upcoming", "overdue"]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "date": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "time": { "type": "string", "pattern": "^(|[0-9]{2}:[0-9]{2})$" }
+      }
+    },
+    "briefSummary": {
+      "type": "object",
+      "required": ["date", "scope", "private", "agenda_count", "counts", "total", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "date": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "scope": { "type": "string", "enum": ["agenda", "ddl"] },
+        "private": { "type": "boolean" },
+        "agenda_count": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["timed", "untimed", "unfinished", "upcoming", "overdue"],
+          "properties": {
+            "timed": { "type": "integer", "minimum": 0 },
+            "untimed": { "type": "integer", "minimum": 0 },
+            "unfinished": { "type": "integer", "minimum": 0 },
+            "upcoming": { "type": "integer", "minimum": 0 },
+            "overdue": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/briefItem" }
+        }
+      }
+    },
+    "configChangeItem": {
+      "type": "object",
+      "required": ["field", "label", "before", "after"],
+      "additionalProperties": false,
+      "properties": {
+        "field": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "before": { "type": "string", "maxLength": 120 },
+        "after": { "type": "string", "maxLength": 120 }
+      }
+    },
+    "configDiff": {
+      "type": "object",
+      "description": "Stage D global reminder or daily brief whitelist configuration diff (preview or committed). Plain confirm buttons are FORBIDDEN unless requires_remote_authorization is explicitly false; when true (or omitted), user must explicitly confirm in chat (「授权确认」 for remote-risk changes).",
+      "required": ["scope", "changes"],
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": ["reminder_global", "brief", "mixed"]
+        },
+        "requires_remote_authorization": {
+          "type": "boolean"
+        },
+        "impact_summary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "capability_notice": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "changes": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/configChangeItem" }
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["id", "kind", "expires_at_ts"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/actionId" },
+        "kind": { "enum": ["confirm", "cancel", "undo", "select_candidate"] },
+        "index": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "expires_at_ts": { "type": "integer" }
+      },
+      "if": { "properties": { "kind": { "const": "select_candidate" } } },
+      "then": { "required": ["index"] },
+      "else": { "not": { "required": ["index"] } }
+    },
+    "businessReceiptV2": {
+      "type": "object",
+      "description": "Optional v2 structured business receipt uploaded by v0.14.0+ client alongside mandatory reply_text.",
+      "required": ["schema_version", "result_type", "summary", "events", "available_actions"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": 2 },
+        "result_type": {
+          "enum": [
+            "query",
+            "create",
+            "update",
+            "delete",
+            "complete",
+            "confirmation",
+            "clarification",
+            "candidates",
+            "undo",
+            "failed",
+            "partial",
+            "uncertain",
+            "cancelled",
+            "message",
+            "reminder_query",
+            "reminder_action",
+            "brief",
+            "config_update"
+          ]
+        },
+        "summary": { "type": "string" },
+        "events": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/eventV2" }
+        },
+        "available_actions": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/action" }
+        },
+        "reference_until": { "type": "integer" },
+        "undo_reference": { "$ref": "#/$defs/actionId" },
+        "pending_confirmation": {
+          "type": "object",
+          "required": ["stage", "expires_at_ts"],
+          "additionalProperties": false,
+          "properties": {
+            "stage": {
+              "enum": [
+                "confirm",
+                "reviewing_specific",
+                "reviewing_batch",
+                "awaiting_final_confirmation",
+                "awaiting_remote_authorization"
+              ]
+            },
+            "expires_at_ts": { "type": "integer" }
+          }
+        },
+        "outcome": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "committed": { "type": ["boolean", "null"] },
+            "goal_satisfied": { "type": ["boolean", "null"] },
+            "changed": { "type": ["boolean", "null"] }
+          }
+        },
+        "reminders": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/reminderInstance" }
+        },
+        "reminder_summary": { "$ref": "#/$defs/reminderSummary" },
+        "brief": { "$ref": "#/$defs/briefSummary" },
+        "config_diff": { "$ref": "#/$defs/configDiff" }
+      }
+    },
+    "interactionV2": {
+      "description": "Structured interaction payload delivered inside job.interaction on POST /api/jobs/claim to v2-capable clients.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["schema_version", "kind", "source_msg_id", "action_id"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": 2 },
+            "kind": { "const": "action" },
+            "source_msg_id": { "$ref": "#/$defs/msgId" },
+            "action_id": { "$ref": "#/$defs/actionId" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["schema_version", "kind", "source_msg_id"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": 2 },
+            "kind": { "const": "reference" },
+            "source_msg_id": { "$ref": "#/$defs/msgId" },
+            "index": { "type": "integer", "minimum": 1, "maximum": 30 }
+          }
+        },
+        {
+          "type": "object",
+          "description": "v1 calendar quick queries (today/tomorrow/week/ddl) delivered with v2 envelope.",
+          "required": ["schema_version", "kind", "command", "start", "end", "ddl_only"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": 2 },
+            "kind": { "const": "quick_query" },
+            "command": { "enum": ["today", "tomorrow", "week", "ddl"] },
+            "start": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+            "end": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+            "ddl_only": { "type": "boolean" },
+            "done": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Capability-gated ('reminder_quick_query') deterministic /reminders query bypassing LLM.",
+          "required": ["schema_version", "kind", "command", "start", "end", "filter"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": 2 },
+            "kind": { "const": "quick_query" },
+            "command": { "const": "reminders" },
+            "start": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+            "end": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+            "filter": {
+              "type": "string",
+              "enum": ["all", "next", "attention", "missed", "snoozed", "failed", "unknown"]
+            },
+            "channel": {
+              "type": "string",
+              "enum": ["windows", "qq"]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Capability-gated ('reminder_quick_query') deterministic /brief query bypassing LLM without touching scheduled daily brief eligibility.",
+          "required": ["schema_version", "kind", "command", "date", "scope"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": 2 },
+            "kind": { "const": "quick_query" },
+            "command": { "const": "brief" },
+            "date": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+            "scope": { "type": "string", "enum": ["agenda", "ddl"] }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Capability-gated ('proactive_action') callback from a QQ proactive notification button, bound to notification_id, channel, and send attempt.",
+          "required": ["schema_version", "kind", "notification_id", "channel", "attempt", "action", "target"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": 2 },
+            "kind": { "const": "proactive_action" },
+            "notification_id": { "$ref": "#/$defs/hex64" },
+            "channel": { "const": "qq" },
+            "attempt": { "type": "integer", "minimum": 1, "maximum": 10 },
+            "action": {
+              "type": "string",
+              "enum": ["acknowledge", "view_items", "snooze_10m"]
+            },
+            "target": { "$ref": "#/$defs/hex64" }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Capability-gated ('proactive_action') quote-reply referencing a QQ proactive notification.",
+          "required": ["schema_version", "kind", "notification_id", "channel", "attempt", "notification_type"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": 2 },
+            "kind": { "const": "proactive_reference" },
+            "notification_id": { "$ref": "#/$defs/hex64" },
+            "channel": { "const": "qq" },
+            "attempt": { "type": "integer", "minimum": 1, "maximum": 10 },
+            "notification_type": { "enum": ["event", "ddl", "brief"] }
+          }
+        }
+      ]
+    }
+  }
+}

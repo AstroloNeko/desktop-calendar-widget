@@ -37,17 +37,22 @@ class VerifiedBinding:
 
 
 def notice_payload(notice, binding, private):
+    private = private or notice.kind == "test"
+    if len(notice.items) > 500:
+        raise ValueError("提醒批次超过主动通知协议上限")
     if private and notice.kind != "test":
         fallback = (f"共 {len(notice.items)} 项，打开桌面月历查看。"
                     if notice.items else "本次简报没有事项。")
     else:
-        fallback = notice.summary(len(notice.items))
+        fallback = notice.summary(20)[:3800]
+        if notice.kind in ("event","ddl") and len(notice.items) > 20:
+            fallback += f"\n共 {len(notice.items)} 项。按钮作用于本通知中仍有效的全部提醒实例。"
     wire_items = [] if private else [
         {**{key: item[key] for key in ("title", "group", "date", "time") if key in item}, "index": index}
-        for index, item in enumerate(notice.items, 1)
+        for index, item in enumerate(notice.items[:50], 1)
     ]
     return {
-        "protocol_version": 1, "notification_id": notice.key, "type": notice.kind,
+        "protocol_version": 1, "notification_id": notice.key, "type": notice.kind, "attempt":notice.attempt,
         "account_id": binding.account, "channel": "qq",
         "triggered_at": notice.when.astimezone().isoformat(),
         "expires_at": notice.expires.astimezone().isoformat(),
@@ -58,6 +63,15 @@ def notice_payload(notice, binding, private):
         "actions": [{"action": action, "target": notice.key} for action in ACTIONS[notice.kind]
                     if not notice.manual_test and action in binding.supported_actions and (not private or action == "acknowledge")],
     }
+
+
+class DeliveryDetail(str):
+    """Safe display text plus durable retry and attempt evidence."""
+    def __new__(cls, text, *, retryable=False, delay=None, submission=None, attempt=None):
+        detail = super().__new__(cls, text)
+        detail.retryable, detail.delay = retryable, delay
+        detail.submission, detail.attempt = submission, attempt
+        return detail
 
 
 class QQReminderBackend:
@@ -75,10 +89,10 @@ class QQReminderBackend:
         worker = self.get_worker()
         if worker is not None:
             with worker.condition:
-                if worker._current(worker.generation):
+                if worker._current(worker.generation) and getattr(worker,"proactive_enabled",False) is True:
                     url, token, _scope, account = worker.config
                     if account:
-                        return VerifiedBinding(worker, worker.generation, url, token, account)
+                        return VerifiedBinding(worker, worker.generation, url, token, account, worker.proactive_actions)
         return None
 
     def send(self, notice, binding, private):
@@ -101,7 +115,7 @@ class QQReminderBackend:
         with self.lock:
             if self._capability and self._capability[0] == binding.scope:
                 return self._capability[1]
-        return None
+        return True
 
     def _observe_capability(self, binding, available):
         with self.lock:
@@ -132,7 +146,7 @@ class QQReminderBackend:
                 result = "cancelled", "隐私策略已更新" if redact else "发送前已取消"
             else:
                 try:
-                    result = self.submit(notice, binding, payload)
+                    result = self.submit(notice, binding, payload, private=private)
                 except Exception:
                     result = "unknown", "远程发送结果未知"
             with self.lock:
@@ -140,34 +154,70 @@ class QQReminderBackend:
             event_id = "brief-test:" + notice.key if notice.manual_test else notice.key
             self.events.put((event_id, notice.attempt, *result))
 
-    def submit(self, notice, binding, payload):
+    def submit(self, notice, binding, payload, *, private=None):
         if datetime.now() >= notice.expires:
             return "expired", "通知已过期"
         worker = binding.worker
         with worker.condition:
             if (not worker._current(binding.generation) or worker.config[:2] != (binding.url, binding.token)
-                    or worker.config[3] != binding.account):
+                    or worker.config[3] != binding.account or getattr(worker, "proactive_enabled", None) is not True):
                 return "cancelled", "发送前远程绑定已变更"
+        with self.lock:
+            if self.closed or (notice.key,notice.attempt) in self.cancelled:
+                return "cancelled", "发送前已取消"
+            if private is None and self.private:
+                try:
+                    private = json.loads(payload).get("private") is True
+                except (ValueError, AttributeError, RecursionError):
+                    private = False
+            if self.private and not private:
+                return "cancelled", "隐私策略已更新"
         try:
             response = self.client_factory(binding.url).request(PATH, binding.token, payload)
         except StatusError as error:
             if error.status == 404:
                 self._observe_capability(binding, False)
-            if error.status in (400, 401, 403, 404, 413, 422, 429):
-                return "failed", f"远程服务拒绝发送（HTTP {error.status}）"
+            if error.status in (400,401,403,404,413,422,429) or (
+                    error.status == 503 and (error.body or {}).get("error") == "qq_not_configured"):
+                return self.delivery_outcome(notice, binding, error.body, error.status)
             return "unknown", f"远程响应不明确（HTTP {error.status}）"
         except Unavailable:
             return "unknown", "网络中断，无法确认服务端是否发送"
-        if (response.get("account_id") != binding.account or response.get("notification_id") != notice.key
-                or response.get("channel") != "qq"):
-            return "unknown", "远程回执与通知身份不匹配"
-        status = response.get("status")
-        if status == "sent":
+        outcome = self.delivery_outcome(notice, binding, response, 200)
+        if outcome[0] == "sent":
             self._observe_capability(binding, True)
-            return "sent", ""
-        if status == "failed":
-            return "failed", "远程服务明确报告发送失败"
-        return "unknown", "远程服务尚未确认发送结果"
+        return outcome
+
+    @staticmethod
+    def delivery_outcome(notice, binding, response, http):
+        rejected = http != 200
+        if not isinstance(response, dict) or (response.get("account_id"),response.get("notification_id"),response.get("channel")) != (
+                binding.account,notice.key,"qq"):
+            if rejected:
+                return "failed", DeliveryDetail(f"云端发前拒绝（HTTP {http}）",submission="preflight")
+            return "unknown", "远程回执与通知身份不匹配"
+        status, outcome, attempt = (response.get(key) for key in ("status","outcome","attempt"))
+        allowed = {"sent":("sent",), "unknown":("unknown",),
+                   "failed":("failed","expired","user_opt_out","rate_limited")}
+        prior = (type(attempt) is int and 1 <= attempt < notice.attempt and response.get("duplicate") is True
+                 and outcome in ("sent","unknown"))
+        if (type(attempt) is not int or attempt != notice.attempt and not prior
+                or not isinstance(status,str) or outcome not in allowed.get(status,())
+                or rejected and status != "failed"
+                or (http == 422 and outcome not in ("expired","failed"))
+                or (http == 429 and outcome not in ("rate_limited","failed"))):
+            return "unknown", "远程回执的发送尝试或结果无效"
+        labels = {"sent":"", "unknown":"QQ 发送结果尚未确认", "expired":"通知已过期",
+                  "user_opt_out":"QQ 用户已关闭主动通知", "rate_limited":"主动通知触发限频",
+                  "failed":"云端发前拒绝" if rejected else "QQ 明确报告发送失败"}
+        detail = labels[outcome]
+        if rejected:
+            detail += f"（HTTP {http}）"
+        delay = response.get("retry_after_seconds")
+        retryable = outcome in ("failed","rate_limited") and response.get("retryable") is True and (
+            not rejected or http == 429)
+        return outcome, DeliveryDetail(detail,retryable=retryable,delay=delay if type(delay) is int and delay > 0 else None,
+                                       submission="preflight" if rejected else "qq",attempt=attempt)
 
     def close(self):
         with self.lock:

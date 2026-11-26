@@ -86,7 +86,7 @@ def build_overview(store, plans, state, now, config, *, include_legacy=False):
         if batch:
             channels = batch["channels"]
             states = [value["status"] for value in channels.values()]
-            needs_attention = any(value in ("failed", "unknown", "expired", "cancelled") for value in states)
+            needs_attention = any(value in ("failed", "unknown", "expired", "cancelled", "rate_limited", "user_opt_out") for value in states)
             sending = any(value in ("pending", "dispatching") for value in states)
             if needs_attention:
                 group = "attention"
@@ -99,13 +99,15 @@ def build_overview(store, plans, state, now, config, *, include_legacy=False):
             details = [label + (f" ({value['reason']})" if value.get("reason") else "")
                        for label, value in zip(statuses, channels.values())]
             expiry = read_time(batch["expires"], now)
-            retries = [read_time(value.get("at"), now) + RETRY for value in channels.values()
-                       if value["status"] == "failed" and value["attempts"] < MAX_ATTEMPTS]
+            retries = [read_time(value.get("retry_at"),read_time(value.get("at"),now)+RETRY)
+                       for channel,value in channels.items() if value["status"] in ("failed","rate_limited")
+                       and value.get("retryable",channel == "windows") and value["attempts"] < MAX_ATTEMPTS]
             retry = min((at for at in retries if at < expiry), default=None)
             details.insert(0, f"同一通知共 {len(batch['members'])} 项")
             windows, qq = batch_channel_statuses(batch)
             reason = "；".join(value["reason"] for value in channels.values()
-                              if value.get("reason") and value["status"] in ("failed", "unknown", "expired", "cancelled"))
+                              if value.get("reason") and value["status"] in ("failed", "unknown", "expired", "cancelled",
+                                                                           "rate_limited","user_opt_out"))
             rows.append(ReminderRow(plan.event_id, str(event.title), plan.when, plan.anchor, plan.ddl,
                                     group, " / ".join(statuses), "\n".join(details), is_snoozed and (sending or needs_attention),
                                     retry, batch_id, windows, qq, rule_label(event, base, config, is_snoozed), reason, plan.key))

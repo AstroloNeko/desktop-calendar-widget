@@ -19,8 +19,8 @@ from desktop_calendar.remote_channels import conversation_from_job
 from desktop_calendar.remote_cloud import NOTIFICATION_CONTRACT, remote_scope, valid_account
 from desktop_calendar.remote_history import describe_response
 from desktop_calendar.remote_interaction import (
-    CAPABILITY_REQUEST, JOBS, UNDO_REPLIES, VERSION as INTERACTION_VERSION, build_business_receipt, execute_interaction,
-    execute_undo_reply, interaction_from_job,
+    JOBS, UNDO_REPLIES, build_business_receipt, capabilities_for, capability_request, execute_interaction,
+    execute_undo_reply, interaction_capability, interaction_from_job, recover_proactive,
 )
 from desktop_calendar.remote_notifications import ACCOUNT_MISMATCH, AUTH_REJECTED, NotificationListener, VerifiedAccount
 from desktop_calendar.remote_transport import (
@@ -113,7 +113,7 @@ def make_receipt(response, request_text='', *, business=None):
     result = response.get('operation_result') or {}
     preview = op.get('preview', {})
     reminder_text = plain_reminder_receipt(response)
-    if reminder_text:
+    if reminder_text and (business or {}).get('schema_version') != 2:
         business = None
     ok = status in ('ok', 'succeeded', 'completed', 'clarification_required',
                     'confirmation_required', 'cancelled', 'needs_clarification', 'pending')
@@ -165,7 +165,8 @@ def make_receipt(response, request_text='', *, business=None):
         op.get('operation_id'), task.get('operation_id'),
     ) if identifier))
     operation_id = ids[0] if ids and (result or status == 'committed_unverified') and status != 'pending' else None
-    body = dict(ok=ok, reply_text=reply, operation_id=operation_id, error=error)
+    wire_operation = None if (business or {}).get('schema_version') == 2 or reminder_text else operation_id
+    body = dict(ok=ok, reply_text=reply, operation_id=wire_operation, error=error)
     if business is not None:
         body['business_receipt'] = business
     return json.dumps(body, ensure_ascii=False, separators=(',', ':')), ids
@@ -193,6 +194,8 @@ class RemoteWorker:
         self.account_name = ''
         self.interaction_version = 0
         self.interaction_capabilities = ()
+        self.proactive_enabled = False
+        self.proactive_actions = ()
         self.last_cloud_ok = None
         self.cloud_unavailable = False
         self.processing_id = ''
@@ -391,8 +394,10 @@ class RemoteWorker:
                     return False
                 self.account_name = profile.display_name
                 self.interaction_version = profile.interaction_version
-                self.interaction_capabilities = (profile.interaction_capabilities
-                                                 if profile.interaction_version == INTERACTION_VERSION else ())
+                self.interaction_capabilities = tuple(cap for cap in capabilities_for(profile.interaction_version)
+                                                      if cap in profile.interaction_capabilities)
+                self.proactive_enabled = profile.proactive_enabled and self.interaction_version == 2
+                self.proactive_actions = profile.proactive_actions if self.proactive_enabled else ()
                 self.account_verified = True
                 self.condition.notify_all()
                 self._notify_status_change()
@@ -499,7 +504,9 @@ class RemoteWorker:
                             continue
                         checking_queue = True
                         try:
-                            response = client.request(CLAIM_PATH, token, CAPABILITY_REQUEST)
+                            with self.condition:
+                                declaration = capability_request(self.interaction_version, self.interaction_capabilities)
+                            response = client.request(CLAIM_PATH, token, declaration)
                             received_at = time.time()
                             job = response['job']
                             if job is not None and not self._identified(job):
@@ -592,17 +599,25 @@ class RemoteWorker:
             capabilities = (self.interaction_capabilities
                             if route and self.config and job.get('owner_id') == self.config[3] else ())
             if 'business_receipt' in capabilities:
-                record['interaction_version'] = INTERACTION_VERSION
+                record['interaction_version'] = self.interaction_version
+                record['reminder_receipt'] = self.interaction_version == 2 and 'reminder_receipt' in capabilities
             if 'interaction' in job:
                 interaction = interaction_from_job(job['interaction'])
-                if interaction['kind'] not in capabilities:
+                if interaction['schema_version'] != self.interaction_version or interaction_capability(interaction) not in capabilities:
                     raise ValueError('服务器未启用远程交互。')
+                if interaction['kind'].startswith('proactive_') and (record['channel'] != 'qq' or not self.proactive_enabled):
+                    raise ValueError('主动通知交互未启用。')
                 record['interaction'] = interaction
             kind = (record.get('interaction') or {}).get('kind')
             text = job.get('text', '')
             if not isinstance(text, str) or len(text.strip()) > 4000 or not (
-                    kind in ('action', 'quick_query') or text.strip()):
+                    kind in ('action', 'quick_query', 'proactive_action') or text.strip()):
                 raise ValueError
+            if not kind and record['channel'] == 'qq' and (
+                re.match(r'^[/／](reminders|brief)(?:\s|$)', text.strip(), re.I)
+                or re.fullmatch(r'查询 [0-9-]{10}(?: 至 [0-9-]{10})? .+提醒记录|查询 [0-9-]{10} 提醒记录|查询 [0-9-]{10} 的 (?:DDL|行程) 简报', text.strip())
+            ):
+                raise ValueError('提醒快捷查询必须使用已协商的结构化协议。')
             record.update(text=text, reference_now=message_time(job).isoformat())
         except (ValueError, KeyError):
             self._set_receipt(record, dict(status='failed', error_code='invalid_job',
@@ -631,7 +646,12 @@ class RemoteWorker:
 
     def _set_receipt(self, record, response):
         business = None
-        if record.get('interaction_version') == INTERACTION_VERSION and not plain_reminder_receipt(response):
+        result = response.get('operation_result') or {}
+        reminders_in_text = bool({'reminder','reminder_rule'} & requested_fields(record.get('text',''))) or any(
+            (row.get('reminder_plan') or {}).get('mode') == 'absolute'
+            for row in (result.get('events') or [result.get('event') or {}]))
+        text_required = plain_reminder_receipt(response) or reminders_in_text
+        if record.get('interaction_version') in (1,2) and (record.get('reminder_receipt') or not text_required):
             try:
                 business, record['interaction_reply'] = build_business_receipt(self.service, record, response)
             except (ChatError, KeyError, ValueError, TypeError, OSError, sqlite3.Error):
@@ -677,17 +697,21 @@ class RemoteWorker:
                 try:
                     with calendar_write_guard(lambda: self._current(generation)):
                         reference_now = datetime.fromisoformat(record['reference_now'])
-                        undo_reply = (record.get('interaction_version') == INTERACTION_VERSION and
+                        undo_reply = (record.get('interaction_version') in (1,2) and
                                       record['text'].strip(' 。！!') in UNDO_REPLIES)
                         interaction = record.get('interaction')
                         if interaction or undo_reply:
-                            kind = interaction['kind'] if interaction else 'action'
+                            kind = interaction_capability(interaction) if interaction else 'action'
                             with self.condition:
-                                capability = self._current(generation) and kind in self.interaction_capabilities
+                                capability = (self._current(generation) and kind in self.interaction_capabilities
+                                              and (not interaction or interaction['schema_version'] == self.interaction_version))
                             if not capability:
                                 raise ChatError('action_expired', '远程交互已停用，请发送文字指令。')
-                            execute = execute_interaction if record.get('interaction') else execute_undo_reply
-                            response = execute(self.service, self.journal, server, record, reference_now)
+                            if interaction:
+                                response = execute_interaction(self.service, self.journal, server, record, reference_now,
+                                                               worker=self)
+                            else:
+                                response = execute_undo_reply(self.service, self.journal, server, record, reference_now)
                         else:
                             response = self.service.send_message(
                                 record['session_id'], record['text'], record['request_id'], owner, 'wechat',
@@ -703,7 +727,9 @@ class RemoteWorker:
         if record['state'] in ('executing', 'uncertain'):
             response = None
             if record['agent_journal'] == self.agent_journal and record.get('session_id'):
-                response = self.service.recover_message(record['session_id'], record['request_id'], record['owner'])
+                response = (recover_proactive(self.service, record)
+                            if (record.get('interaction') or {}).get('kind','').startswith('proactive_')
+                            else self.service.recover_message(record['session_id'], record['request_id'], record['owner']))
             if response is None:
                 record['state'] = 'uncertain'
                 self._save(server, record)

@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Desktop Calendar Proactive Notifications Protocol v1 (Authoritative Shared Schema)",
+  "oneOf": [
+    { "$ref": "#/$defs/proactiveNotificationRequest" },
+    { "$ref": "#/$defs/proactiveNotificationResponse" }
+  ],
+  "$defs": {
+    "hex32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "isoDateTimeWithOffset": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "accountId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\s]+$"
+    },
+    "notificationItem": {
+      "type": "object",
+      "required": ["index", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "group": {
+          "type": "string",
+          "enum": ["timed", "untimed", "unfinished", "upcoming", "overdue"]
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^(|[0-9]{2}:[0-9]{2})$"
+        }
+      }
+    },
+    "proactiveActionDecl": {
+      "type": "object",
+      "required": ["action", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "acknowledge",
+            "view_items",
+            "snooze_10m",
+            "view_today",
+            "view_week",
+            "view_ddl"
+          ]
+        },
+        "target": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "proactiveNotificationRequest": {
+      "type": "object",
+      "description": "Submitted by desktop client via POST /api/notifications/proactive authenticated with X-Worker-Token.",
+      "required": [
+        "protocol_version",
+        "notification_id",
+        "type",
+        "account_id",
+        "channel",
+        "triggered_at",
+        "expires_at",
+        "private",
+        "count",
+        "items",
+        "fallback_text",
+        "actions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "notification_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex32" },
+            { "$ref": "#/$defs/hex64" }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "enum": ["event", "ddl", "brief", "test"]
+        },
+        "account_id": { "$ref": "#/$defs/accountId" },
+        "channel": {
+          "type": "string",
+          "const": "qq"
+        },
+        "triggered_at": { "$ref": "#/$defs/isoDateTimeWithOffset" },
+        "expires_at": { "$ref": "#/$defs/isoDateTimeWithOffset" },
+        "private": { "type": "boolean" },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 500
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/notificationItem" }
+        },
+        "fallback_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "is_test": {
+          "type": "boolean"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/proactiveActionDecl" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "test" } } },
+          "then": {
+            "properties": {
+              "notification_id": { "$ref": "#/$defs/hex32" },
+              "private": { "const": true },
+              "count": { "const": 0 },
+              "items": { "maxItems": 0 },
+              "actions": { "maxItems": 0 }
+            }
+          },
+          "else": {
+            "properties": {
+              "notification_id": { "$ref": "#/$defs/hex64" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "private": { "const": true } } },
+          "then": {
+            "properties": {
+              "items": { "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "is_test": { "const": true } } },
+          "then": {
+            "properties": {
+              "type": { "const": "brief" },
+              "actions": { "maxItems": 0 }
+            }
+          }
+        }
+      ]
+    },
+    "proactiveNotificationResponse": {
+      "type": "object",
+      "description": "Returned by POST /api/notifications/proactive. HTTP 200 always carries compatible 3-state `status` plus explicit 6-state `outcome`; pre-send 4xx rejections (403/422/429) carry matching structured fields.",
+      "required": ["notification_id", "account_id", "channel", "status", "outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "notification_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex32" },
+            { "$ref": "#/$defs/hex64" }
+          ]
+        },
+        "account_id": { "$ref": "#/$defs/accountId" },
+        "channel": {
+          "type": "string",
+          "const": "qq"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["sent", "failed", "unknown"],
+          "description": "v0.14.0 Stage A-C wire status compatibility enum consumed by QQReminderBackend.submit()."
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["sent", "failed", "unknown", "expired", "user_opt_out", "rate_limited"],
+          "description": "Authoritative 6-state delivery outcome separating definite failures, expiry, opt-out, rate limiting, and uncertain boundary."
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": ["string", "null"],
+          "maxLength": 64
+        },
+        "delivery_mode": {
+          "type": ["string", "null"],
+          "maxLength": 32
+        },
+        "render_mode": {
+          "type": ["string", "null"],
+          "maxLength": 32
+        },
+        "qq_msg_id": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "ref_idx": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "qq_errcode": {
+          "type": ["integer", "null"]
+        },
+        "retry_after_seconds": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "error": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        }
+      }
+    }
+  }
+}

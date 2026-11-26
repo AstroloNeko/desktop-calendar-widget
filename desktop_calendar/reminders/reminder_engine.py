@@ -316,6 +316,7 @@ class ReminderEngine:
 
     def invalidate(self):
         self.dirty = True
+        self.delivery.cancel_changed_qq_members()
 
     def replan(self, event_ids):
         """Rebuild after a commit. A later tick retries a failed rebuild."""
@@ -466,6 +467,7 @@ class ReminderEngine:
             valid = (match and match[0].event_id == target["event_id"] and
                      (not strict or target.get("revision") == match[1]) and
                      (kind != "cancel_snooze" or match[0].key != plans[match[0].event_id].key) and
+                     (kind != "snooze" or match[0].key not in state["handled"]) and
                      (kind == "cancel_snooze" or now - match[0].when < CATCHUP))
             if not valid:
                 if strict:
@@ -530,9 +532,7 @@ class ReminderEngine:
             self.replan(plan.event_id for plan in checked)
         return result
 
-    def apply_qq_action(self, identifier, action, binding, now):
-        """Called on the calendar owner thread by the verified remote-action adapter."""
-        now = local_wall(now)
+    def verified_qq_batch(self, identifier, binding, now, attempt, notification_type):
         from desktop_calendar.reminders.notification_dispatch import read_time
         if binding is None or binding != self.delivery.binding():
             raise ReminderError("远程绑定已变更")
@@ -540,28 +540,66 @@ class ReminderEngine:
         batch = state["batches"].get(identifier, {})
         qq = batch.get("channels", {}).get("qq", {})
         config = self.config()
-        if (not config["enabled"] or not config["qq"] or batch.get("scope") != binding.scope
-                or batch.get("kind") not in ("event", "ddl") or qq.get("status") != "sent"
+        kind = batch.get("kind")
+        prefs = config["brief"] if kind == "brief" else config
+        if (not prefs["enabled"] or not prefs["qq"] or batch.get("scope") != binding.scope
+                or kind not in ("event", "ddl", "brief") or qq.get("status") != "sent"
                 or read_time(batch.get("expires"), now) <= now):
             raise ReminderError("提醒交互已失效")
+        if attempt is not None and (qq.get("attempts") != attempt or qq.get("delivery_attempt",attempt) != attempt
+                                    or notification_type is not None and kind != notification_type
+                                    or kind != "brief" and "member_revisions" not in qq):
+            raise ReminderError("通知发送记录已变化，无法核验此提醒交互")
+        return state, config, batch, qq
+
+    def apply_qq_action(self, identifier, action, binding, now, *, attempt=None, notification_type=None,
+                        operation_id=None, index=None, minutes=10):
+        """Apply a verified action to the original attempt's still-current members."""
+        from desktop_calendar.reminders.reminder_runtime import delivery_member_revision, live_instances
+        now = local_wall(now)
+        state, config, batch, qq = self.verified_qq_batch(identifier,binding,now,attempt,notification_type)
+        if batch["kind"] == "brief":
+            raise ReminderError("每日简报不支持修改提醒实例")
         members = qq.get("members")
         if members is None:
             if qq.get("attempts") != 1:
                 raise ReminderError("旧通知没有可核验的发送成员，请按事项查询。")
             members = batch["members"]
-        if action == "acknowledge":
-            result = self.apply_runtime_action({"action":"acknowledge"},
-                [{"event_id":event_id,"key":key} for event_id,key in members],
-                now, strict=False, qq_batch=identifier)
-            return {"acknowledged": bool(result["count"])}
-        if config["private"]:
+        if config["private"] and action != "acknowledge":
             raise ReminderError("当前通知已启用隐私保护")
-        if action == "snooze_10m":
-            return {"snoozed": self._snooze_many(members, 10, now)}
+        if index is not None:
+            if not 1 <= index <= min(20,len(members)):
+                raise ReminderError("该编号不在原通知展示范围内")
+            members = members[index-1:index]
+        proof = state["runtime_actions"].get(operation_id) if operation_id else None
+        if proof is None:
+            _, plans, snapshot = self.read_snapshot()
+            current = live_instances(self, plans, snapshot)
+            revisions = qq.get("member_revisions", {})
+            live = [(event_id,key) for event_id,key in members if key in current
+                    and now-current[key][0].when < CATCHUP and
+                    (attempt is None or revisions.get(key) == delivery_member_revision(self.store,event_id,key))]
+        else:
+            live = ()
         if action == "view_items":
             from desktop_calendar.reminders.notification_model import event_items
-            return {"items": event_items(self.store, self.delivery.current_members({"members":members},state), False)}
-        raise ReminderError("不支持的提醒交互")
+            return {"items":event_items(self.store,live,False)}
+        if action not in ("acknowledge","snooze_10m"):
+            raise ReminderError("不支持的提醒交互")
+        if action == "snooze_10m" and not 1 <= minutes <= 1440:
+            raise ReminderError("稍后提醒须在 24 小时内")
+        if proof is None:
+            if action == "snooze_10m":
+                live = [(event_id,key) for event_id,key in live if key not in state["handled"]]
+            if attempt is not None and not live:
+                raise ReminderError("原通知中没有仍有效且可操作的提醒实例")
+            patch = {"action":"acknowledge"} if action == "acknowledge" else {"action":"snooze","minutes":minutes}
+            proof = self.apply_runtime_action(patch,[{"event_id":event_id,"key":key} for event_id,key in live],
+                                              now,strict=False,qq_batch=identifier if index is None else None,
+                                              operation_id=operation_id)
+        if operation_id:
+            return proof
+        return {"acknowledged":bool(proof["count"])} if action == "acknowledge" else {"snoozed":proof["count"]}
 
     def cancel_snooze(self, event_id, *, key=None, now=None):
         _, plans, state = self.read_snapshot()

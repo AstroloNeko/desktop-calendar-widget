@@ -41,9 +41,21 @@ class Unavailable(Exception):
 
 
 class StatusError(Exception):
-    def __init__(self, status):
+    def __init__(self, status, body=None):
         self.status = status
+        self.body = body
         super().__init__(f"HTTP {status}")
+
+
+def proactive_error_body(response):
+    if response.headers.get_content_type() != "application/json":
+        return None
+    try:
+        raw = response.read(8193)
+        body = json.loads(raw.decode("utf-8")) if len(raw) <= 8192 else None
+    except (OSError, HTTPException, ValueError, RecursionError):
+        return None
+    return body if isinstance(body, dict) else None
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -70,11 +82,13 @@ class Client:
         try:
             with self.opener.open(request, timeout=TIMEOUT) as response:
                 if response.status != 200:
-                    raise StatusError(response.status)
+                    raise StatusError(response.status, proactive_error_body(response)
+                                      if path == "/api/notifications/proactive" else None)
                 raw = response.read(MAX_RESPONSE + 1)
         except HTTPError as exc:
-            exc.close()
-            raise StatusError(exc.code) from None
+            with exc:
+                detail = proactive_error_body(exc) if path == "/api/notifications/proactive" else None
+            raise StatusError(exc.code, detail) from None
         except (URLError, OSError, HTTPException, ValueError):
             raise Unavailable from None
         if len(raw) <= MAX_RESPONSE:

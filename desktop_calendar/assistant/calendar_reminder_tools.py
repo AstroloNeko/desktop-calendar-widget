@@ -177,12 +177,13 @@ def query_reminders(gateway, args, source):
         if kind == "attention":
             due = row["current"] and timedelta(0) <= now - row["when"] < CATCHUP
             needs_attention = row["group"] == "attention" or any(
-                status in ("failed","unknown","expired") for status in states)
+                status in ("failed","unknown","expired","rate_limited","user_opt_out") for status in states)
             if row["processed_at"] or not (due or needs_attention):
                 continue
         if kind == "missed" and not row["missed"] or kind == "snoozed" and not row["snoozed"]:
             continue
-        if kind in ("failed","unknown") and kind not in states or batch and row["key"] not in batch_keys:
+        if (kind == "failed" and not any(status in ("failed","rate_limited","user_opt_out") for status in states)
+                or kind == "unknown" and "unknown" not in states or batch and row["key"] not in batch_keys):
             continue
         data.append(row)
     if kind == "next":
@@ -224,7 +225,7 @@ def query_brief(gateway, args, source):
                              item["time"], " ".join(item["title"].split())[:55]))) for item in matches)
         if len(items) > len(shown):
             lines.append("已展示前 10 项。")
-    return {"date":anchor,"counts":counts,"agenda_count":agenda,
+    return {"date":anchor,"scope":args.get("scope","agenda"),"private":private,"counts":counts,"agenda_count":agenda,
             "items":[] if private else [dict(item) for item in items[:LIMIT]],"text":"\n".join(lines)}
 
 

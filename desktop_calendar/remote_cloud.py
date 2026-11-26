@@ -9,7 +9,7 @@ import time
 from urllib.parse import quote, urlsplit
 
 from desktop_calendar.assistant.calendar_chat_protocol import fingerprint
-from desktop_calendar.remote_interaction import CAPABILITIES, CAPABILITY_REQUEST, LEGACY_CAPABILITIES, VERSION
+from desktop_calendar.remote_interaction import CAPABILITY_REQUEST, LEGACY_CAPABILITIES, capabilities_for
 from desktop_calendar.remote_transport import Client, StatusError, Unavailable, normalize_url, valid_token
 
 
@@ -58,6 +58,8 @@ class NotificationSession:
     display_name: str = field(default='', repr=False)
     interaction_version: int = 0
     interaction_capabilities: tuple = LEGACY_CAPABILITIES
+    proactive_enabled: bool = False
+    proactive_actions: tuple = ()
 
     def __post_init__(self):
         try:
@@ -127,12 +129,19 @@ class FirebaseNotificationContract:
         refresh_after = remaining - (refresh_before if remaining > refresh_before else remaining / 2)
         stream_url = f"{origin}/wakeups/{quote(account, safe='')}/version.json"
         version = data.get('interaction_schema_version')
-        version = VERSION if type(version) is int and version == VERSION else 0
+        version = version if type(version) is int and version in (1, 2) else 0
         advertised = data.get('interaction_capabilities', LEGACY_CAPABILITIES)
-        capabilities = (tuple(cap for cap in CAPABILITIES if cap in advertised)
+        capabilities = (tuple(cap for cap in capabilities_for(version) if cap in advertised)
                         if version and isinstance(advertised, (list, tuple)) else ())
+        proactive = data.get('proactive_notifications')
+        enabled = (version == 2 and isinstance(proactive, dict) and proactive.get('enabled') is True
+                   and type(proactive.get('protocol_version')) is int and proactive['protocol_version'] == 1
+                   and proactive.get('endpoint') == '/api/notifications/proactive'
+                   and isinstance(proactive.get('supported_actions'), list))
+        actions = tuple(action for action in ('acknowledge','view_items','snooze_10m','view_today','view_week','view_ddl')
+                        if action in proactive['supported_actions']) if enabled and 'proactive_action' in capabilities else ()
         return NotificationSession(stream_url, data.get('id_token'), now + remaining, now + refresh_after, account,
-                                   display_name(data.get('display_name')), version, capabilities)
+                                   display_name(data.get('display_name')), version, capabilities, enabled, actions)
 
 
 NOTIFICATION_CONTRACT = FirebaseNotificationContract()

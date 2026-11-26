@@ -18,6 +18,11 @@ def instance_revision(engine, event, plan, state):
                     plan.key, plan.when.isoformat(), entry, channels, state["handled"].get(plan.key))
 
 
+def delivery_member_revision(store, event_id, plan_key):
+    event = store.event_by_id(event_id)
+    return identity(asdict(event), stored_event_rule(store.settings,event_id), plan_key) if event else None
+
+
 def channel_members(batch, channel):
     entry = batch.get("channels", {}).get(channel, {})
     return entry.get("members", ())
@@ -87,6 +92,8 @@ def runtime_snapshot(engine, now):
             key=row.plan_key, event_id=row.event_id, title=row.title, when=row.when,
             next_attempt=row.next_attempt, group=row.group, status="派发记录" if batch else row.status,
             windows=labels.get("windows", row.windows), qq=labels.get("qq", row.qq), send_states=codes, batch=row.batch,
+            channel_reasons={name:entry.get("reason") for name,entry in batch.get("channels",{}).items()
+                             if name in codes and entry.get("reason")},
             snoozed=bool(row.plan_key in current and row.plan_key != plans[row.event_id].key),
             done=events[row.event_id].done, current=row.plan_key in current,
             revision=current[row.plan_key][1] if row.plan_key in current else None,
@@ -108,6 +115,8 @@ def runtime_snapshot(engine, now):
             rows[key] = dict(key=key, event_id=event_id, title=event.title, when=planned_at or when, next_attempt=None,
                 group="history", status="历史实例" if planned_at else "历史批次时间", windows=labels.get("windows","未列入"),
                 qq=labels.get("qq","未列入"), send_states=codes, batch=identifier,
+                channel_reasons={name:entry.get("reason") for name,entry in batch["channels"].items()
+                                 if name in codes and entry.get("reason")},
                 snoozed=False, done=event.done, current=False, revision=None,
                 processed_at=processed_at(state,batch,key),
                 missed=missed(codes, planned_at or when, now))

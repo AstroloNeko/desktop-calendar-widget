@@ -180,11 +180,18 @@ class ReminderDeliveryTests(unittest.TestCase):
         self.engine.delivery.acknowledge(notice.key, "qq", 1, "sent", self.now)
         self.assertEqual(self.engine.apply_qq_action(notice.key, "acknowledge", self.binding, self.now), {"acknowledged": True})
         self.assertFalse(self.store.event_by_id(first.id).done)
+        self.assertEqual(self.engine.apply_qq_action(notice.key, "snooze_10m", self.binding, self.now), {"snoozed": 0})
+        self.now += timedelta(minutes=1)
+        self.add("third")
+        self.add("fourth")
+        self.engine.tick(self.now)
+        notice = self.qq.send.call_args.args[0]
+        self.engine.delivery.acknowledge(notice.key, "qq", 1, "sent", self.now)
         self.assertEqual(self.engine.apply_qq_action(notice.key, "snooze_10m", self.binding, self.now), {"snoozed": 2})
         self.assertEqual(self.engine.apply_qq_action(notice.key, "snooze_10m", self.binding, self.now), {"snoozed": 0})
-        self.engine.cancel_snooze("first")
+        self.engine.cancel_snooze("third", now=self.now)
         self.engine.tick(self.now + timedelta(minutes=10))
-        self.assertEqual([item["event_id"] for item in self.qq.send.call_args.args[0].items], ["second"])
+        self.assertEqual([item["event_id"] for item in self.qq.send.call_args.args[0].items], ["fourth"])
         self.assertEqual(first.due, self.store.event_by_id(first.id).due)
         with self.assertRaises(ReminderError):
             self.engine.apply_qq_action(notice.key, "view_items", None, self.now)
@@ -253,6 +260,7 @@ class ReminderDeliveryTests(unittest.TestCase):
         from threading import RLock
 
         remote = SimpleNamespace(condition=RLock(), generation=7, config=(self.binding.url, "TOKEN", "", "owner"),
+                                 proactive_enabled=True,proactive_actions=(),
                                  _current=lambda generation: generation == remote.generation)
         client = Mock()
         client.request.side_effect = Unavailable()

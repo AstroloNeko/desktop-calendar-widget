@@ -27,6 +27,8 @@ class VerifiedAccount:
     display_name: str = field(default='', repr=False)
     interaction_version: int = 0
     interaction_capabilities: tuple = LEGACY_CAPABILITIES
+    proactive_enabled: bool = False
+    proactive_actions: tuple = ()
 
 
 def sse_events(chunks):
@@ -237,7 +239,9 @@ class NotificationListener:
                         break
                     if self.changed(generation, VerifiedAccount(credentials.account_id, credentials.display_name,
                                                                 credentials.interaction_version,
-                                                                credentials.interaction_capabilities)) is False:
+                                                                credentials.interaction_capabilities,
+                                                                credentials.proactive_enabled,
+                                                                credentials.proactive_actions)) is False:
                         raise Unavailable
                     if not stop.is_set() and self.stream(credentials, stop, ready, wake):
                         delay = self.retry[0]
