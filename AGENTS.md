@@ -10,6 +10,8 @@
 
 ## Development rules
 
+- Desktop Calendar has one designated client write and integration session at a time. Follow [PROJECT_STATE.md](PROJECT_STATE.md) for the active branch and worktree. Other sessions hand off findings and patches for review.
+- Before integrating an existing dirty worktree, take and verify a local backup of its tracked patch, deletions and untracked files. Preserve the source worktree and historical branches. Keep credentials, real calendar data and private deployment details outside the repository.
 - Treat the current repository code as the source of truth. Inspect and report the branch, HEAD and working-tree status before edits. Preserve unrelated changes and keep the default branch releasable.
 - Push, merge, tag, release or perform destructive Git operations only with explicit authorization. Follow the scope of any authorization already given.
 - Preserve compatibility with user data and settings. Reuse existing components and interfaces, avoid unrelated refactoring and obtain approval before adding a necessary dependency.
@@ -33,6 +35,11 @@
 - Active themes are **Modern** and **Slate**. FA (Frutiger Aero, `frutiger`), Glass (Windows 7 Glass, `aero`, alias `win7_aero`) and Paper (`paper`) are archived. Preserve their source and resources. Exclude them from the user menu and routine visual, layout and GUI testing.
 - Historical IDs remain readable. These light palettes resolve to Modern at the desktop boundary without rewriting the saved ID on load. The historical `gemini_reviewing` alias resolves to Slate. Maintain this compatibility with small offline tests.
 - Use semantic tokens from `desktop_calendar/ui/ui_theme.py` and shared controls and Canvas helpers. Test the changed component in Modern when presentation verification is needed. Include Slate when shared tokens or visuals are affected and for relevant release acceptance. Reactivation requires restoring the registry entry to active use, updating compatibility policy, adapting the UI and running targeted acceptance.
+
+## Shared protocols and release
+
+- Coordinate the shared notification and interaction contracts with the cloud owner. Negotiate additive capabilities explicitly, keep older clients and servers compatible, and validate exact client and cloud commits before release.
+- Keep testing packages separate from production release assets. Publish only with explicit authorization and a frozen client/cloud acceptance record. [ROADMAP.md](ROADMAP.md) tracks the release and remaining acceptance tasks.
 
 ## Testing policy
 
