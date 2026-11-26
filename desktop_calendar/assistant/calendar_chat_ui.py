@@ -181,7 +181,7 @@ class _ChatWidgets:
         'uncertain': '结果待核查，请勿重复执行',
     }
 
-    def _embedded_button(self, parent, text, command, *, primary=False, quiet=False):
+    def _embedded_button(self, parent, text, command, *, primary=False, quiet=False, compact=False):
         theme, dp = self.app.theme, self.app.dpi.px
         surface = parent.cget('bg')
         fill = theme.accent if primary else surface if quiet else theme.control_background
@@ -193,14 +193,17 @@ class _ChatWidgets:
                            activebackground=theme.accent_hover if primary else theme.control_hover,
                            disabledforeground=theme.text_disabled, relief='flat', bd=0,
                            highlightthickness=0 if shell else dp(1), highlightbackground=fill,
-                           highlightcolor=theme.input_focus, padx=dp(4), pady=dp(3), cursor='hand2')
+                           highlightcolor=theme.input_focus, padx=dp(4), pady=dp(1 if compact else 3), cursor='hand2')
         def paint(_event=None, hovered=False):
             disabled = str(button.cget('state')) == 'disabled'
             destructive = getattr(button, '_destructive', False)
-            background = (theme.control_background if disabled else
+            background = (theme.control_background if disabled else theme.danger_soft if destructive else
                           button.cget('activebackground') if hovered else
-                          theme.danger_soft if destructive else fill)
-            button.configure(bg=background)
+                          fill)
+            foreground = theme.danger if destructive else fg
+            button.configure(bg=background, fg=foreground, activeforeground=foreground,
+                             activebackground=theme.danger_soft if destructive else
+                             theme.accent_hover if primary else theme.control_hover)
             border = theme.input_focus if button.focus_get() == button else theme.danger if destructive and not disabled else ''
             if shell:
                 shell.set_fill(background)
@@ -212,7 +215,7 @@ class _ChatWidgets:
         button.bind('<FocusIn>', paint)
         button.bind('<FocusOut>', paint)
         if shell:
-            button.pack(fill='both', expand=True, padx=dp(5), pady=dp(2))
+            button.pack(fill='both', expand=True, padx=dp(5), pady=dp(1 if compact else 2))
         return button, shell or button, paint
 
     def _build_chat(self, app, runtime, width, *, embedded=False):
@@ -222,18 +225,42 @@ class _ChatWidgets:
         surface = theme.workspace_detail if embedded else theme.panel_background
         self.configure(bg=surface)
         bar = tk.Frame(self, bg=surface)
-        bar.pack(fill='x', padx=dp(12), pady=dp(3 if embedded else 6))
+        bar.pack(fill='x', padx=dp(12), pady=dp(2 if embedded else 6))
         new_session = lambda: self.request(self.runtime.service.new_session)
         self.sessions = ttk.Combobox(bar, state='readonly', width=1 if embedded else 10)
         if embedded:
-            self.settings_button, settings, _ = self._embedded_button(bar, 'AI 设置', self.configure_ai, quiet=True)
+            if theme.quiet_button_edges:
+                style = ttk.Style(self)
+                name = 'Assistant.Session.TCombobox'
+                # Vista paints its native border regardless of configured colors.
+                # Use themeable elements here without switching the app's ttk theme.
+                if 'clam' in style.theme_names():
+                    field, arrow = 'Assistant.Session.field', 'Assistant.Session.downarrow'
+                    elements = style.element_names()
+                    if field not in elements:
+                        style.element_create(field, 'from', 'clam', 'Combobox.field')
+                    if arrow not in elements:
+                        style.element_create(arrow, 'from', 'clam', 'Combobox.downarrow')
+                    style.layout(name, [
+                        (arrow, {'side': 'right', 'sticky': 'ns'}),
+                        (field, {'sticky': 'nswe', 'children': [
+                            ('Combobox.padding', {'expand': 1, 'sticky': 'nswe', 'children': [
+                                ('Combobox.textarea', {'sticky': 'nswe'})]})]})])
+                style.configure(name, fieldbackground=theme.input_background, bordercolor=theme.input_border,
+                                lightcolor=theme.input_border, darkcolor=theme.input_border,
+                                background=surface, foreground=theme.text_primary,
+                                arrowcolor=theme.text_secondary, arrowsize=dp(10))
+                style.map(name, fieldbackground=[('readonly', theme.input_background)],
+                          bordercolor=[('focus', theme.input_focus)])
+                self.sessions.configure(style=name)
+            self.settings_button, settings, _ = self._embedded_button(bar, 'AI 设置', self.configure_ai, quiet=True, compact=True)
             bar.columnconfigure(0, weight=1)
             self.sessions.grid(row=0, column=0, sticky='nsew', padx=(0, dp(4)))
             settings.grid(row=0, column=1, sticky='e')
             tools = tk.Frame(bar, bg=surface)
-            tools.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(dp(3), 0))
-            self.new_button, new, _ = self._embedded_button(tools, '＋ 新对话', new_session)
-            self.clear_button, clear, _ = self._embedded_button(tools, '清除此对话', self.clear, quiet=True)
+            tools.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(dp(2), 0))
+            self.new_button, new, _ = self._embedded_button(tools, '＋ 新对话', new_session, compact=True)
+            self.clear_button, clear, _ = self._embedded_button(tools, '清除此对话', self.clear, quiet=True, compact=True)
             new.pack(side='left')
             clear.pack(side='right')
             self._session_labels = []
@@ -282,7 +309,7 @@ class _ChatWidgets:
         self.candidate = ttk.Combobox(bottom, state='readonly')
         actions = tk.Frame(bottom, bg=surface) if embedded else bottom
         if embedded:
-            self.confirm_button, confirm, confirm_paint = self._embedded_button(actions, '确认此操作', self.confirm)
+            self.confirm_button, confirm, confirm_paint = self._embedded_button(actions, '确认此操作', self.confirm, primary=True)
             self.cancel_button, cancel, cancel_paint = self._embedded_button(actions, '取消操作', self.cancel, quiet=True)
             self.send_button, send, send_paint = self._embedded_button(bottom, '发送', self.send, primary=True)
             self._action_paints = (confirm_paint, cancel_paint, send_paint)

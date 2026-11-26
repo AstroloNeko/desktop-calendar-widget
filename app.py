@@ -490,7 +490,8 @@ class ThemeButton(LogicalCanvas):
         width = max(2, self.logical_width())
         height = max(2, self.logical_height())
         self.delete("all")
-        if theme.style == "frutiger" and not hasattr(self, "segment_active"):
+        toggle_active = getattr(self, "toggle_active", None)
+        if theme.style == "frutiger" and not hasattr(self, "segment_active") and toggle_active is None:
             background = (
                 {
                     "normal": theme.accent,
@@ -525,7 +526,7 @@ class ThemeButton(LogicalCanvas):
                 radius=theme.metrics.control_radius,
                 pressed=self.state == "pressed",
             )
-        elif theme.style == "aero" and not hasattr(self, "segment_active"):
+        elif theme.style == "aero" and not hasattr(self, "segment_active") and toggle_active is None:
             background = (
                 {
                     "normal": blend(theme.accent, theme.control_background, 0.58),
@@ -566,6 +567,8 @@ class ThemeButton(LogicalCanvas):
             if getattr(self, "segment_active", False):
                 background = (getattr(self, "segment_fill", theme.schedule_card_background)
                               if self.state == "normal" else theme.control_hover)
+            if toggle_active and self.state == "normal":
+                background = theme.accent_soft
             focused = getattr(self, "show_focus_ring", False) and self.focus_get() == self
             self.configure(bg=self.surface_background or theme.header_background)
             rounded_rectangle(
@@ -585,12 +588,17 @@ class ThemeButton(LogicalCanvas):
             draw_compact_view_icon(self, width / 2, height / 2 + y_offset,
                                    foreground=text_color, background=background)
             return
-        if self.icon in ("previous", "following", "minimize"):
+        if self.icon in ("previous", "following", "minimize", "global"):
             draw_control_icon(self, self.icon, width // 2, height // 2 + y_offset,
                               foreground=text_color)
             return
+        label_x = width / 2
+        if self.icon == "search":
+            draw_control_icon(self, "search", width / 2 - 15, height / 2 + y_offset,
+                              foreground=text_color)
+            label_x += 7
         self.create_text(
-            width / 2,
+            label_x,
             height / 2 + y_offset,
             text=self.text,
             fill=text_color,
@@ -3412,11 +3420,14 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         following = ThemeButton(self.header, self, "›", lambda: self.change_month(1), width=widths[2], height=control_height, font_size=13 if compact else 14)
         self.mode_button = ThemeButton(self.header, self, "桌面", self.toggle_window_mode, width=widths[3], height=control_height, font_size=8)
         self.menu_button = ThemeButton(self.header, self, "···", self.show_main_menu, width=widths[4], height=control_height, font_size=9 if compact else 10)
-        global_view = ThemeButton(self.header, self, "□", self.toggle_global_view, width=widths[5], height=control_height, font_size=10)
+        global_view = ThemeButton(self.header, self, "", self.toggle_global_view, width=widths[5], height=control_height, icon="global")
         minimize = ThemeButton(self.header, self, "−", self.hide_to_tray, width=widths[6], height=control_height, font_size=10)
         controls = (previous, today, following, self.mode_button, self.menu_button, global_view, minimize)
-        x = WINDOW_WIDTH - 13 - sum(widths) - 5 * 2
+        group_gap = 5
+        x = WINDOW_WIDTH - 13 - sum(widths) - 5 * 2 - group_gap
         for control, control_width in zip(controls, widths):
+            if control is self.mode_button:
+                x += group_gap
             control.place(x=dp(x), y=dp(control_y), width=dp(control_width), height=dp(control_height))
             x += control_width + 2
         Tooltip(previous, "上个月（滚轮向上 / PgUp）")
@@ -3464,7 +3475,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
         self.agenda_bar = tk.Frame(self.schedule_section, bg=theme.schedule_background, height=dp(39), padx=dp(12), cursor="hand2")
         self.agenda_bar.pack_propagate(False)
-        self.agenda_toggle = tk.Label(self.agenda_bar, text="⌃", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 10), cursor="hand2")
+        self.agenda_toggle = tk.Label(self.agenda_bar, text="▴", anchor="center", bg=theme.schedule_background, fg=theme.text_secondary, font=(FONT, 9), cursor="hand2")
         self.agenda_toggle.pack(side="left", padx=(0, dp(6)))
         self.agenda_title = tk.Label(self.agenda_bar, text="", bg=theme.schedule_background, fg=theme.text_primary, font=(FONT, 10, "bold"), cursor="hand2")
         self.agenda_title.pack(side="left")
@@ -3531,7 +3542,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.global_summary_label.pack(side="left")
         day_detail_button = ThemeButton(info_bar, self, "右侧面板", lambda: self.global_detail_frame.toggle_drawer(), width=66, height=23, font_size=8, surface_background=theme.panel_secondary, outlined=True)
         day_detail_button.pack(side="right", padx=(dp(8), 0))
-        ThemeButton(info_bar, self, "搜索", self.open_search, width=90, height=23,
+        ThemeButton(info_bar, self, "搜索", self.open_search, width=90, height=23, icon="search",
                     font_size=8, surface_background=theme.panel_secondary, outlined=True).pack(side="right", padx=(dp(8), 0))
         segment_surface = theme.control_background if theme.rounded_widget_shells else theme.panel_secondary
         mode_switch = tk.Frame(
@@ -3565,7 +3576,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             outlined=True,
         )
         self.global_timeline_mode_button.pack(side="left")
-        Tooltip(day_detail_button, "显示当日详情、AI 助理与快速添加")
+        Tooltip(day_detail_button, "展开或收起当日详情、AI 助理与快速添加")
         Tooltip(self.global_flow_mode_button, "按周查看本月每天的安排")
         Tooltip(self.global_timeline_mode_button, "按事项查看持续时间与 DDL")
 
@@ -3859,7 +3870,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         else:
             frame = content = tk.Frame(parent, bg=background, highlightbackground=border,
                                        highlightthickness=0 if theme.quiet_button_edges else dp(1))
-        ddl_header = tk.Frame(content, bg=background, padx=dp(2 if rounded else 8), pady=dp(3))
+        if not pinned and theme.quiet_button_edges:
+            tk.Frame(content, height=dp(1), bg=theme.divider).pack(fill="x")
+        ddl_header = tk.Frame(content, bg=background, padx=dp(2 if rounded else 8), pady=dp(2 if pinned else 3))
         ddl_header.pack(fill="x")
         tk.Label(
             ddl_header,
@@ -5715,7 +5728,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.agenda_title.configure(text=f"{self.selected.month}月{self.selected.day}日 · {WEEKDAYS[self.selected.weekday()]}{holiday_text}")
         total_items = len(events) + len(routine_items)
         self.agenda_count.configure(text=f"{total_items} 项" if total_items else "无安排")
-        self.agenda_toggle.configure(text="⌃" if self.agenda_open else "⌄")
+        self.agenda_toggle.configure(text="▴" if self.agenda_open else "▾")
 
         if not events and not routine_items:
             empty_title = "这一天很清静"
@@ -6263,6 +6276,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
         footer = tk.Frame(sidebar, bg=theme.workspace_sidebar, padx=dp(5), pady=dp(8))
         footer.pack(fill="x", side="bottom")
+        tk.Frame(footer, bg=theme.divider, height=dp(1)).pack(fill="x", pady=(0, dp(5)))
         ThemeButton(footer, self, "管理分类…", self.open_category_manager, width=126, height=26, font_size=7, surface_background=theme.workspace_sidebar).pack(fill="x")
 
     def _build_global_category_filter_row(
@@ -6280,8 +6294,12 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         dp = self.dpi.px
         background = blend(theme.workspace_sidebar, theme.accent_soft, 0.28) if enabled else theme.workspace_sidebar
         hover_background = theme.control_hover
-        row = tk.Frame(parent, bg=background, padx=dp(4), pady=dp(6), cursor="hand2")
-        row.pack(fill="x", padx=dp(3), pady=(0, dp(2)))
+        shell = RoundedCardShell(parent, theme, dp, background, outline="",
+                                 surface=theme.workspace_sidebar) if theme.rounded_widget_shells else None
+        row = tk.Frame(shell or parent, bg=background, padx=dp(4), pady=dp(6), cursor="hand2")
+        (shell or row).pack(fill="x", padx=dp(3), pady=(0, dp(2)))
+        if shell:
+            row.pack(fill="x", padx=dp(5), pady=dp(2))
         dot = LogicalCanvas(row, dpi=self.dpi, width=16, height=18, bg=background, bd=0, highlightthickness=0, cursor="hand2")
         dot.pack(side="left", padx=(0, dp(2)))
         dot.create_oval(3, 4, 13, 14, fill=background if hollow or not enabled else color, outline=color, width=2)
@@ -6292,6 +6310,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         widgets = (row, dot, label, check)
 
         def set_background(value: str) -> None:
+            if shell:
+                shell.set_fill(value)
             for widget in widgets:
                 widget.configure(bg=value)
 
@@ -6300,6 +6320,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             widget.bind("<MouseWheel>", lambda event: scroll_canvas.yview_scroll(int(-event.delta / 120), "units"))
             widget.bind("<Enter>", lambda _event: set_background(hover_background))
             widget.bind("<Leave>", lambda _event: set_background(background))
+        if shell:
+            shell.bind("<Button-1>", lambda _event: command())
+            shell.bind("<MouseWheel>", lambda event: scroll_canvas.yview_scroll(int(-event.delta / 120), "units"))
 
     def _toggle_global_category_sidebar(self) -> None:
         self._global_category_sidebar_open = not self._global_category_sidebar_open
@@ -6832,7 +6855,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
     def toggle_agenda(self) -> None:
         self.agenda_open = not self.agenda_open
-        self.agenda_toggle.configure(text="⌃" if self.agenda_open else "⌄")
+        self.agenda_toggle.configure(text="▴" if self.agenda_open else "▾")
         pinned_ddl, regular_ddl = self.store.grouped_ddl_events()
         self._apply_main_layout(len(pinned_ddl), len(regular_ddl))
         self.store.settings["agenda_open"] = self.agenda_open
@@ -6900,6 +6923,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def _update_mode_badge(self) -> None:
         if self.view_mode == "global":
             label = "取消置顶" if self.window_mode == "pinned" else "窗口置顶"
+            self.mode_button.toggle_active = self.window_mode == "pinned"
             foreground = (
                 self.theme.accent if self.window_mode == "pinned" else self.theme.text_secondary
             ) if self.theme.style != "aero" else self.theme.control_text

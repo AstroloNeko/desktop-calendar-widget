@@ -90,6 +90,19 @@ class GuiHarnessTests(unittest.TestCase):
 
 
 class GlobalHeaderTests(unittest.TestCase):
+    def test_pin_badge_uses_pinned_state_not_outline(self):
+        from types import SimpleNamespace
+        from desktop_calendar.ui.ui_theme import ACTIVE_THEMES
+        for theme in ACTIVE_THEMES.values():
+            button = Mock(outlined=False)
+            app = SimpleNamespace(mode_button=button, view_mode="global", theme=theme)
+            for mode, label in (("desktop", "窗口置顶"), ("pinned", "取消置顶"), ("desktop", "窗口置顶")):
+                app.window_mode = mode
+                CalendarApp._update_mode_badge(app)
+                self.assertIs(button.toggle_active, mode == "pinned")
+                self.assertEqual(button.set_text.call_args.args[0], label)
+                self.assertFalse(button.outlined)
+
     def test_responsive_controls_fit_without_overlap(self):
         for width in (700, 712, 720, 800, 899, 900, 1240, 1800):
             bounds = header_layout(width)

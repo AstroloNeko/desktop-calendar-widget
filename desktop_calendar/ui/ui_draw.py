@@ -48,6 +48,10 @@ def draw_control_icon(canvas, kind, cx, cy, *, foreground, width=1):
     elif kind == "search":
         canvas.create_oval(cx - 6, cy - 6, cx + 2, cy + 2, outline=foreground, width=width)
         canvas.create_line(cx + 1, cy + 1, cx + 5, cy + 5, fill=foreground, width=width, capstyle="round")
+    elif kind == "global":
+        rounded_rectangle(canvas, cx - 8, cy - 6, cx + 8, cy + 6, 2, fill="",
+                          outline=foreground, width=width)
+        canvas.create_line(cx - 7, cy - 2, cx + 7, cy - 2, fill=foreground, width=width)
 
 
 def draw_compact_view_icon(canvas, cx: float, cy: float, *, foreground: str, background: str) -> None:

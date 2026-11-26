@@ -631,7 +631,7 @@ SLATE = replace(
     date_other_month="#94A3B8", date_hover_background="#F8FAFC", date_hover_border="#E2E8F0",
     date_selected_background="#F1F5F9", date_selected_border="#CBD5E1",
     date_today_background="#EEF2FF", date_today_border="#4F46E5", date_selected_today="#4F46E5",
-    date_weekend_text="#C73758", weekend="#C73758", schedule_card_background="#FDFCF9",
+    date_weekend_text="#AF4854", weekend="#AF4854", schedule_card_background="#FDFCF9",
     schedule_card_hover="#F1F5F9", schedule_card_border="#E2E8F0", schedule_time_text="#475569",
     input_background="#F1F2F0", input_border="#E2E8F0", input_hover_border="#CBD5E1",
     input_focus="#4F46E5", accent="#4F46E5", accent_hover="#4338CA", accent_soft="#EEF2FF",

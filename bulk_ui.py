@@ -108,9 +108,9 @@ class BulkActionsMixin:
                    ("清空", "×", self.clear_bulk_selection, 24))
         for key, label, command, width in options:
             button = button_factory(self.bulk_toolbar, self, label, command, width=width, height=26,
-                                    font_size=8, surface_background=theme.accent_soft, outlined=key == "日期",
+                                    font_size=8, surface_background=theme.accent_soft,
                                     foreground=theme.danger if key == "删除" else theme.control_text)
-            button.pack(side="left", padx=(0, dp(4)))
+            button.pack(side="right" if key == "清空" else "left", padx=(0, dp(4)))
             tooltip_factory(button, "取消所有选择（Esc）" if key == "清空" else f"对当前选中事项：{label}")
             self.bulk_buttons[key] = button
 

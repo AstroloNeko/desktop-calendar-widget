@@ -13,7 +13,7 @@ def header_layout(width: int) -> dict[str, tuple[int, int, int, int]]:
     """Logical-pixel bounds; reserve a real drag gap even at minimum width."""
     compact = width < 900
     padding, gap = (8, 3) if compact else (12, 5)
-    title_width = 150 if compact else 176
+    title_width = 124 if compact else 136
     button_height = 32
     y = (HEADER_HEIGHT - button_height) // 2
     result = {"title": (padding, 4, title_width, 50)}
@@ -32,7 +32,7 @@ def header_layout(width: int) -> dict[str, tuple[int, int, int, int]]:
     for key, size in reversed(tuple(zip(("create", "habits", "ddl", "pin", "more"), widths))):
         x -= size
         result[key] = (x, y, size, button_height)
-        x -= gap
+        x -= gap + (5 if key == "pin" else 0)
     result["drag"] = (navigation_end, 0, max(0, x - navigation_end), HEADER_HEIGHT)
     return result
 
@@ -70,7 +70,7 @@ class GlobalHeader(tk.Frame):
             button = button_factory(self, app, text, command, width=34, height=32,
                                     font_size=13 if key in ("previous", "following", "minimize") else 8,
                                     surface_background=theme.header_background,
-                                    accented=key == "create", outlined=key == "pin",
+                                    accented=key == "create",
                                     icon=key if key in ("compact", "previous", "following", "minimize") else None)
             button.bind("<Configure>", lambda _e, control=button: control.draw(), add="+")
             self.controls[key] = button
