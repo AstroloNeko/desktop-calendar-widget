@@ -7,7 +7,7 @@ import threading
 import uuid
 
 from desktop_calendar.remote_transport import Client, StatusError, Unavailable
-from desktop_calendar.reminders.notification_model import Notice, identity
+from desktop_calendar.reminders.notification_model import Notice, identity, select_brief_items
 
 PATH = "/api/notifications/proactive"
 ACTIONS = {
@@ -40,16 +40,22 @@ def notice_payload(notice, binding, private):
     private = private or notice.kind == "test"
     if len(notice.items) > 500:
         raise ValueError("提醒批次超过主动通知协议上限")
+    brief_counts = None
+    selected = ()
     if private and notice.kind != "test":
         fallback = (f"共 {len(notice.items)} 项，打开桌面月历查看。"
                     if notice.items else "本次简报没有事项。")
+    elif notice.kind == "brief":
+        selected, brief_counts = select_brief_items(notice.items)
+        fallback = notice.summary(20, selected=selected)
     else:
+        selected = () if private else notice.items[:50]
         fallback = notice.summary(20)[:3800]
         if notice.kind in ("event","ddl") and len(notice.items) > 20:
             fallback += f"\n共 {len(notice.items)} 项。知道了作用于本批仍有效的全部提醒。超过 20 项时请按编号引用或到桌面端稍后处理。"
-    wire_items = [] if private else [
+    wire_items = [
         {**{key: item[key] for key in ("title", "group", "date", "time") if key in item}, "index": index}
-        for index, item in enumerate(notice.items[:50], 1)
+        for index, item in enumerate(selected, 1)
     ]
     return {
         "protocol_version": 1, "notification_id": notice.key, "type": notice.kind, "attempt":notice.attempt,
@@ -58,6 +64,7 @@ def notice_payload(notice, binding, private):
         "expires_at": notice.expires.astimezone().isoformat(),
         "private": private, "count": len(notice.items),
         "items": wire_items,
+        **({"brief_counts": brief_counts} if brief_counts is not None else {}),
         "fallback_text": ("【测试简报】\n" + fallback) if notice.manual_test else fallback,
         **({"is_test": True} if notice.manual_test else {}),
         "actions": [{"action": action, "target": notice.key} for action in ACTIONS[notice.kind]

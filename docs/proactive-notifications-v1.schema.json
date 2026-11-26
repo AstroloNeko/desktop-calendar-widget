@@ -120,6 +120,19 @@
           "minimum": 0,
           "maximum": 500
         },
+        "brief_counts": {
+          "type": "object",
+          "description": "Full counts before display quotas. The five counts must sum to count.",
+          "required": ["timed", "untimed", "unfinished", "upcoming", "overdue"],
+          "additionalProperties": false,
+          "properties": {
+            "timed": { "type": "integer", "minimum": 0, "maximum": 500 },
+            "untimed": { "type": "integer", "minimum": 0, "maximum": 500 },
+            "unfinished": { "type": "integer", "minimum": 0, "maximum": 500 },
+            "upcoming": { "type": "integer", "minimum": 0, "maximum": 500 },
+            "overdue": { "type": "integer", "minimum": 0, "maximum": 500 }
+          }
+        },
         "items": {
           "type": "array",
           "maxItems": 50,
@@ -169,6 +182,15 @@
               "items": { "maxItems": 0 }
             }
           }
+        },
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "type": { "not": { "const": "brief" } } } },
+              { "properties": { "private": { "const": true } } }
+            ]
+          },
+          "then": { "not": { "required": ["brief_counts"] } }
         },
         {
           "if": { "properties": { "is_test": { "const": true } } },

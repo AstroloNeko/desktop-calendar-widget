@@ -13,6 +13,7 @@ from desktop_calendar.assistant.calendar_chat_protocol import ChatError
 from desktop_calendar.assistant.calendar_chat_sessions import ChatJournal
 from desktop_calendar.reminders.qq_reminders import VerifiedBinding
 from desktop_calendar.reminders.reminder_engine import ReminderEngine, STATE_KEY
+from desktop_calendar.remote_interaction import execute_interaction
 from desktop_calendar.remote_service import make_receipt
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 from event_commands import EventCommandHistory
@@ -256,3 +257,30 @@ class AgentReminderRuntimeTests(TestCase):
         self.engine.tick(self.now)
         self.windows.send.assert_called_once()
         self.assertEqual(self.windows.send.call_args.args[0].kind,"brief")
+
+    def test_brief_shortcut_uses_full_counts_and_keeps_ddl_in_remote_plain_text(self):
+        sections = (("timed", 19, 30, True, "general"), ("untimed", 5, 0, False, "general"),
+                    ("upcoming", 6, 1440, True, "ddl"), ("overdue", 4, -1440, True, "ddl"))
+        for group, total, offset, has_time, event_type in sections:
+            for index in range(total):
+                label = f"{group}-{index:02d}"
+                self.add(label, offset, title=f"{label} " + "长标题" * 45, has_time=has_time, event_type=event_type)
+        before = deepcopy(self.store.settings)
+
+        response = self.send("/brief")
+        brief = response["brief_result"]
+        self.assertEqual(brief["counts"], {"timed":19, "untimed":5, "unfinished":0, "upcoming":6, "overdue":4})
+        self.assertEqual(brief["agenda_count"], 24)
+        selected = [item["event_id"] for item in brief["items"]]
+        self.assertEqual(selected, [f"{group}-{index:02d}" for group, limit in (
+            ("timed", 5), ("untimed", 3), ("upcoming", 4), ("overdue", 3)) for index in range(limit)])
+        remote = execute_interaction(self.service, self.service.journal, None,
+            {"session_id": self.session, "request_id": "remote-brief", "interaction": {
+                "kind": "quick_query", "command": "brief", "date": self.now.date().isoformat(), "scope": "agenda"}},
+            self.now.astimezone())
+        self.assertEqual(remote["brief_result"]["items"], brief["items"])
+        wire = json.loads(make_receipt(remote)[0])["reply_text"]
+        self.assertTrue(all(event_id in wire for event_id in selected))
+        self.assertIn("已按分类展示 15 / 34 项。", wire)
+        self.assertEqual(self.store.settings, before)
+        self.assertEqual(self.provider.messages, [])

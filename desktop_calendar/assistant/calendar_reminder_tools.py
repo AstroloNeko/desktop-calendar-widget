@@ -7,7 +7,7 @@ import secrets
 from desktop_calendar.assistant.calendar_chat_protocol import envelope, fail
 from desktop_calendar.assistant.calendar_chat_tools import iso_day, reference_today
 from desktop_calendar.reminders.notification_dispatch import read_time
-from desktop_calendar.reminders.notification_model import BRIEF_GROUP_LABELS, brief_items
+from desktop_calendar.reminders.notification_model import BRIEF_GROUP_LABELS, brief_items, compact_brief_line, select_brief_items
 from desktop_calendar.reminders.reminder_config import FIELDS, config_plan, field_lines, impacts, lookup, public_config, put
 from desktop_calendar.reminders.reminder_engine import CONFIG_KEY, CATCHUP, ReminderError, normalize_config
 from desktop_calendar.reminders.reminder_runtime import channel_members, snooze_time
@@ -210,23 +210,24 @@ def query_brief(gateway, args, source):
         settings = {**settings, "timed":False, "untimed":False, "unfinished":False}
     # This uses the exact deterministic generator used by DeliveryQueue.tick.
     items = brief_items(gateway.store, datetime.combine(day, time()), settings, False, overdue_at=now)
-    counts = {key:sum(item["group"] == key for item in items) for key in BRIEF_GROUP_LABELS}
+    shown, counts = select_brief_items(items)
     agenda = sum(counts[key] for key in ("timed","untimed","unfinished"))
     anchor = day.isoformat()
     lines = [f"{anchor} 行程简报 · 当日安排 {agenda} 项 · 近期 DDL {counts['upcoming']} 项 · 逾期 DDL {counts['overdue']} 项"]
     private = config["private"] and source == "wechat"
     if not private:
-        shown = items[:LIMIT]
         for group, label in BRIEF_GROUP_LABELS.items():
             matches = [item for item in shown if item["group"] == group]
             if matches:
                 lines.append(label)
-                lines.extend(" · ".join(filter(None, (item["date"] if group in ("upcoming","overdue") else "",
-                             item["time"], " ".join(item["title"].split())[:55]))) for item in matches)
+                for item in matches:
+                    line = " · ".join(filter(None, (item["date"] if group in ("upcoming","overdue") else "",
+                                       item["time"], " ".join(item["title"].split())[:55])))
+                    lines.append(compact_brief_line(line) if source == "wechat" else line)
         if len(items) > len(shown):
-            lines.append("已展示前 10 项。")
+            lines.append(f"已按分类展示 {len(shown)} / {len(items)} 项。")
     return {"date":anchor,"scope":args.get("scope","agenda"),"private":private,"counts":counts,"agenda_count":agenda,
-            "items":[] if private else [dict(item) for item in items[:LIMIT]],"text":"\n".join(lines)}
+            "items":[] if private else [dict(item) for item in shown],"text":"\n".join(lines)}
 
 
 def action_targets(gateway, args, context, source, message=None):

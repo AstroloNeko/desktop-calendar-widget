@@ -256,6 +256,38 @@ class ReminderDeliveryTests(unittest.TestCase):
         self.assertNotIn("sensitive", json.dumps(payload))
         self.assertNotIn("secret-id", json.dumps(payload))
 
+    def test_proactive_brief_preserves_ddl_beyond_first_fifty_and_hides_private_counts(self):
+        totals = {"timed": 54, "untimed": 5, "unfinished": 4, "upcoming": 6, "overdue": 4}
+        quotas = {"timed": 5, "untimed": 3, "unfinished": 3, "upcoming": 4, "overdue": 3}
+        items = tuple({"group": group, "title": f"{group}-{index:02d} " + "长" * 175,
+                       "date": "2026-11-25", "time": "08:00"}
+                      for group, total in totals.items() for index in range(total))
+        notice = Notice("a" * 64, "brief", self.now, self.now + timedelta(minutes=2), items)
+        expected = [f"{group}-{index:02d}" for group, quota in quotas.items() for index in range(quota)]
+
+        payload = notice_payload(notice, self.binding, False)
+        self.assertEqual(payload["brief_counts"], totals)
+        self.assertEqual(payload["count"], sum(totals.values()))
+        self.assertEqual([item["title"].split()[0] for item in payload["items"]], expected)
+        self.assertEqual([item["index"] for item in payload["items"]], list(range(1, 19)))
+        fallback = payload["fallback_text"]
+        self.assertEqual([line.split()[1] for line in fallback.splitlines() if line.startswith("08:00 ")], expected)
+        self.assertLessEqual(len(fallback.encode("utf-8")), 1900)
+        self.assertIn(f"共 {sum(totals.values())} 项", fallback)
+
+        private = notice_payload(notice, self.binding, True)
+        self.assertEqual(private["count"], payload["count"])
+        self.assertEqual(private["items"], [])
+        self.assertNotIn("brief_counts", private)
+        self.assertNotIn("overdue", private["fallback_text"])
+
+        for kind in ("event", "ddl"):
+            with self.subTest(kind=kind):
+                regular = Notice("b" * 64, kind, self.now, notice.expires, items)
+                payload = notice_payload(regular, self.binding, False)
+                self.assertNotIn("brief_counts", payload)
+                self.assertEqual([item["title"] for item in payload["items"]], [item["title"] for item in items[:50]])
+
     def test_https_transport_preserves_uncertainty_and_checks_queued_generation(self):
         from threading import RLock
 

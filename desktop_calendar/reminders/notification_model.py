@@ -14,6 +14,25 @@ BRIEF_DEFAULTS = {
 BRIEF_CATCHUP = timedelta(hours=4)
 BRIEF_GROUP_LABELS = {"timed": "当天日程", "untimed": "全天及无具体时间", "unfinished": "当天未完成",
                       "upcoming": "近期 DDL", "overdue": "已逾期 DDL"}
+BRIEF_GROUP_QUOTAS = {"timed": 5, "untimed": 3, "unfinished": 3, "upcoming": 4, "overdue": 3}
+
+
+def select_brief_items(items):
+    """Limit each section independently, preserving its order and full count."""
+    shown = {group: [] for group in BRIEF_GROUP_QUOTAS}
+    counts = dict.fromkeys(BRIEF_GROUP_QUOTAS, 0)
+    for item in items:
+        group = item["group"]
+        counts[group] += 1
+        if counts[group] <= BRIEF_GROUP_QUOTAS[group]:
+            shown[group].append(item)
+    return tuple(item for section in shown.values() for item in section), counts
+
+
+def compact_brief_line(text):
+    # Leave space for every selected row and all headings in a remote plain-text reply.
+    encoded = text.encode("utf-8")
+    return text if len(encoded) <= 80 else encoded[:77].decode("utf-8", errors="ignore") + "…"
 
 
 def brief_settings(raw):
@@ -55,24 +74,25 @@ class Notice:
         return {"event": "日程提醒", "ddl": "DDL 提醒", "brief": "每日行程简报",
                 "test": "测试通知"}[self.kind]
 
-    def summary(self, limit=3):
+    def summary(self, limit=3, *, selected=None):
         if self.kind == "test":
             return "这是一条不含日历数据的测试通知。"
         if not self.items:
             return "今天没有需要列入简报的事项。"
         if not any("title" in item for item in self.items):
             return f"共 {len(self.items)} 项，打开桌面月历查看。"
+        shown = self.items[:limit] if selected is None else selected
         lines = []
         group = None
-        for item in self.items[:limit]:
+        for item in shown:
             if self.kind == "brief" and limit > 3 and item.get("group") != group:
                 group = item.get("group")
                 if group in BRIEF_GROUP_LABELS:
                     lines.append(BRIEF_GROUP_LABELS[group])
             context = item.get("time") or (item.get("date") if item.get("group") in ("upcoming", "overdue") else "")
             line = " ".join(filter(None, (context, item.get("title")))).replace("\n", " ")
-            lines.append(line[:200 if limit > 3 else 64])
-        if len(self.items) > limit:
+            lines.append(compact_brief_line(line) if selected is not None else line[:200 if limit > 3 else 64])
+        if len(self.items) > len(shown):
             lines.append(f"共 {len(self.items)} 项，查看完整列表")
         return "\n".join(lines)
 
