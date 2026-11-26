@@ -102,9 +102,12 @@ def query_reminders(gateway, args, source):
         if kind == "next" and (not config["enabled"] or not has_channel
                 or not row["current"] or not row["next_attempt"] or row["next_attempt"] <= now):
             continue
-        if kind == "attention" and (row["processed_at"] or
-                row["group"] != "attention" and not any(s in states for s in ("failed","unknown","expired"))):
-            continue
+        if kind == "attention":
+            due = row["current"] and timedelta(0) <= now - row["when"] < CATCHUP
+            needs_attention = row["group"] == "attention" or any(
+                status in ("failed","unknown","expired") for status in states)
+            if row["processed_at"] or not (due or needs_attention):
+                continue
         if kind == "missed" and not row["missed"] or kind == "snoozed" and not row["snoozed"]:
             continue
         if kind in ("failed","unknown") and kind not in states or batch and row["key"] not in batch_keys:

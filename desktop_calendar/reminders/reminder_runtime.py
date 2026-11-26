@@ -39,6 +39,14 @@ def channel_states(batch, key):
     return codes, labels
 
 
+def may_have_sent(state, key):
+    entry = state["deliveries"].get(key, {})
+    batch = state["batches"].get(entry.get("batch"), {})
+    channels, _ = channel_states(batch, key)
+    return any(status in ("accepted", "submitted", "sent", "dispatching", "unknown")
+               for status in (entry.get("status"), *channels.values()))
+
+
 def processed_at(state, batch, key):
     qq = batch.get("channels", {}).get("qq", {})
     return state["handled"].get(key) or (qq.get("acknowledged_at") if "handled_keys" not in qq else None)

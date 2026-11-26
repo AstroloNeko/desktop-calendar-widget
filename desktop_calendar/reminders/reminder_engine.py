@@ -383,7 +383,7 @@ class ReminderEngine:
 
     def apply_runtime_action(self, action, targets, now, *, operation_id=None, strict=True, qq_batch=None):
         """Revalidate and commit the runtime-only patch and its proof in one save."""
-        from desktop_calendar.reminders.reminder_runtime import live_instances, snooze_time
+        from desktop_calendar.reminders.reminder_runtime import live_instances, may_have_sent, snooze_time
         now = local_wall(now)
         _, plans, state = self.read_snapshot()
         current = live_instances(self, plans, state)
@@ -417,6 +417,7 @@ class ReminderEngine:
         changed = False
         for plan in checked:
             base = plans[plan.event_id]
+            snooze_may_have_sent = plan.key != base.key and may_have_sent(state, plan.key)
             if kind == "snooze":
                 if plan.key != base.key and when == plan.when:
                     continue
@@ -428,13 +429,13 @@ class ReminderEngine:
                 marker = {"status":"snoozed","at":now.isoformat(),"attempts":0}
                 state["deliveries"][base.key] = state["deliveries"][plan.key] = marker
                 state["snoozes"][plan.event_id] = {"base":base.key,"key":key,"at":when.isoformat()}
-                if "base_delivery" in old or strict and old.get("base") != base.key:
+                if not snooze_may_have_sent and ("base_delivery" in old or strict and old.get("base") != base.key):
                     state["snoozes"][plan.event_id]["base_delivery"] = original
                 changed = True
             elif kind == "cancel_snooze":
                 previous = state["snoozes"].pop(plan.event_id)
                 state["deliveries"][plan.key] = {"status":"snoozed","at":now.isoformat(),"attempts":0}
-                if "base_delivery" in previous and now - base.when < CATCHUP:
+                if "base_delivery" in previous and not snooze_may_have_sent and now - base.when < CATCHUP:
                     original = previous["base_delivery"]
                     if original is None:
                         state["deliveries"].pop(base.key, None)

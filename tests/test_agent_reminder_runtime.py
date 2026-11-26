@@ -130,6 +130,20 @@ class AgentReminderRuntimeTests(TestCase):
         self.assertEqual(outcome["status"],"failed",outcome)
         self.assertEqual(self.query(filter="snoozed")["total"],0)
 
+    def test_cancel_after_snoozed_notification_does_not_release_original(self):
+        self.add("组会",5)
+        self.confirm(self.propose("snooze",{"title":"组会"},minutes=5))
+        self.now += timedelta(minutes=10)
+        self.engine.tick(self.now)
+        notice = self.windows.send.call_args.args[0]
+        self.engine.acknowledge(notice.key,True,self.now)
+        self.engine.delivery.acknowledge(notice.key,"qq",1,"unknown",self.now)
+        self.confirm(self.propose("snooze",{"title":"组会"},minutes=5))
+        self.assertEqual(self.confirm(self.propose("cancel_snooze",{"title":"组会"}))["status"],"succeeded")
+        self.engine.tick(self.now+timedelta(minutes=6))
+        self.windows.send.assert_called_once()
+        self.qq.send.assert_called_once()
+
     def test_trusted_notification_members_acknowledge_without_completing(self):
         self.add("甲")
         self.add("乙")
@@ -138,6 +152,7 @@ class AgentReminderRuntimeTests(TestCase):
         notice = self.windows.send.call_args.args[0]
         self.engine.acknowledge(notice.key,True,self.now)
         self.engine.delivery.acknowledge(notice.key,"qq",1,"sent",self.now)
+        self.assertEqual(self.query(filter="attention")["total"],2)
         proposal = self.propose("acknowledge",{"context":"last_notification","quantity":"notification_all"},
                                 text="最近的通知全标为已处理")
         result = self.confirm(proposal)
@@ -152,6 +167,7 @@ class AgentReminderRuntimeTests(TestCase):
         self.assertEqual(self.engine.apply_qq_action(notice.key,"acknowledge",self.binding,self.now),
                          {"acknowledged":True})
         self.assertFalse(any(event.done for event in self.store.events))
+        self.assertEqual(self.query(filter="attention")["total"],0)
         self.assertNotIn("business_receipt",json.loads(make_receipt(result,business={"should":"omit"})[0]))
 
     def test_aggregate_snooze_and_native_replay_only_apply_to_original_members(self):
