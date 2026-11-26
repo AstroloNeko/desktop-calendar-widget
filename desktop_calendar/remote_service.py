@@ -12,7 +12,7 @@ from typing import Optional
 
 from desktop_calendar.assistant.calendar_chat_intent import requested_fields
 from desktop_calendar.assistant.calendar_chat_protocol import (
-    ChatError, calendar_write_guard, event_line, fingerprint, receipt_message, wechat_delete_review,
+    ChatError, calendar_write_guard, event_line, fingerprint, receipt_message, reminder_line, wechat_delete_review,
 )
 from desktop_calendar.assistant.operation_engine import event_action
 from desktop_calendar.remote_channels import conversation_from_job
@@ -121,7 +121,8 @@ def make_receipt(response, request_text='', *, business=None):
             rows = []
             prompt = wechat_delete_review(op) or '删除清单过长，请回复“取消”，缩小范围后再预览。'
         else:
-            rows = preview.get('summaries') or ([preview['summary']] if preview.get('summary') else [])
+            summary = preview.get('after_summary') or preview.get('summary')
+            rows = preview.get('summaries') or ([summary] if summary else [])
             snapshot = preview.get('after') or preview.get('before')
             if not rows and isinstance(snapshot, dict):
                 days = preview.get('dates') or []
@@ -134,7 +135,8 @@ def make_receipt(response, request_text='', *, business=None):
     lines = [prompt or ('本条消息已处理。' if ok else '本条消息未完成，请核查日历。')]
     for index, row in enumerate(rows, 1):
         if row.get('date') and row.get('title') and not row.get('schedule'):
-            lines.append(f'{index}. {event_line(row)}')
+            detail = reminder_line(row)
+            lines.append(f'{index}. {event_line(row)}' + (' · '+detail if detail else ''))
             continue
         date = row.get('date') or row.get('start', '')[:10]
         if row.get('end') and row['end'] != date:

@@ -82,7 +82,9 @@ def receipt_message(result, *, concise=False, explicit=()):
                 if color:
                     fields.append(('跟随分类颜色 ' if row.get('color_mode') == 'inherit' else '颜色 ') + color)
             reminder = row.get('reminder')
-            if reminder is not None or 'reminder' in explicit:
+            if row.get('reminder_plan'):
+                fields.append(reminder_line(row))
+            elif reminder is not None or 'reminder' in explicit:
                 fields.append('不提醒' if reminder is None else f'提前 {reminder} 分钟提醒')
             if row.get('done') or result.get('action') == 'complete' or 'done' in explicit:
                 fields.append('已完成' if row.get('done') else '未完成')
@@ -97,7 +99,8 @@ def receipt_message(result, *, concise=False, explicit=()):
             details.append(' · '.join(fields))
             continue
         dates = row['date'] if row['date']==row.get('end',row['date']) else f"{row['date']} 至 {row['end']}"
-        reminder = '不提醒' if row['reminder'] is None else f"提前 {row['reminder']} 分钟提醒"
+        reminder = (reminder_line(row) if row.get('reminder_plan') else
+                    '不提醒' if row['reminder'] is None else f"提前 {row['reminder']} 分钟提醒")
         details.append(f"{dates} · {row['title']} · {row['time'] or '全天'} · 有效颜色 {row['color']} · {reminder} · "
                        + ('已完成' if row['done'] else '未完成'))
     return f"{label}（{len(rows)} 项）\n" + '\n'.join(details)
@@ -107,6 +110,38 @@ def event_line(row):
     date = row['date']
     dates = f"{date} 至 {row['end']}" if row.get('end') and row['end'] != date else date
     return f"{dates} · {row['title']} · {row.get('time') or '全天'}"
+
+
+def reminder_line(row):
+    plan = row.get('reminder_plan')
+    if not plan:
+        return ''
+    rule = plan['rule']
+    mode = plan['mode']
+    label = {'default':'默认提醒', 'relative':'相对提醒', 'absolute':'固定时刻提醒', 'disabled':'不提醒'}[mode]
+    fields = [label]
+    if mode == 'relative':
+        minutes = rule.get('minutes', row.get('reminder'))
+        if 'days' in rule:
+            fields.append(f"提前 {rule['days']} 天")
+        elif minutes is not None:
+            fields.append(f'提前 {minutes} 分钟')
+    if row.get('deadline'):
+        fields.append('截止 '+row['deadline']+(' '+row['time'] if row.get('time') else '（无具体时刻）'))
+    if plan.get('planned_at'):
+        fields.append('提醒时刻 '+plan['planned_at'].replace('T', ' '))
+    elif mode != 'disabled':
+        fields.append('当前无有效触发时间')
+    if plan.get('global_enabled') is False:
+        fields.append('全局提醒已关闭')
+    if plan.get('snoozed_at'):
+        fields.append('当前稍后提醒 '+plan['snoozed_at'].replace('T', ' '))
+    if plan.get('past'):
+        fields.append('已到或已过提醒时刻')
+        fields.append('符合当前补发条件' if plan.get('catchup_eligible') else '当前不符合补发条件')
+    if plan['schedule_status'] == 'pending' and (mode != 'disabled' or plan.get('global_enabled') is not False):
+        fields.append('规则已保存，等待调度重算')
+    return ' · '.join(fields)
 
 
 def wechat_delete_review(operation):

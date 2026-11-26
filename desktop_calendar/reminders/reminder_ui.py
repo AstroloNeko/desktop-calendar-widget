@@ -13,6 +13,7 @@ from tkinter import ttk
 from calendar_core import Event, normalize_reminder_time
 from notification_backend import WindowsNotificationBackend
 from desktop_calendar.reminders.reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
+from desktop_calendar.reminders.reminder_rules import MAX_DAYS
 from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.reminders.qq_reminders import QQReminderBackend
 from desktop_calendar.reminders.notification_model import BRIEF_GROUP_LABELS, Notice, brief_items, brief_settings
@@ -360,6 +361,7 @@ class NativeReminderMixin:
 
 class ReminderSettingsDialog(tk.Toplevel):
     MODES = {"使用默认提醒设置": "default", "不提醒": "off", "自定义日期提醒": "custom"}
+    PRESERVE_RULE = "保留 Agent 设置的提醒"
 
     def __init__(self, app):
         super().__init__(app)
@@ -567,7 +569,7 @@ class ReminderSettingsDialog(tk.Toplevel):
         self.mode_field = self._field(body, "提醒规则", self.rule_mode, tuple(self.MODES), stretch=True, label_width=12)
         self.mode_field.bind("<<ComboboxSelected>>", lambda _e: self.update_custom())
         self.custom = tk.Frame(body, bg=body.cget("bg"))
-        self._field(self.custom, "提前天数", self.rule_days, leads, label_width=12)
+        self._field(self.custom, "提前天数", self.rule_days, tuple(f"{day} 天" for day in range(MAX_DAYS + 1)), label_width=12)
         self._field(self.custom, "提醒时间", self.rule_clock, label_width=12)
         self.rule_hint = self._note(body, "请先选择事项。")
 
@@ -739,18 +741,30 @@ class ReminderSettingsDialog(tk.Toplevel):
 
     def update_custom(self):
         self.mode_field.configure(state="readonly" if self.current_id else "disabled")
-        if self.current_id and self.MODES[self.rule_mode.get()] == "custom":
+        if self.current_id and self.MODES.get(self.rule_mode.get()) == "custom":
             self.custom.pack(fill="x", before=self.rule_hint)
         else:
             self.custom.pack_forget()
-        self.rule_hint.configure(text="规则只影响提醒时间。" if self.current_id else "请先选择事项。")
+        hint = "规则只影响提醒时间。" if self.current_id else "请先选择事项。"
+        if self.rule_mode.get() == self.PRESERVE_RULE:
+            rule = self.rules.get(self.current_id, {})
+            if rule.get("mode") == "absolute":
+                hint = "固定提醒时间：" + rule["at"].replace("T", " ")
+            elif "minutes" in rule:
+                hint = f"提前 {rule['minutes']} 分钟"
+            else:
+                hint = f"提前 {rule['days']} 天 · {rule.get('time') or '默认提醒时间'}"
+        self.rule_hint.configure(text=hint)
 
     def store_rule(self):
         if not self.current_id:
             return
+        if self.rule_mode.get() == self.PRESERVE_RULE:
+            return
         mode = self.MODES[self.rule_mode.get()]
         if mode == "default":
-            self.rules.pop(self.current_id, None)
+            if self.current_id in self.rules:
+                self.rules[self.current_id] = {"mode": "default"}
         elif mode == "off":
             self.rules[self.current_id] = {"mode": "off"}
         else:
@@ -769,7 +783,12 @@ class ReminderSettingsDialog(tk.Toplevel):
             return
         self.current_id = self.event_labels.get(self.event_choice.get())
         rule = self.rules.get(self.current_id, {})
-        self.rule_mode.set(next(label for label, mode in self.MODES.items() if mode == rule.get("mode", "default")))
+        choices = tuple(self.MODES)
+        mode = rule.get("mode", "default")
+        if mode in ("relative", "absolute"):
+            choices += (self.PRESERVE_RULE,)
+        self.mode_field.configure(values=choices)
+        self.rule_mode.set(next((label for label, value in self.MODES.items() if value == mode), self.PRESERVE_RULE))
         self.rule_clock.set(rule.get("time", self.clock.get()))
         self.rule_days.set(f"{rule.get('days', 0)} 天")
         self.update_custom()

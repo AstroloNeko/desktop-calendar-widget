@@ -39,6 +39,28 @@ class DeliveryQueue:
     def binding(self):
         return self.qq.binding() if self.qq is not None else None
 
+    def qq_eligible(self, plan, state, now):
+        binding = self.binding()
+        cutover = state["qq_cutover"]
+        return bool(binding and cutover.get("scope") == binding.scope
+                    and plan.when >= read_time(cutover.get("at"), now))
+
+    def cancel_stale_events(self, event_ids):
+        """Fail closed for affected queued attempts if a rebuild could not finish."""
+        ids = set(event_ids)
+        for tag, (notice, members, _) in list(self.current_notices.items()):
+            if any(identifier in ids for identifier, _ in members):
+                if any(identifier not in ids for identifier, _ in members):
+                    self.replace_on_cancel.add((notice.key, "windows", notice.attempt))
+                self.engine.backend.remove(tag)
+                del self.current_notices[tag]
+        for task, (members, _, _) in list(self.qq_notices.items()):
+            if any(identifier in ids for identifier, _ in members):
+                if any(identifier not in ids for identifier, _ in members):
+                    self.replace_on_cancel.add((task[0], "qq", task[1]))
+                self.qq.cancel(*task)
+                del self.qq_notices[task]
+
     def tick(self, now):
         e = self.engine
         config = e.config()

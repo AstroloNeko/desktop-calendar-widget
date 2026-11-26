@@ -29,6 +29,7 @@ def requested_fields(message, creating=False):
         'time': r'时间|几点|(?:\d{1,2}|[零〇一二三四五六七八九十两]+)[点时]|\d{1,2}[:：]\d{2}|全天|无具体时间|time',
         'event_type': r'ddl|截止|紧急|一般|普通事项|urgent|general|事项性质',
         'reminder': r'提醒|提前.{0,8}(?:分钟|小时)|remind',
+        'reminder_rule': r'提醒|提前.{0,8}(?:分钟|小时|天)|remind',
         'duration_days': r'持续|连续|为期|天数|(?:\d+|[一二三四五六七八九十]+)(?:个)?(?:工作日|天)|duration',
         'skip_non_working_days': r'跳过|避开|仅工作日|只.{0,3}工作日|不含周末|skip',
         'end_as_ddl': r'最后一天|末日|最后.{0,3}(?:截止|ddl)|end.as.ddl',

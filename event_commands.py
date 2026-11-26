@@ -8,6 +8,9 @@ from typing import Any, Optional
 import json
 
 from calendar_core import Event, Store, RoutineItem
+from desktop_calendar.reminders.reminder_rules import stored_event_rule
+
+KEEP_REMINDER_RULE = object()
 
 
 class CommandConflictError(ValueError):
@@ -35,9 +38,17 @@ class EventState:
     fields: Optional[tuple[tuple[str, Any], ...]]
     index: Optional[int]
     notification_keys: frozenset[str]
+    reminder_rule: Optional[str] = None
 
     def event(self) -> Optional[Event]:
         return Event(**dict(self.fields)) if self.fields is not None else None
+
+
+    def rule(self):
+        return json.loads(self.reminder_rule) if self.reminder_rule is not None else None
+
+    def same_goal(self, other):
+        return self.fields == other.fields and self.reminder_rule == other.reminder_rule
 
 
 @dataclass(frozen=True)
@@ -194,24 +205,31 @@ class EventCommandHistory:
             raise CommandConflictError("存在重复事项 ID，已取消修改。")
         index, event = matches[0] if matches else (None, None)
         keys = frozenset(key for key in self.store.notified if key.startswith(event_id + ":"))
-        return EventState(tuple(asdict(event).items()) if event else None, index, keys)
+        rule = stored_event_rule(self.store.settings, event_id)
+        return EventState(tuple(asdict(event).items()) if event else None, index, keys,
+                          json.dumps(rule, sort_keys=True) if rule is not None else None)
 
     def _dates(self, state: EventState) -> tuple[date, ...]:
         event = state.event()
         return self.store.event_dates(event) if event is not None else ()
 
-    def preview_upsert(self, event: Event, *, label: Optional[str] = None) -> EventPreview:
+    def preview_upsert(self, event: Event, *, label: Optional[str] = None,
+                       reminder_rule=KEEP_REMINDER_RULE) -> EventPreview:
         candidate = self.store.prepare_event(event)
         before = self._capture(candidate.id)
         previous = before.event()
-        schedule_fields = ("due", "reminder", "has_time", "duration_days", "skip_non_working_days", "end_as_ddl")
-        reset = previous is None or any(getattr(previous, key) != getattr(candidate, key) for key in schedule_fields)
+        rule = before.reminder_rule if reminder_rule is KEEP_REMINDER_RULE else (
+            json.dumps(reminder_rule, sort_keys=True) if reminder_rule is not None else None)
+        schedule_fields = ("due", "reminder", "has_time", "duration_days", "skip_non_working_days", "end_as_ddl", "event_type")
+        reset = (previous is None or before.reminder_rule != rule or
+                 any(getattr(previous, key) != getattr(candidate, key) for key in schedule_fields))
         if previous is not None and reset:
             candidate.snooze_until = None
         after = EventState(
             tuple(asdict(candidate).items()),
             before.index if before.index is not None else len(self.store.events),
             frozenset() if reset else before.notification_keys,
+            rule,
         )
         dates = self._dates(after)
         return EventPreview(
@@ -260,7 +278,7 @@ class EventCommandHistory:
         candidate = preview.event()
         if candidate is not None and asdict(self.store.prepare_event(candidate)) != asdict(candidate):
             raise CommandConflictError("事项分类已变化，请重新预览后再提交。")
-        if preview.before.fields == preview.after.fields:
+        if preview.before.same_goal(preview.after):
             return None
         change = self._apply(preview, forward=True, operation_id=operation_id)
         # Capture the successfully persisted state (including notification pruning).
@@ -333,7 +351,7 @@ class EventCommandHistory:
             candidate = entry.event()
             if candidate is not None and asdict(self.store.prepare_event(candidate)) != asdict(candidate):
                 raise CommandConflictError("事项分类已变化，请重新操作。")
-        entries = tuple(entry for entry in batch.entries if entry.before.fields != entry.after.fields)
+        entries = tuple(entry for entry in batch.entries if not entry.before.same_goal(entry.after))
         if not entries:
             return None
         command = BatchPreview(entries, batch.label)
@@ -354,7 +372,7 @@ class EventCommandHistory:
             return self._apply_batch(command, forward=forward, operation_id=operation_id)
         source, target = (command.before, command.after) if forward else (command.after, command.before)
         live = self._capture(command.event_id)
-        if live.fields != source.fields:
+        if not live.same_goal(source):
             raise CommandConflictError("事项已在历史记录之外发生变化，已取消撤销或重做。")
         event = target.event()
         if event is not None and self.store.prepare_event(event).category_id != event.category_id:
@@ -367,17 +385,19 @@ class EventCommandHistory:
         ) | (target.notification_keys - source.notification_keys)
         if event is None:
             keys = frozenset()
-        self.store.persist_event_state(
-            command.event_id, event, index=target.index, notification_keys=keys, operation_id=operation_id,
-        )
+        rules = {command.event_id: target.rule()} if source.reminder_rule != target.reminder_rule else {}
+        options = {"reminder_rules": rules} if rules else {}
+        self.store.persist_event_state(command.event_id, event, index=target.index, notification_keys=keys,
+                                       operation_id=operation_id, **options)
         return EventChange(command.event_id, command.label, source, self._capture(command.event_id), before_dates, after_dates)
 
     def _apply_batch(self, command: BatchPreview, *, forward: bool, operation_id=None) -> BatchChange:
         prepared = []
+        rules = {}
         for entry in command.entries:
             source, target = (entry.before, entry.after) if forward else (entry.after, entry.before)
             live = self._capture(entry.event_id)
-            if live.fields != source.fields:
+            if not live.same_goal(source):
                 raise CommandConflictError("某个事项已在历史之外修改，整批操作已取消。")
             event = target.event()
             if event is not None and self.store.prepare_event(event).category_id != event.category_id:
@@ -385,8 +405,12 @@ class EventCommandHistory:
             before_dates, after_dates = self._dates(source), self._dates(target)
             keys = (live.notification_keys - (source.notification_keys - target.notification_keys)) | (target.notification_keys - source.notification_keys)
             prepared.append((entry, source, target, event, keys if event is not None else frozenset(), before_dates, after_dates))
+            if source.reminder_rule != target.reminder_rule:
+                rules[entry.event_id] = target.rule()
+        options = {"reminder_rules": rules} if rules else {}
         self.store.persist_event_states([(entry.event_id, event, target.index, keys)
-                                         for entry, _source, target, event, keys, _before, _after in prepared], operation_id=operation_id)
+                                         for entry, _source, target, event, keys, _before, _after in prepared],
+                                        operation_id=operation_id, **options)
         return BatchChange(tuple(EventChange(entry.event_id, command.label, source,
                                              self._capture(entry.event_id), before, after)
                                  for entry, source, _target, _event, _keys, before, after in prepared), command.label)

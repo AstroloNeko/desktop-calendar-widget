@@ -1,22 +1,27 @@
 """Sole AI calendar boundary. All Store access runs through the supplied dispatcher."""
 from dataclasses import asdict, replace
 from contextvars import copy_context
-from datetime import date
+from datetime import date, datetime
+import re
 from tk_dispatcher import TkDispatcher  # Compatibility export; implementation is desktop-only.
 
 from calendar_core import Event, COLORS
 from event_input import build_event_candidate, EventInputError
-from event_commands import BatchPreview, CommandConflictError
+from event_commands import BatchPreview, CommandConflictError, KEEP_REMINDER_RULE
 from calendar_event_service import CalendarEventService, OperationContext
 from event_search import EventSearchIndex, capture_search_store
 from desktop_calendar.assistant.calendar_chat_protocol import fail, fingerprint as fingerprint, require_calendar_write
 from desktop_calendar.assistant.calendar_chat_tools import iso_day, reference_today, validate_call
 from desktop_calendar.assistant.calendar_habit_gateway import prepare_habit
 from desktop_calendar.assistant.operation_engine import deletion_outcome, execute as execute_plan, recovered
+from desktop_calendar.reminders.reminder_engine import CONFIG_KEY, describe_event_reminder, normalize_config
+from desktop_calendar.reminders.reminder_rules import MAX_MINUTES, effective_mode, normalize_event_rule, stored_event_rule
 
 
 class CalendarActionGateway:
-    def __init__(self, store, commands, dispatch=lambda fn: fn(), refresh=lambda change: None, writable=lambda: True, habit_refresh=lambda: None):
+    def __init__(self, store, commands, dispatch=lambda fn: fn(), refresh=lambda change: None, writable=lambda: True,
+                 habit_refresh=lambda: None, *, reminders=None, reminder_now=datetime.now):
+        self.reminders, self.reminder_now = reminders, reminder_now
         self.store, self.commands, self._dispatch, self.refresh, self.writable = store, commands, dispatch, refresh, writable
         self.habit_refresh = habit_refresh
         self.repository = store.repository
@@ -44,14 +49,20 @@ class CalendarActionGateway:
 
     def delete_candidates(self, args, titles):
         """A bounded interval, optionally restricted to a union of exact titles."""
-        start,end=iso_day(args['start']),iso_day(args['end'])
-        if end<start or (end-start).days>366:
-            fail('删除查询范围应为0至366天。','clarification_required')
+        return self.target_candidates(args, titles)
+
+    def target_candidates(self, args, titles, *, exact_title_without_date=False):
+        if exact_title_without_date and titles and 'start' not in args and 'end' not in args:
+            start = end = None
+        else:
+            start,end=iso_day(args['start']),iso_day(args['end'])
+            if end<start or (end-start).days>366:
+                fail('目标查询范围应为0至366天。','clarification_required')
         def read():
             found=[self._detail(e) for e in self.repository.list_events() if (titles is None or e.title.strip() in titles)
                 and ('done' not in args or e.done==args['done'])
                 and ('category_id' not in args or e.category_id==args['category_id'])
-                and any(start<=d<=end for d in self.store.event_dates(e))]
+                and (start is None or any(start<=d<=end for d in self.store.event_dates(e)))]
             found.sort(key=lambda e:(e['date'],e['id']))
             return dict(events=found[:30],total=len(found),truncated=len(found)>30)
         return self.dispatch(read)
@@ -128,16 +139,46 @@ class CalendarActionGateway:
             event = self.store.event_by_id(identifier)
             if event is None:
                 fail('事项已不存在。', 'event_not_found')
-            return self._detail(event)
+            return self.reminder_detail(event)
         return self.dispatch(read)
 
     def _state(self, identifier):
         event = self.store.event_by_id(identifier)
         if event is None:
             return None
-        return {'event': asdict(event), 'dates': [day.isoformat() for day in self.store.event_dates(event)],
+        state = {'event': asdict(event), 'dates': [day.isoformat() for day in self.store.event_dates(event)],
                 'category': asdict(self.store.category_by_id(event.category_id)) if event.category_id else None,
                 'notifications': sorted(key for key in self.store.notified if key.startswith(identifier+':'))}
+        rule = stored_event_rule(self.store.settings, identifier)
+        if rule is not None:
+            state['reminder_rule'] = rule
+        return state
+
+    def reminder_detail(self, event, rule=KEEP_REMINDER_RULE, *, preview=False):
+        detail = self._detail(event)
+        if rule is KEEP_REMINDER_RULE:
+            rule = stored_event_rule(self.store.settings, event.id)
+        if rule is not None or self.reminders is not None:
+            try:
+                config = normalize_config(self.store.settings.get(CONFIG_KEY))
+                detail['reminder_plan'] = describe_event_reminder(
+                    self.store, event, config, rule, self.reminder_now(), engine=self.reminders, preview=preview)
+            except (ValueError, OSError, OverflowError, KeyError, TypeError, RuntimeError):
+                normalized = normalize_event_rule(rule)
+                detail['reminder_plan'] = dict(mode=effective_mode(event, normalized), rule=normalized or {},
+                                              schedule_status='preview' if preview else 'pending')
+        return detail
+
+    def replan_after_commit(self, identifiers):
+        return self.reminders.replan(identifiers) if self.reminders is not None else False
+
+    @staticmethod
+    def same_reminder_forecast(before, after):
+        before, after = before.get('reminder_plan'), after.get('reminder_plan')
+        if before is None:  # Older journal previews did not carry a forecast.
+            return True
+        keys = ('mode', 'planned_at', 'global_enabled')
+        return after is not None and all(before.get(key) == after.get(key) for key in keys)
 
     def event_revisions(self, identifiers):
         return self.dispatch(lambda: {identifier: fingerprint(self._state(identifier)) for identifier in identifiers})
@@ -164,6 +205,8 @@ class CalendarActionGateway:
                 change = self.commands.undo(expected_operation=expected, operation_id=operation_id)
             except CommandConflictError as error:
                 fail(str(error), 'operation_conflict')
+            members = getattr(change, 'changes', (change,))
+            self.replan_after_commit(member.event_id for member in members)
             try:
                 self.refresh(change)
             except Exception:
@@ -199,16 +242,21 @@ class CalendarActionGateway:
                         requested_fields=[], changed_fields=['deleted'], description='删除事项')
         candidate = Event(**previous['after']) if previous else replace(current) if current else replace(
             self.store.make_quick_event(args['title'], iso_day(args['date'])), id=identifier)
+        rule = previous.get('reminder_rule', KEEP_REMINDER_RULE) if previous else KEEP_REMINDER_RULE
+        patch = {}
         if name == 'preview_complete':
             candidate.done = args['done']
         else:
             patch = args if name == 'preview_create' else args['changes']
-            candidate = self._patch(candidate, patch, creating=current is None)
-        preview = self.events.preview_upsert(candidate, label='AI新建事项' if current is None else 'AI修改事项')
+            candidate, rule = self.prepare_candidate(candidate, patch, creating=current is None, previous_rule=rule)
+        preview = self.events.preview_upsert(candidate, label='AI新建事项' if current is None else 'AI修改事项',
+                                           reminder_rule=rule)
+        after = self.reminder_detail(preview.event(), preview.after.rule(), preview=True)
         return dict(event_id=identifier, before_hash=fingerprint(before),
                     before=asdict(current) if current else None, after=asdict(preview.event()),
+                    reminder_rule=preview.after.rule(), reminder_before=preview.before.rule(),
                     action='create' if current is None else 'complete' if name == 'preview_complete' else 'update',
-                    before_summary=self._detail(current) if current else None, after_summary=self._detail(preview.event()),
+                    before_summary=self.reminder_detail(current, preview=True) if current else None, after_summary=after,
                     dates=[day.isoformat() for day in preview.effective_dates],
                     deadline=preview.deadline.isoformat() if preview.deadline else None,
                     requested_fields=sorted((set(previous.get('requested_fields', [])) if previous else set()) |
@@ -217,15 +265,64 @@ class CalendarActionGateway:
                                     if current is None or asdict(current).get(key) != value],
                     description='新建事项' if current is None else '修改事项')
 
-    def _patch(self, candidate, values, *, creating=False):
+    def prepare_candidate(self, current, fields, *, creating=False, identifier=None, previous_rule=KEEP_REMINDER_RULE):
+        values = dict(fields)
+        request = values.pop('reminder_rule', KEEP_REMINDER_RULE)
+        if request is not KEEP_REMINDER_RULE and 'reminder' in values:
+            fail('请只指定一种提醒规则。')
+        candidate = self._patch(current, values, creating=creating, identifier=identifier)
+        rule = previous_rule
+        if rule is KEEP_REMINDER_RULE:
+            prior = stored_event_rule(self.store.settings, candidate.id)
+        else:
+            prior = rule
+        if request is KEEP_REMINDER_RULE:
+            if 'reminder' in values:
+                if candidate.reminder is None:
+                    rule = {"mode":"off"} if prior or not candidate.has_time else None
+                else:
+                    rule = None  # Explicit legacy minutes replace any override.
+            return candidate, rule
+        mode = request["mode"]
+        if mode in ("default", "disabled") and set(request) != {"mode"}:
+            fail('默认和关闭模式不需要提醒时间或提前量。')
+        if mode == "relative":
+            if set(request) not in ({"mode","minutes"}, {"mode","days"}, {"mode","days","time"}):
+                fail('请指定提前分钟数或提前天数。')
+            if "minutes" in request and not candidate.has_time:
+                fail('事项没有开始或截止时刻。请指定提醒钟点，或使用按天提前。','clarification_required','reminder_rule')
+        if mode == "absolute":
+            prior = normalize_event_rule(prior)
+            if set(request) == {"mode", "time"} and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d",request["time"]):
+                forecast = self.reminder_detail(candidate, prior, preview=True).get('reminder_plan', {})
+                if at := forecast.get("planned_at"):
+                    day = at[:10]
+                else:
+                    ddl = self.store.event_has_deadline(candidate)
+                    day = (self.store.event_end_date(candidate) if ddl else self.store.event_start_date(candidate)).isoformat()
+                request = {"mode":"absolute", "at":day+"T"+request["time"]}
+            if set(request) != {"mode", "at"}:
+                fail('请提供明确的本地提醒日期和钟点。','clarification_required','reminder_rule')
+        rule = normalize_event_rule(request)
+        if rule is None:
+            fail('提醒规则超出有效范围。','invalid_arguments','reminder_rule')
+        # Equivalent timed leads keep their legacy duration and notification key.
+        minutes = rule.get("minutes")
+        if mode == "relative" and candidate.has_time and "days" in rule and "time" not in rule:
+            lead = rule["days"] * 1440
+            minutes = lead if lead <= MAX_MINUTES else None
+        candidate.reminder = minutes
+        return candidate, rule
+
+    def _patch(self, candidate, values, *, creating=False, identifier=None):
         values = dict(values)
         values.pop('category_basis', None)
         # Keep the existing AI-specific tolerance for an invented create default.
         # The shared validator itself never accepts category-less inheritance.
-        if creating and values.get('color_mode') == 'inherit' and not values.get('category_id', candidate.category_id):
+        if creating and values.get('color_mode') == 'inherit' and not values.get('category_id', candidate.category_id if candidate else None):
             values.pop('color_mode')
         try:
-            return build_event_candidate(values, current=candidate, context=self.store, creating=creating)
+            return build_event_candidate(values, current=candidate, identifier=identifier, context=self.store, creating=creating)
         except EventInputError as error:
             field = 'changes.color_mode' if error.field == 'color_mode' and error.clarification else error.field
             fail(str(error), 'clarification_required' if error.clarification else 'invalid_arguments', field)
@@ -242,9 +339,11 @@ class CalendarActionGateway:
             hashes = [fingerprint(self._state(i)) for i in preview['event_ids']]
             if hashes != preview['before_hashes']:
                 fail('批量目标已变化，请重新预览。', 'operation_conflict')
-            entries = tuple(self.events.preview_upsert(Event(**item)) for item in preview['after'])
-            summaries = [self._detail(entry.event()) for entry in entries]
-            if summaries != preview['summaries']:
+            entries = self.resume_entries(preview['after'], preview.get('reminder_rules'))
+            summaries = [self.reminder_detail(entry.event(), entry.after.rule(), preview=True) for entry in entries]
+            if any(self._detail(entry.event()) != {k:v for k,v in old.items() if k != 'reminder_plan'}
+                   or not self.same_reminder_forecast(old, new)
+                   for entry, old, new in zip(entries, preview['summaries'], summaries, strict=True)):
                 fail('事项或日期规则已变化，请重新预览。', 'operation_conflict')
             outcome = execute_plan(self, journal, 'operation', operation, owner,
                               BatchPreview(entries, preview['description']), preview['after'],
@@ -281,9 +380,13 @@ class CalendarActionGateway:
         deleting = preview['after'] is None
         if not deleting:
             candidate = Event(**preview['after'])
-            command = self.events.preview_upsert(candidate, label='AI确认事项操作')
+            command = self.events.preview_upsert(candidate, label='AI确认事项操作',
+                                                  reminder_rule=preview.get('reminder_rule', KEEP_REMINDER_RULE))
             if asdict(command.event()) != preview['after'] or [d.isoformat() for d in command.effective_dates] != preview['dates']:
                 fail('分类或工作日日历已变化，请重新预览。', 'operation_conflict')
+            if not self.same_reminder_forecast(preview['after_summary'],
+                                               self.reminder_detail(command.event(), command.after.rule(), preview=True)):
+                fail('实际提醒规则已变化，请重新预览。', 'operation_conflict')
             outcome = execute_plan(self, journal, 'operation', operation, owner, command,
                               [preview['after']], [preview['after_summary']['color']])
             if outcome.changed:
@@ -294,6 +397,12 @@ class CalendarActionGateway:
         if outcome and outcome.change is not None:
             self.refresh(outcome.change)
         return operation['operation_result']
+
+    def resume_entries(self, snapshots, rules):
+        if rules is None:
+            rules = [KEEP_REMINDER_RULE] * len(snapshots)
+        return tuple(self.events.preview_upsert(Event(**snapshot), reminder_rule=rule)
+                     for snapshot, rule in zip(snapshots, rules, strict=True))
 
     def recover(self, operation):
         def check():

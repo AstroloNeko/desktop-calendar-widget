@@ -47,8 +47,14 @@ def rule_label(event, plan, config, snoozed):
     rule = config["events"].get(event.id, {})
     if rule.get("mode") == "custom":
         text = f"单事项规则 · 提前 {rule['days']} 天 · {rule['time']}"
-    elif event.has_time:
-        text = f"事项编辑器 · 提前 {event.reminder} 分钟"
+    elif rule.get("mode") == "absolute":
+        text = f"固定提醒 · {rule['at'].replace('T', ' ')}"
+    elif rule.get("mode") == "relative" and "days" in rule:
+        text = f"单事项规则 · 提前 {rule['days']} 天 · {plan.when:%H:%M}"
+    elif rule.get("mode") == "relative" or event.has_time and rule.get("mode") != "default":
+        minutes = rule.get("minutes", event.reminder)
+        source = "单事项规则" if rule else "事项编辑器"
+        text = f"{source} · 提前 {minutes} 分钟"
     else:
         days = config["ddl_days" if plan.ddl else "general_days"]
         text = f"默认规则 · 提前 {days} 天 · {config['time']}"

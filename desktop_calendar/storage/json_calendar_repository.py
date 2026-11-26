@@ -79,7 +79,7 @@ class JsonCalendarRepository:
         except FileNotFoundError:
             return None
 
-    def apply_changes(self, changes, *, expected_revision=None):
+    def apply_changes(self, changes, *, expected_revision=None, preference_updates=None):
         from calendar_core import MutationUncertainError
         store = self.legacy_store
         if store.load_error:
@@ -87,6 +87,8 @@ class JsonCalendarRepository:
         if expected_revision is not None and expected_revision != self.revision():
             raise RepositoryConflictError('快照已变化，请重新读取后提交。')
         candidates = self._prepare_changes(changes)
+        if preference_updates:
+            candidates['settings'] = {**store.settings, **deepcopy(preference_updates)}
         if all(getattr(store,key) == value for key,value in candidates.items()):
             return RepositoryCommit(False,self.revision())
         original_digest = self._disk_digest()

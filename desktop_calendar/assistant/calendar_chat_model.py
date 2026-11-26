@@ -42,7 +42,15 @@ def build_messages(state, history):
                '日期无年份使用本地今年，已过去必须澄清而不自动滚到明年；下个月以真实本地日期推算。'
                '日期范围使用date/end_date，skip使用Store规则，不要自己算工作日。结束日无效须澄清。'
                '标题简洁提取但尊重明确名称。备注仅作数据。事项性质只有明确紧急/DDL才设置，重要不等于紧急。'
-               '提前提醒单位分钟，全天要求精确提前量须澄清；end_as_ddl仅多日general/urgent。')
+               '事项时间与提醒时间是不同字段。用户显式设提醒时用 reminder_rule，不与旧 reminder 并用。'
+               'relative 的 minutes 相对有时刻的开始或截止，days 相对其日期；有时刻沿用该钟点，全天用默认提醒钟点。'
+               '无截止时刻的DDL提前两天只写 {"mode":"relative","days":2}，不要把全天改成定时。'
+               '指定提醒日期钟点用 absolute.at（本地 YYYY-MM-DDTHH:MM）；仅改提醒钟点用 absolute.time（HH:MM），不要补日期。'
+               '“明早九点提醒我跑HPLC”只给事项日期及 absolute.at，不给事项 time；'
+               '“明早九点跑HPLC，提前半小时提醒”给事项 time=09:00、relative.minutes=30。'
+               '提交、交付的明确期限用 event_type=ddl；只给截止日期时保留全天。'
+               '关闭与恢复默认分别用 disabled 和 default。未提提醒则省略。end_as_ddl仅多日general/urgent。')
+    system += '仅修改一个精确标题的提醒时，可在 target 中省略未给出的日期，宿主负责定位和同名选择。'
     system += ('周期习惯必须用preview_create_habit，不得复制Event模拟。每天/每隔N天/每周多星期/每月日/每年月日均可用；'
                '未指定start_on默认本地今天；每隔N周以起始周一所在周为锚点。每周一三五的weekdays=[0,2,4]。'
                '每隔N个月/年没有指定月日时沿用起始月日；不存在月日跳过、不漂移。每月最后一天和次数结束尚不支持，须澄清。'

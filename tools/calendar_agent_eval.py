@@ -41,7 +41,7 @@ INFRA_CODES = {'model_unavailable', 'planning_timeout', 'tool_unavailable',
 EVENT_FIELDS = {'id', 'title', 'date', 'end', 'time', 'event_type', 'category_id', 'category',
                 'done', 'reminder', 'deadline', 'duration_days', 'skip_non_working_days',
                 'end_as_ddl', 'color', 'color_mode', 'color_override', 'notes',
-                'due', 'has_time', 'created_at', 'snooze_until'}
+                'due', 'has_time', 'created_at', 'snooze_until', 'reminder_plan'}
 
 
 def require(condition, message):
@@ -79,6 +79,14 @@ def validate_cases(cases):
             require(CASE_ID.fullmatch(identifier) and identifier not in seed_ids, f'{case_id}: invalid seed ID')
             seed_ids.add(identifier)
             validate_call('preview_create', {key: value for key, value in seed.items() if key != 'id'})
+        if 'reminder_config' in case:
+            from desktop_calendar.reminders.reminder_engine import normalize_config
+            config = case['reminder_config']
+            require(isinstance(config, dict) and set(config) <= {'enabled','time','events'}
+                    and type(config.get('enabled')) is bool, f'{case_id}: invalid isolated reminder config')
+            normalized = normalize_config(config)
+            require(set(normalized['events']) == set(config.get('events', {})) <= seed_ids,
+                    f'{case_id}: invalid seeded reminder rules')
         turns = case['turns']
         checks = case['expected_interaction']
         require(isinstance(turns, list) and isinstance(checks, list)
@@ -320,17 +328,35 @@ def redact(value, secrets=()):
     return value
 
 
-def read_calendar(path, root):
+class IsolatedReminderBackend:
+    """Preflight may cancel stale work, but evaluation never submits notifications."""
+    def remove(self, _tag):
+        pass
+
+    def send(self, *_args, **_kwargs):
+        raise AssertionError('evaluation must not send notifications')
+
+
+def read_calendar(path, root, *, reminder_moment=None):
     """Reopen the persisted SQLite state and apply the normal effective-date/color view."""
     path = checked_path(path, root)
     require(path.is_file(), 'isolated SQLite file is missing')
     store = Store(path, repository_factory=SqliteCalendarRepository)
     try:
         require(not store.load_error, 'isolated SQLite read failed')
-        gateway = CalendarActionGateway(store, EventCommandHistory(store))
+        reminders = None
+        if reminder_moment is not None:
+            from desktop_calendar.reminders.reminder_engine import ReminderEngine
+            reminders = ReminderEngine(store, IsolatedReminderBackend())
+        gateway = CalendarActionGateway(store, EventCommandHistory(store), reminders=reminders,
+            **({'reminder_now':lambda: reminder_moment.replace(tzinfo=None)} if reminders is not None else {}))
         summaries = {event.id: gateway.detail(event.id) for event in store.events}
         raw = store.repository.read_document()
         raw['events'] = {row['id']: {**row, **summaries[row['id']]} for row in raw['events']}
+        if reminders is not None:
+            rules = raw['settings']['native_reminders'].get('events', {})
+            # Live rules are compared under their Event; retain orphaned changes separately.
+            raw['settings']['native_reminders']['events'] = {k:v for k,v in rules.items() if k not in raw['events']}
         with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as connection:
             raw['receipts'] = {identifier: dict(revision=revision, affected_ids=json.loads(affected))
                                for identifier, revision, affected in connection.execute(
@@ -345,8 +371,8 @@ def calendar_delta(before, after):
     return dict(
         created=[new[key] for key in sorted(new.keys()-old.keys())],
         deleted=sorted(old.keys()-new.keys()),
-        updated={key: {field: {'before': old[key][field], 'after': value}
-                       for field, value in new[key].items() if value != old[key][field]}
+        updated={key: {field: {'before': old[key].get(field), 'after': value}
+                       for field, value in new[key].items() if value != old[key].get(field)}
                  for key in sorted(old.keys() & new.keys()) if old[key] != new[key]},
         other_changes=sorted(key for key in before if key not in {'events', 'receipts'} and before[key] != after[key]),
         receipts={key: after['receipts'][key] for key in sorted(after['receipts'].keys()-before['receipts'].keys())})
@@ -495,6 +521,8 @@ def judge(case, turns, final_delta, infrastructure=None, blocked=False):
     if final_delta is not None:
         for key, fields in expected['update'].items():
             allowed = set(fields)
+            if 'reminder_plan' in allowed:
+                allowed.add('snooze_until')
             if 'date' in allowed:
                 allowed.update({'due','end','deadline'})
             if 'time' in allowed:
@@ -546,13 +574,14 @@ def judge(case, turns, final_delta, infrastructure=None, blocked=False):
 
 class EvaluationCalendar:
     """Owns only the paths created from a per-attempt temporary directory."""
-    def __init__(self, root, provider, moment):
+    def __init__(self, root, provider, moment, reminder_config=None):
         self.root = Path(root)
         self.path = checked_path(self.root/'calendar.sqlite3', self.root)
         self.journal_path = checked_path(self.root/'journal.sqlite3', self.root)
         require(not (self.path.exists() or self.journal_path.exists()), 'evaluation requires fresh databases')
         self.provider = provider
         self.moment = moment
+        self.reminder_config = reminder_config
         self.runtime = None
 
     def start(self):
@@ -560,7 +589,8 @@ class EvaluationCalendar:
         journal = ChatJournal(checked_path(self.journal_path, self.root), SyntheticProtection())
         self.runtime = HeadlessRuntime(checked_path(self.path, self.root), provider=self.provider,
                                        journal=journal, protector=SyntheticProtection(),
-                                       clock=self.moment.timestamp, repository_factory=SqliteCalendarRepository)
+                                       clock=self.moment.timestamp, repository_factory=SqliteCalendarRepository,
+                                       notification_backend=IsolatedReminderBackend() if self.reminder_config is not None else None)
 
     def stop(self):
         if self.runtime is not None:
@@ -578,9 +608,12 @@ class EvaluationCalendar:
                 values, identifier=row['id'], context=self.runtime._store))
             result = self.runtime.events.upsert(event)
             require(result.changed, 'fixture Event failed to persist')
+        if self.reminder_config is not None:
+            self.runtime._call(lambda: self.runtime._reminders.configure(self.reminder_config))
 
     def read(self):
-        return read_calendar(self.path, self.root)
+        return read_calendar(self.path, self.root,
+                             reminder_moment=self.moment if self.reminder_config is not None else None)
 
 
 def run_turn(calendar, session, turn, index, previous, references, provider):
@@ -627,7 +660,7 @@ def run_case(case, provider, budget, attempt=1, *, secrets=()):
     try:
         validate_cases([case])
         with fixed_time(reference_time(case)), TemporaryDirectory(prefix='calendar-agent-eval-') as temporary:
-            calendar = EvaluationCalendar(temporary, recorder, reference_time(case))
+            calendar = EvaluationCalendar(temporary, recorder, reference_time(case), case.get('reminder_config'))
             try:
                 calendar.start()
                 calendar.seed(case['initial_calendar'])

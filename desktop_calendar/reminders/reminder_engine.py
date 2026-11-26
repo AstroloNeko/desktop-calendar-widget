@@ -16,8 +16,10 @@ from urllib.parse import parse_qs, urlencode
 
 from calendar_core import normalize_reminder_time
 from desktop_calendar.reminders.notification_model import brief_settings
+from desktop_calendar.reminders.reminder_rules import (
+    CONFIG_KEY as CONFIG_KEY, MAX_MINUTES, effective_mode, normalize_event_rule,
+)
 
-CONFIG_KEY = "native_reminders"
 STATE_KEY = "native_reminder_state"
 LEADS = (0, 1, 3)
 SNOOZES = (10, 30, 60)
@@ -49,15 +51,8 @@ def normalize_config(raw):
     rules = raw.get("events", {})
     if isinstance(rules, dict):
         for identifier, rule in rules.items():
-            if not isinstance(identifier, str) or not isinstance(rule, dict):
-                continue
-            mode = rule.get("mode")
-            if mode == "off":
-                result["events"][identifier] = {"mode": "off"}
-            elif mode == "custom":
-                days, clock = rule.get("days"), normalize_reminder_time(rule.get("time"))
-                if type(days) is int and days in LEADS and clock:
-                    result["events"][identifier] = {"mode": "custom", "days": days, "time": clock}
+            if isinstance(identifier, str) and (normalized := normalize_event_rule(rule)):
+                result["events"][identifier] = normalized
     return result
 
 
@@ -89,23 +84,32 @@ def snoozed_plan(plan, entry):
     return ReminderPlan(plan.event_id, key, when, plan.anchor, plan.ddl)
 
 
-def _plan_for_event(store, event, config):
+def _plan_for_event(store, event, config, rule=None):
     if event.done:
         return None
-    rule = config["events"].get(event.id, {})
+    rule = config["events"].get(event.id, {}) if rule is None else rule
     if rule.get("mode") == "off":
         return None
     ddl = store.event_has_deadline(event)
     anchor = store.event_end_date(event) if ddl else store.event_start_date(event)
-    if rule.get("mode") == "custom":
-        clock, days = rule["time"], rule["days"]
-        when = datetime.combine(anchor, time.fromisoformat(clock)) - timedelta(days=days)
-    elif event.has_time:
+    mode = rule.get("mode")
+    if mode == "absolute":
+        when = datetime.fromisoformat(rule["at"])
+        key = hashlib.sha256(f"absolute:{event.id}:{rule['at']}".encode()).hexdigest()
+        return ReminderPlan(event.id, key, when, anchor.isoformat(), ddl)
+    if mode in ("relative", "custom") and "days" in rule:
+        clock = rule.get("time")
+        anchor_time = (time.fromisoformat(clock) if clock else
+                       event.due_at.time() if mode == "relative" and event.has_time else
+                       time.fromisoformat(config["time"]))
+        when = datetime.combine(anchor, anchor_time) - timedelta(days=rule["days"])
+    elif mode == "relative" or event.has_time and mode != "default":
         # Preserve existing explicit minute-based editor settings. Invalid old
         # reminder metadata is skipped, not rewritten or passed to timedelta.
-        if type(event.reminder) is not int or not 0 <= event.reminder <= 10080:
+        minutes = rule.get("minutes", event.reminder)
+        if not event.has_time or type(minutes) is not int or not 0 <= minutes <= MAX_MINUTES:
             return None
-        when = datetime.combine(anchor, event.due_at.time()) - timedelta(minutes=event.reminder)
+        when = datetime.combine(anchor, event.due_at.time()) - timedelta(minutes=minutes)
     else:
         days = config["ddl_days" if ddl else "general_days"]
         when = datetime.combine(anchor, time.fromisoformat(config["time"])) - timedelta(days=days)
@@ -115,6 +119,44 @@ def _plan_for_event(store, event, config):
                               event.end_as_ddl, anchor.isoformat(), when.isoformat()], ensure_ascii=True)
     key = hashlib.sha256(fingerprint.encode()).hexdigest()
     return ReminderPlan(event.id, key, when, anchor.isoformat(), ddl)
+
+
+def describe_event_reminder(store, event, config, rule, now, *, engine=None, preview=False):
+    """Project the rule without submitting notifications or touching the ledger."""
+    rule = normalize_event_rule(rule) or {}
+    plan = _plan_for_event(store, event, config, rule)
+    now = local_wall(now)
+    past = bool(plan and plan.when <= now)
+    channels = [key for key in ("windows", "qq") if config[key]]
+    # A configured QQ channel alone does not prove this plan can use the verified route.
+    catchup = bool(config["enabled"] and past and now - plan.when < CATCHUP and "windows" in channels)
+    snoozed_at = None
+    if engine and plan:
+        from desktop_calendar.reminders.notification_dispatch import MAX_ATTEMPTS
+        try:
+            state = engine._state()
+            actual = snoozed_plan(plan, state["snoozes"].get(event.id))
+            if actual.key != plan.key:
+                snoozed_at = actual.when.isoformat(timespec="minutes")
+            delivery = state["deliveries"].get(plan.key, {})
+            batch = state["batches"].get(delivery.get("batch"), {})
+            eligible_channels = {"windows"} if config["windows"] else set()
+            if config["qq"] and engine.delivery.qq_eligible(plan, state, now):
+                eligible_channels.add("qq")
+            catchup = bool(config["enabled"] and past and now - plan.when < CATCHUP and eligible_channels)
+            if batch:
+                catchup &= any(channel in eligible_channels and entry.get("status") in ("pending", "failed")
+                               and entry.get("attempts", 0) < MAX_ATTEMPTS
+                               for channel, entry in batch["channels"].items())
+            elif (delivery.get("status") in ("accepted", "expired", "exhausted", "snoozed", "unknown", "dispatching")
+                  or delivery.get("attempts", 0) >= MAX_ATTEMPTS):
+                catchup = False
+        except (ValueError, TypeError, OSError, KeyError, RuntimeError):
+            catchup = False
+    return {"mode": effective_mode(event, rule), "rule": rule,
+            "planned_at": plan.when.isoformat(timespec="minutes") if plan else None,
+            "global_enabled": config["enabled"], "past": past, "catchup_eligible": catchup, "snoozed_at": snoozed_at,
+            "schedule_status": "preview" if preview else "pending" if engine is None or engine.dirty else "recalculated"}
 
 
 def plans_for_store(store, config):
@@ -209,6 +251,22 @@ class ReminderEngine:
     def invalidate(self):
         self.dirty = True
 
+    def replan(self, event_ids):
+        """Rebuild after a commit. A later tick retries a failed rebuild."""
+        self.invalidate()
+        try:
+            self._rebuild()
+        except Exception as error:
+            self.error = str(error)
+            try:
+                self.delivery.cancel_stale_events(event_ids)
+            except Exception:
+                # An unavailable backend cannot roll back the persisted operation.
+                pass
+            return False
+        self.error = ""
+        return True
+
     def _rebuild(self):
         config = self.config()
         previous_plans = self.plans
@@ -226,9 +284,9 @@ class ReminderEngine:
                     self.backend.remove(entry["key"][:16])
                 del state["snoozes"][identifier]
                 changed = True
+        self.delivery.remove_stale(state)
         if changed:
             self._save(STATE_KEY, state)
-        self.delivery.remove_stale(state)
         ready = []
         last_in_minute = {}
         for plan in self.plans.values():

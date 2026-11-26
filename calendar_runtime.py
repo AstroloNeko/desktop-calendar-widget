@@ -5,6 +5,7 @@ Production credentials default to DPAPI; alternative protectors must be explicit
 """
 from copy import deepcopy
 from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
 import sqlite3
 import time
@@ -33,7 +34,7 @@ class CalendarRuntime:
     def __init__(self, store, history, dispatch, *, configuration=None, journal=None,
                  provider=None, clock=time.time, refresh=lambda change: None,
                  habit_refresh=lambda: None, writable=lambda: True, repository=None,
-                 remote_contract=NOTIFICATION_CONTRACT, on_remote_status_change=None):
+                 remote_contract=NOTIFICATION_CONTRACT, on_remote_status_change=None, reminders=None):
         self.state = 'starting'
         self.http = None
         self.remote = None
@@ -47,7 +48,8 @@ class CalendarRuntime:
         self.configuration = configuration or AIConfiguration(store.data_file.parent / 'ai-assistant')
         self.journal = journal or ChatJournal(self.configuration.folder / 'sessions.sqlite3', self.configuration.protector)
         self.gateway = CalendarActionGateway(store, history, dispatch, refresh,
-            lambda: self.state == 'running' and not store.load_error and writable(), habit_refresh)
+            lambda: self.state == 'running' and not store.load_error and writable(), habit_refresh,
+            reminders=reminders, reminder_now=lambda: datetime.fromtimestamp(clock()))
         self.events = CalendarEventService(history)
         self.mutations = CalendarMutationService(history)
         self.service = CalendarChatService(self.gateway, self.journal,
@@ -219,14 +221,15 @@ class HeadlessRuntime:
                 self._store = Store(Path(data_file), repository_factory=repository_factory)
                 self._history = EventCommandHistory(self._store)
                 self._reminders = None
+                if notification_backend is not None:
+                    from desktop_calendar.reminders.reminder_engine import ReminderEngine
+                    self._reminders = ReminderEngine(self._store, notification_backend)
                 config = configuration or AIConfiguration(self._store.data_file.parent / 'ai-assistant', protector)
                 self._core = CalendarRuntime(self._store, self._history, self.executor,
                     configuration=config, journal=journal, provider=provider, clock=clock,
                     writable=lambda: self.state == 'running',
-                    refresh=lambda change: self._invalidate_reminders(), habit_refresh=self._invalidate_reminders)
-                if notification_backend is not None:
-                    from desktop_calendar.reminders.reminder_engine import ReminderEngine
-                    self._reminders = ReminderEngine(self._store, notification_backend)
+                    refresh=lambda change: self._invalidate_reminders(), habit_refresh=self._invalidate_reminders,
+                    reminders=self._reminders)
             self.executor(compose)
             self.events = _OwnedService(self, self._core.events)
             self.mutations = _OwnedService(self, self._core.mutations)

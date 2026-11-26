@@ -7,6 +7,7 @@ import sqlite3
 from calendar_event_service import EventOperationError
 from desktop_calendar.assistant.calendar_chat_protocol import SPECIFIC_DELETE_STAGE, ChatError, fail, require_calendar_write
 from desktop_calendar.assistant.operation_plan import compile_proposal
+from desktop_calendar.reminders.reminder_rules import stored_event_rule
 
 
 def event_action(record):
@@ -39,13 +40,15 @@ def event_result(record, ids, *, changed, committed, verified, details=(), recov
     return result
 
 
-def observe(gateway, expected, colors):
+def observe(gateway, expected, colors, rules=None):
+    if rules is not None and [stored_event_rule(gateway.store.settings, item['id']) for item in expected] != rules:
+        return None
     details = []
     for snapshot, color in zip(expected, colors, strict=True):
         event = gateway.store.event_by_id(snapshot['id'])
         if event is None or asdict(event) != snapshot:
             return None
-        detail = gateway._detail(event)
+        detail = gateway.reminder_detail(event)
         if detail['color'] != color:
             return None
         details.append(detail)
@@ -112,6 +115,9 @@ def execute(gateway, journal, kind, record, owner, command, expected=None, color
         raise ChatError('operation_conflict', '计划尚未取得执行授权。')
     require_calendar_write()
     record.update(status='executing', expected_colors=colors, execution_protocol=1)
+    if not deleting:
+        entries = getattr(command, 'entries', (command,))
+        record['expected_reminder_rules'] = [entry.after.rule() for entry in entries]
     if batch_delete:
         record['stage'] = 'executing'
     try:
@@ -137,10 +143,14 @@ def execute(gateway, journal, kind, record, owner, command, expected=None, color
             return None
         raise ChatError(exc.code, str(exc)) from exc
     if deleting:
+        if outcome.changed:
+            gateway.replan_after_commit(deletion_ids(record))
         record.update(deletion_outcome(gateway,record,commit_returned=outcome.changed))
         journal.put(kind,identifier,owner,record)
         return outcome
-    details = observe(gateway, expected, colors)
+    if outcome.changed:
+        gateway.replan_after_commit(item['id'] for item in expected)
+    details = observe(gateway, expected, colors, record['expected_reminder_rules'])
     result = event_result(record,[item['id'] for item in expected],changed=outcome.changed,
                           committed=outcome.changed,verified=details is not None,details=details or [])
     result_key = 'result' if kind == 'task' else 'operation_result'
@@ -172,17 +182,18 @@ def recovered(gateway, record, expected):
                 return False
     colors = record.get('expected_colors')
     if colors is not None:
-        return observe(gateway, expected, colors) is not None
+        return observe(gateway, expected, colors, record.get('expected_reminder_rules')) is not None
     return all((event := gateway.store.event_by_id(item['id'])) is not None and asdict(event) == item
                for item in expected)
 
 
-def resolve_target(gateway, target, chosen=None):
+def resolve_target(gateway, target, chosen=None, *, exact_title_without_date=False):
     """Resolve and recheck candidates without accessing chat state."""
-    if 'start' not in target:
+    if 'start' not in target and not exact_title_without_date:
         return [], '请给出要操作的开始和结束日期。'
-    bounds = {key:target[key] for key in ('start','end')}
-    result = gateway.delete_candidates(bounds,target['titles'] or None)
+    bounds = {key:target[key] for key in ('start','end') if key in target}
+    result = (gateway.delete_candidates(bounds,target['titles'] or None) if bounds else
+              gateway.target_candidates(bounds,target['titles'],exact_title_without_date=True))
     rows = result['events']
     if not rows or result['truncated'] or (target['quantity']=='all_matches' and len(rows)>10):
         return [], '该范围内没有匹配事项。' if not rows else '匹配项过多，请缩小范围。'

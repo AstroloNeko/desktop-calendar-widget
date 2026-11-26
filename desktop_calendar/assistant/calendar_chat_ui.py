@@ -32,7 +32,8 @@ class ChatRuntime:
         self.core = CalendarRuntime(app.store, app.event_commands, TkDispatcher(app),
             configuration=self.configuration, journal=journal, refresh=app._refresh_event_change,
             writable=self.calendar_writable,
-            habit_refresh=self.refresh_habits, on_remote_status_change=self.queue_tray_status)
+            habit_refresh=self.refresh_habits, on_remote_status_change=self.queue_tray_status,
+            reminders=getattr(app, 'reminder_engine', None))
         self.journal, self.gateway, self.service = self.core.journal, self.core.gateway, self.core.service
         self.jobs = threading.BoundedSemaphore(4)
         self.error = None

@@ -257,9 +257,14 @@ def execute_interaction(service, journal, scope, record, reference_now, *, conte
     if kind == 'undo':
         operation_id = 'undo-' + key
         change = service.gateway.undo_remote_operation(action['operation_id'], operation_id)
-        return envelope(sid, request_id, status='succeeded', assistant_message='已撤销原操作。',
+        members = getattr(change, 'changes', (change,))
+        message = '已撤销原操作。'
+        if service.gateway.reminders is not None or any(
+                entry.before.reminder_rule is not None or entry.after.reminder_rule is not None for entry in members):
+            message += ' 已发送的通知无法撤回。'
+        return envelope(sid, request_id, status='succeeded', assistant_message=message,
                         operation_result={'operation_id': operation_id, 'action': 'undo', 'committed': True,
-                                          'goal_satisfied': True, 'count': len(getattr(change, 'changes', (change,)))})
+                                          'goal_satisfied': True, 'count': len(members)})
     if kind == 'select_candidate':
         message = str(waiting['ids'].index(action['event_id']) + 1)
     else:

@@ -10,7 +10,6 @@ from desktop_calendar.assistant.operation_plan import member_count
 from calendar_core import COLORS
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fail, fingerprint
 from desktop_calendar.assistant.calendar_chat_tools import TASK_TOOLS as TASK_TOOLS, reference_today
-from event_input import build_event_candidate
 from event_commands import BatchPreview
 from calendar_event_service import EventOperationError
 from desktop_calendar.assistant.calendar_chat_attributes import adapt_attributes
@@ -49,6 +48,7 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
         if not gateway.writable():
             fail('请先关闭编辑器或等待当前操作完成。','execution_failed')
         candidates = []
+        rules = []
         fixed_colors = []
         items = args.get('items') or [{'event_id':i,'changes':{'done':args['done']}} for i in args['event_ids']]
         if name=='batch_create_events' and re.search(r'(往后|未来|往后面)三天',message) and re.search(r'各|每天',message):
@@ -67,9 +67,9 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
             values = dict(item if creating else item['changes'])
             if not structured and name != 'batch_set_completion':
                 values, _, _ = adapt_attributes(values,message,creating,gateway.categories()['categories'],())
-            values.pop('category_basis',None)
-            candidate = build_event_candidate(values,current=current,identifier=identifier,context=gateway.store)
+            candidate, rule = gateway.prepare_candidate(current, values, creating=creating, identifier=identifier)
             candidates.append(candidate)
+            rules.append(rule)
             fixed_colors.append(structured and ('color' in values or 'color_mode' in values))
             ids.append(identifier)
         if len(ids)!=len(set(ids)):
@@ -83,11 +83,15 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
             colors = iter(secrets.SystemRandom().sample(available,needed))
             candidates = [c if fixed else replace(c,color=next(colors),color_mode='override')
                           for c, fixed in zip(candidates,fixed_colors)]
-        preview = (gateway.events.preview_create_many(candidates) if name=='batch_create_events'
-                   else BatchPreview(tuple(gateway.events.preview_upsert(c) for c in candidates),'AI批量修改事项'))
+        if name == 'batch_create_events' and any(gateway.store.event_by_id(i) is not None for i in ids):
+            fail('新建事项ID已存在。','operation_conflict')
+        entries = tuple(gateway.events.preview_upsert(event, reminder_rule=rule)
+                        for event, rule in zip(candidates, rules, strict=True))
+        preview = BatchPreview(entries, '批量新建事项' if name=='batch_create_events' else 'AI批量修改事项')
         task['event_ids'] = ids
         task['before_hashes'] = [fingerprint(gateway._state(i)) for i in ids]
         task['expected'] = [asdict(entry.event()) for entry in preview.entries]
+        task['expected_reminder_rules'] = [entry.after.rule() for entry in preview.entries]
         return preview
     def execute():
         preview = prepare()
@@ -96,9 +100,9 @@ def run_task(service, name, args, session, owner, request_id, source, message, *
             batch = dict(object_type='event_batch', creation=name=='batch_create_events', description='批量事项操作', event_id=task['event_ids'][0],
                          action={'batch_create_events':'create','batch_set_completion':'complete'}.get(name,'update'),
                          event_ids=task['event_ids'], after=task['expected'], before=None,
-                         before_hashes=task['before_hashes'],
+                         before_hashes=task['before_hashes'], reminder_rules=task['expected_reminder_rules'],
                          requested_fields=sorted(requested_fields(message, name=='batch_create_events')),
-                         summaries=[gateway._detail(entry.event()) for entry in entries])
+                         summaries=[gateway.reminder_detail(entry.event(), entry.after.rule(), preview=True) for entry in entries])
             op = dict(operation_id=task_id, session_id=session['session_id'], request_id=request_id,
                       preview=batch, status='pending', requires_confirmation=True, revision=secrets.token_urlsafe(24),
                       expires=service.clock()+900)
@@ -160,8 +164,7 @@ def recover_task(service, task, owner, *, resume_ready=True):
                 task.update(status='failed', error_code='operation_conflict')
                 service.journal.transition('task', task['task_id'], owner, {'status':'ready'}, task)
                 return
-            from calendar_core import Event
-            entries = tuple(gateway.events.preview_upsert(Event(**snapshot)) for snapshot in task['expected'])
+            entries = gateway.resume_entries(task['expected'], task.get('expected_reminder_rules'))
             execute_plan(gateway, service.journal, 'task', task, owner, BatchPreview(entries,'AI批量事项'),
                          task['expected'], [gateway.store.effective_event_color(e.event()) for e in entries])
         service.gateway.dispatch(resume)

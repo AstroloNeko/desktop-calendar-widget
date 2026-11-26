@@ -22,6 +22,11 @@ FIELDS = {
     "end_date": text(10),
     "category_basis": {"type": "string", "enum": ["explicit", "semantic_high"]},
     "reminder": {"type": ["integer", "null"], "minimum": 0, "maximum": 10080},
+    "reminder_rule": {"type":"object", "required":["mode"], "additionalProperties":False,
+                      "properties":{"mode":{"type":"string","enum":["default","relative","absolute","disabled"]},
+                                    "minutes":{"type":"integer","minimum":0,"maximum":10080},
+                                    "days":{"type":"integer","minimum":0,"maximum":365},
+                                    "at":text(16), "time":text(5)}},
     "notes": text(2000), "duration_days": {"type": "integer", "minimum": 1, "maximum": 365},
     "skip_non_working_days": {"type": "boolean"}, "end_as_ddl": {"type": "boolean"},
 }
