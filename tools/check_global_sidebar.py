@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp, GLOBAL_MIN_WIDTH, GLOBAL_MIN_HEIGHT
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, Store
 from desktop_calendar.global_view.global_timeline_ui import GLOBAL_TIMELINE_LAYOUT
 from tools.check_calendar_chat import wait
@@ -54,7 +55,7 @@ def clickable(button):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--screenshots', type=Path)
-    parser.add_argument('--theme', choices=('modern', 'slate', 'aero', 'paper', 'frutiger'), default='modern')
+    parser.add_argument('--theme', choices=ACTIVE_THEME_NAMES, default='modern')
     args = parser.parse_args()
     if args.screenshots:
         from tools.check_habit_schedules import capture_own_window

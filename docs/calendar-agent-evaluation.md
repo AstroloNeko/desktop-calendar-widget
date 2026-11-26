@@ -9,7 +9,7 @@
 ```powershell
 python -m tools.calendar_agent_eval
 python -m tools.calendar_agent_eval --mode mock --cases core --repeat 2
-python -m unittest discover -s tests -p test_calendar_agent_eval.py
+py -3 tools/run_tests.py -p test_calendar_agent_eval.py
 ```
 
 `--cases` 支持 `all`、`core`、类别或逗号分隔的案例 ID。每个案例可运行 1 至 3 次，每次最多选择 40 个案例。Mock 模式使用案例中的固定工具响应。它能检验宿主执行，并可通过篡改 mock 提案验证裁判识别缺失字段、错写和重复写入的能力。
@@ -20,9 +20,9 @@ python -m unittest discover -s tests -p test_calendar_agent_eval.py
 
 ```powershell
 python -m tools.calendar_agent_eval --dataset tools/calendar_agent_eval_memo_cases.json --mode mock
-python -m tools.calendar_agent_eval --dataset tools/calendar_agent_eval_memo_cases.json --mode live --cases core --max-calls 12
-python -m tools.calendar_agent_eval --dataset tools/calendar_agent_eval_memo_cases.json --mode live --cases all --max-calls 64
-python -m tools.calendar_agent_eval --mode live --cases c01-select-second,c04-affirm-draft,d01-non-action --max-calls 12
+python -m tools.calendar_agent_eval --dataset tools/calendar_agent_eval_memo_cases.json --mode live --config $qaModelConfig --cases core --max-calls 12
+python -m tools.calendar_agent_eval --dataset tools/calendar_agent_eval_memo_cases.json --mode live --config $qaModelConfig --cases all --max-calls 64
+python -m tools.calendar_agent_eval --mode live --config $qaModelConfig --cases c01-select-second,c04-affirm-draft,d01-non-action --max-calls 12
 ```
 
 Mock 模式下版本号歧义和抱怨回复仍保留人工复核。CLI 对支持案例的待复核返回非零，查看报告可区分这些结果与测试错误。
@@ -42,13 +42,13 @@ Mock 模式下版本号歧义和抱怨回复仍保留人工复核。CLI 对支�
 
 ### Live DeepSeek
 
-以下入口会发起计费请求。运行时只传输合成案例及其合成日历上下文，使用应用已有的 DPAPI 凭据和远程同意设置。脚本以只读方式加载指定的 `configuration.dpapi`，只把模型所需字段保留在内存。评测 Runtime 使用单独的临时配置，HTTP 不启动。
+以下入口会发起计费请求。获得 Live 授权后，将 `$qaModelConfig` 设为当前 Windows 用户下生成的独立 QA `configuration.dpapi` 路径。脚本以只读方式加载该配置，只传输合成案例及其合成日历上下文。评测 Runtime 使用单独的临时配置，HTTP 不启动。
 
 ```powershell
-python -m tools.calendar_agent_eval --mode live --cases a01-create-tomorrow,a02-wb-two-days --max-calls 12
+python -m tools.calendar_agent_eval --mode live --config $qaModelConfig --cases a01-create-tomorrow,a02-wb-two-days --max-calls 12
 ```
 
-默认配置位置为 `%APPDATA%\DesktopCalendar\ai-assistant\configuration.dpapi`，与桌面应用默认位置一致。自定义数据目录或独立 Headless Runtime 使用其他配置位置时，请用 `--config` 显式指定对应的文件。评测器只按该路径读取配置。DPAPI 要求使用配置所属的 Windows 用户。若密钥、远程同意或合法 HTTPS 端点不可用，命令会在模型调用前退出。
+Live 必须提供 `--config`，评测器只按该路径读取配置。DPAPI 要求使用配置所属的 Windows 用户。若密钥、远程同意或合法 HTTPS 端点不可用，命令会在模型调用前退出。
 
 Live 默认选择 `core`，全次运行共享最多 120 次模型调用的预算。用 `--max-calls` 可以下调预算。每次调用的超时最多 30 秒，并受生产工具循环的剩余时间限制。网络失败、限流和 API 错误由 Provider 报为基础设施问题。现有 Provider 将部分网络错误归并为 `model_unavailable`。
 

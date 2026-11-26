@@ -129,7 +129,7 @@ from desktop_calendar.ui.ui_draw import (
     vertical_gradient,
     vertical_multi_gradient,
 )
-from desktop_calendar.ui.ui_theme import THEMES, Theme, get_theme, normalize_theme_name
+from desktop_calendar.ui.ui_theme import ACTIVE_THEMES, Theme, get_theme, normalize_theme_name
 from desktop_calendar.ui.themed_controls import RoundedCardShell, configure_scrollbars, themed_check, themed_popup_menu
 
 
@@ -7097,7 +7097,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         menu.add_separator()
         theme_menu = themed_popup_menu(menu, self.theme, (FONT, 9))
         self.theme_var = tk.StringVar(value=self.theme_name)
-        for theme_name, theme in THEMES.items():
+        for theme_name, theme in ACTIVE_THEMES.items():
             theme_menu.add_radiobutton(
                 label=theme.display_name,
                 variable=self.theme_var,

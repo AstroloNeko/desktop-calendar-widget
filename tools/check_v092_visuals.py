@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, EventCategory, RoutineItem, Store
 from data_backup import create_backup, restore_store
 from dpi_utils import scaled_geometry
@@ -64,7 +65,7 @@ def main():
                 for dpi in ((native,) if options.native_only else (96, 120, 144, 168, 192)):
                     with patch.object(app.dpi, "current_window_dpi", return_value=dpi):
                         app._apply_dpi_change(dpi)
-                        for theme in ("modern", "aero", "paper", "frutiger"):
+                        for theme in ACTIVE_THEME_NAMES:
                             app.set_theme(theme)
                             app.enter_global_view()
                             app.select_day(date(2026, 8, 3))

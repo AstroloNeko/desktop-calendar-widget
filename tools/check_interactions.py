@@ -17,6 +17,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, EventCategory, Store
 from event_search import EventSearchIndex, SearchResult, capture_search_store
 
@@ -91,7 +92,7 @@ def gesture(app, operation):
 
 
 def smoke(app):
-    for theme in ("modern", "aero", "paper", "frutiger"):
+    for theme in ACTIVE_THEME_NAMES:
         app.set_theme(theme)
         app.enter_global_view()
         app.select_day(date(2026, 8, 7))

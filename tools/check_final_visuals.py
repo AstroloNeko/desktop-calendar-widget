@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, EventCategory, Store
 from dpi_utils import scaled_geometry
 from desktop_calendar.global_view.global_sidebar import GlobalSidebar
@@ -79,7 +80,7 @@ def capture(window, target):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", default="after")
-    parser.add_argument("--themes", nargs="+", default=["modern", "win7_aero", "paper", "frutiger"])
+    parser.add_argument("--themes", nargs="+", choices=ACTIVE_THEME_NAMES, default=ACTIVE_THEME_NAMES)
     parser.add_argument("--dpi", nargs="+", type=int, default=[96, 192])
     options = parser.parse_args()
     output = Path(__file__).resolve().parents[1] / "build" / "final-ui-qa" / options.phase

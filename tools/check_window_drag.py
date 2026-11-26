@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from tools.check_interactions import cleanup, pump
 from desktop_calendar.global_view.global_header import header_layout
@@ -293,7 +294,7 @@ def main():
             backdrop.geometry(f"{work.width}x{work.height}+{work.left}+{work.top}")
             backdrop.update()
             cases = [("compact", "modern", False, False, False)]
-            cases += [("global", theme, False, False, False) for theme in ("modern", "aero", "paper", "frutiger")]
+            cases += [("global", theme, False, False, False) for theme in ACTIVE_THEME_NAMES]
             if args.diagnose:
                 cases += [("global", "modern", True, False, False), ("global", "modern", False, True, False),
                           ("global", "modern", False, False, True)]
@@ -344,7 +345,7 @@ def main():
                     app.return_to_compact_view()
                     pump(app)
             if args.dpi_matrix:
-                for theme in ("modern", "aero", "paper", "frutiger"):
+                for theme in ACTIVE_THEME_NAMES:
                     app.enter_global_view()
                     app.set_theme(theme)
                     for dpi in (96, 120, 144, 168, 192):
@@ -376,8 +377,11 @@ def main():
                             print(theme, "simulated DPI", dpi, "native move/end/one save: passed", flush=True)
                         faulthandler.cancel_dump_traceback_later()
         finally:
-            cleanup(app)
-            backdrop.destroy()
+            faulthandler.cancel_dump_traceback_later()
+            try:
+                cleanup(app)
+            finally:
+                backdrop.destroy()
     (OUTPUT / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
 
 

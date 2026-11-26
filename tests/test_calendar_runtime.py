@@ -254,10 +254,11 @@ print('headless process passed')
         self.assertEqual(result.returncode,0,result.stderr)
 
     def test_theme_identifiers_unchanged(self):
-        from desktop_preferences import VALID_THEME_NAMES,normalize_theme_name
-        from desktop_calendar.ui.ui_theme import THEMES
-        self.assertEqual(set(VALID_THEME_NAMES),set(THEMES))
-        self.assertEqual(normalize_theme_name('win7_aero'),'aero')
+        from desktop_preferences import ACTIVE_THEME_NAMES, normalize_stored_theme_name, normalize_theme_name
+        from desktop_calendar.ui.ui_theme import ACTIVE_THEMES
+        self.assertEqual(ACTIVE_THEME_NAMES, tuple(ACTIVE_THEMES))
+        self.assertEqual(normalize_stored_theme_name('win7_aero'),'aero')
+        self.assertEqual(normalize_theme_name('win7_aero'),'modern')
         self.assertEqual(normalize_theme_name('gemini_reviewing'),'slate')
 
     def test_explicit_journal_injection(self):

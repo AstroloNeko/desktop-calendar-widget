@@ -63,13 +63,13 @@ changes use detached partial patches, preserving all other existing Event fields
 ## Verification
 
 All write tests use temporary Stores and journals. The opt-in live checker
-`tools/check_calendar_chat_live.py --live --attributes --report <ignored-path>`
-uses fictional categories/events and existing consented credentials read-only.
+`tools/check_calendar_chat_live.py --live --config $qaModelConfig --attributes --report <ignored-path>`
+uses fictional categories/events and an explicitly selected QA configuration read-only.
 Two real Chinese combinations passed in 3 DeepSeek requests: WB + purple override
 and 15:00 meeting + 30-minute reminder + inherited meeting category. Those samples
 do not prove arbitrary model language accuracy. No real user calendar is opened.
 
-Source and frozen QA use `tools/check_calendar_chat.py`, exercising four themes,
+Source and frozen QA use `tools/check_calendar_chat.py`, exercising Modern and Slate,
 Compact/Global, explicit preview/confirmation, invalid multi-proposal preservation,
 Undo, modal cleanup, search and authenticated HTTP automatic result/idempotency.
 Current physical DPI is 192 (200%), not five physical DPI environments. QA builds

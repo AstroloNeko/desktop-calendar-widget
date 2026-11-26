@@ -1,3 +1,4 @@
+"""L4: mapped Tk/ttk widgets and native focus/keyboard behavior."""
 import tkinter as tk
 from tkinter import ttk
 import unittest
@@ -8,10 +9,7 @@ from desktop_calendar.ui.ui_theme import get_theme
 
 class SlateControlTests(unittest.TestCase):
     def setUp(self):
-        try:
-            self.root = tk.Tk()
-        except tk.TclError as error:
-            self.skipTest(str(error))
+        self.root = tk.Tk()
         self.addCleanup(self.root.destroy)
         self.theme = get_theme("slate")
         self.dp = lambda value: round(2 * value)

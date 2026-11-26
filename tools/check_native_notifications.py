@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
-import os
 from pathlib import Path
 import queue
 import sys
@@ -22,6 +21,7 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from native_notifications import WinRTTransport, toast_xml
+from notification_backend import programs_directory
 
 
 def main():
@@ -42,7 +42,7 @@ def main():
     shell.IsUserAnAdmin.argtypes = []
     shell.IsUserAnAdmin.restype = ctypes.c_int
     identity_result = shell.SetCurrentProcessExplicitAppUserModelID(identity)
-    shortcut = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs" / f"桌面月历通知测试-{nonce}.lnk"
+    shortcut = programs_directory() / f"桌面月历通知测试-{nonce}.lnk"
     registry_path = "Software\\Classes\\AppUserModelId\\" + identity
     report = {"identity": identity, "frozen": bool(getattr(sys, "frozen", False)),
               "accepted": False, "activated": False, "events": [], "errors": [],
@@ -109,20 +109,21 @@ def main():
                     transport.close()
                 except Exception as error:
                     report["errors"].append(str(error))
-            if shortcut.exists():
-                shortcut.unlink()  # This run's unique shortcut only.
             try:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, registry_path)
-            except FileNotFoundError:
-                pass
+                shortcut.unlink(missing_ok=True)  # This run's unique shortcut only.
+            except OSError as error:
+                report["errors"].append(str(error))
+            paths = [registry_path]
             if com_registry_path:
-                for key_path in (com_registry_path + "\\LocalServer32", com_registry_path):
-                    try:
-                        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
-                    except FileNotFoundError:
-                        pass
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                paths.extend((com_registry_path + "\\LocalServer32", com_registry_path))
+            for key_path in paths:
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    report["errors"].append(str(error))
+            # End the GUI loop even when registry or report cleanup fails.
             result_queue.put((0, "done"))
 
     import tkinter as tk
@@ -180,14 +181,23 @@ def main():
     root.protocol("WM_DELETE_WINDOW", close)
     root.after(100, thread.start)
     root.after(200, poll)
-    root.mainloop()
-    stop.set()
-    thread.join(5)
-    if tray:
-        tray.stop()
+    try:
+        root.mainloop()
+    finally:
+        stop.set()
+        if thread.ident is not None:
+            thread.join(5)
+            if thread.is_alive():
+                report["errors"].append("QA notification worker did not stop within five seconds")
+        if tray:
+            tray.stop()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass  # The close/poll callback may already have destroyed this root.
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False))
-    return 0 if report["activated"] else 2
+    return 0 if report["activated"] and not report["errors"] else 2
 
 
 if __name__ == "__main__":

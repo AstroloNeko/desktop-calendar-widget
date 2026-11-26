@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from bulk_ui import BulkDateDialog
 from calendar_core import Event, EventCategory, RoutineItem, Store
 from dpi_utils import dpi_for_window
@@ -55,7 +56,7 @@ def smoke(app, screenshots):
     native = dpi_for_window(app)
     print("Native Windows DPI:", native, flush=True)
     checks = 0
-    for theme in ("modern", "aero", "paper", "frutiger"):
+    for theme in ACTIVE_THEME_NAMES:
         app.set_theme(theme)
         app.enter_global_view()
         app.select_day(date(2026, 8, 7))

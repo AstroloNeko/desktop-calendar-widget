@@ -1,7 +1,7 @@
 import unittest
 
 from desktop_calendar.ui.ui_draw import draw_calendar_date_ring, draw_calendar_date_state, draw_color_swatch, readable_text
-from desktop_calendar.ui.ui_theme import get_theme
+from desktop_calendar.ui.ui_theme import ACTIVE_THEMES, get_theme
 
 
 class _RecordingCanvas:
@@ -30,14 +30,13 @@ class _RecordingCanvas:
 
 class CalendarDateDrawingTests(unittest.TestCase):
     def test_user_bar_colors_keep_readable_text_without_changing_content_color(self) -> None:
-        for theme_name in ("modern", "aero", "paper", "frutiger"):
-            theme = get_theme(theme_name)
+        for theme in ACTIVE_THEMES.values():
             self.assertEqual(readable_text("#F4D258", theme.text_primary, theme.text_on_accent), theme.text_primary)
             self.assertEqual(readable_text("#17212B", theme.text_primary, theme.text_on_accent), theme.text_on_accent)
 
     def test_selected_color_swatch_uses_checkmark_and_theme_tokens(self) -> None:
         canvas = _RecordingCanvas()
-        theme = get_theme("paper")
+        theme = get_theme("modern")
         draw_color_swatch(
             canvas,
             "#8B70D6",
@@ -71,7 +70,7 @@ class CalendarDateDrawingTests(unittest.TestCase):
         self.assertEqual(polygons[0], polygons[1])
         self.assertTrue(all(kwargs.get("tags") == "date_state" for _kind, _coords, kwargs in canvas.calls))
 
-    def test_aero_layers_never_expand_beyond_public_bounds(self) -> None:
+    def test_layered_date_state_stays_inside_public_bounds(self) -> None:
         canvas = _RecordingCanvas()
         draw_calendar_date_state(
             canvas,

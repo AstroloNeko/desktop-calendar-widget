@@ -650,9 +650,11 @@ SLATE = replace(
 
 THEMES = {theme.name: theme for theme in (MODERN, WIN7_AERO, PAPER, FRUTIGER, SLATE)}
 from desktop_preferences import (
-    VALID_THEME_NAMES, DEFAULT_THEME_NAME, LEGACY_THEME_ALIASES, normalize_theme_name,
+    ACTIVE_THEME_NAMES, normalize_theme_name,
 )
+
+ACTIVE_THEMES = {name: THEMES[name] for name in ACTIVE_THEME_NAMES}
 
 
 def get_theme(value: object) -> Theme:
-    return THEMES[normalize_theme_name(value)]
+    return ACTIVE_THEMES[normalize_theme_name(value)]

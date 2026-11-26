@@ -21,6 +21,7 @@ from unittest.mock import Mock, patch
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from desktop_calendar.assistant.calendar_chat_ui import open_ai_settings, open_chat, AISettings
 from desktop_calendar.assistant.calendar_chat_http import LocalChatHTTP
@@ -160,8 +161,8 @@ def main():
     parser.add_argument('--report', type=Path)
     parser.add_argument('--product-exe', type=Path)
     parser.add_argument('--sqlite', action='store_true', help='Use production SQLite startup factory in a temporary profile')
-    parser.add_argument('--themes', nargs='+', choices=('modern', 'aero', 'paper', 'frutiger'),
-                        default=('modern', 'aero', 'paper', 'frutiger'))
+    parser.add_argument('--themes', nargs='+', choices=ACTIVE_THEME_NAMES,
+                        default=ACTIVE_THEME_NAMES)
     args = parser.parse_args()
     if args.product_exe:
         result = check_product(args.product_exe)

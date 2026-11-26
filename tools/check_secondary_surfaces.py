@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from desktop_calendar.assistant.calendar_chat_ui import AISettings
 from desktop_calendar.reminders.reminder_ui import ReminderSettingsDialog
@@ -125,7 +126,7 @@ def run(theme, screenshots):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--themes', nargs='+', default=['modern', 'slate', 'aero', 'paper', 'frutiger'])
+    parser.add_argument('--themes', nargs='+', choices=ACTIVE_THEME_NAMES, default=ACTIVE_THEME_NAMES)
     parser.add_argument('--screenshots', type=Path)
     args = parser.parse_args()
     for theme in args.themes:

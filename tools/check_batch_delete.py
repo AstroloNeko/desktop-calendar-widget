@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store, Event
 from desktop_calendar.assistant.calendar_chat_ui import open_chat
 from desktop_calendar.assistant.calendar_chat_service import OWNER
@@ -35,7 +36,7 @@ def main():
             errors=[]
             app.report_callback_exception=lambda *parts: errors.append(str(parts))
             try:
-                for theme in ('modern','paper'):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for mode in ('compact','global'):
                         (app.enter_global_view if mode=='global' else app.return_to_compact_view)()

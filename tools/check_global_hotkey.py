@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Store
 from global_hotkey import ASSISTANT_KEY, SETTING_KEY, saved_global_shortcuts
 from keyboard_shortcuts import saved_local_shortcuts, save_shortcuts
@@ -61,7 +62,7 @@ def main():
                     assert competitor.is_available
                 finally:
                     assert competitor.stop()
-                for theme in ('modern', 'aero', 'paper', 'frutiger'):
+                for theme in ACTIVE_THEME_NAMES:
                     app.set_theme(theme)
                     for pinned in (False, True):
                         app.return_to_compact_view()

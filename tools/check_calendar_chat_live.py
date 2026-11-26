@@ -1,4 +1,4 @@
-"""Explicit bounded paid-model smoke. Synthetic Store; read-only existing AI credentials.
+"""Explicit bounded paid-model smoke. Synthetic Store; read-only QA AI credentials.
 
 No real calendar/history files are opened. Reports contain only tool metadata and
 assertion outcomes, never keys, user profile paths, messages or field values.
@@ -6,7 +6,6 @@ assertion outcomes, never keys, user profile paths, messages or field values.
 import argparse
 from datetime import date, timedelta
 import json
-import os
 from pathlib import Path
 import sys
 import tempfile
@@ -36,6 +35,7 @@ class LimitedProvider:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--live', action='store_true', help='Explicitly permit <=14 model calls with synthetic data')
+    parser.add_argument('--config', type=Path, required=True, help='Read-only QA configuration.dpapi')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--followups', action='store_true', help='Create one synthetic event, then refine the same event across turns')
     parser.add_argument('--attributes', action='store_true', help='Synthetic semantic classification and explicit palette combinations')
@@ -44,7 +44,10 @@ def main():
     args = parser.parse_args()
     if not args.live:
         parser.error('Real provider smoke requires explicit --live')
-    config = AIConfiguration(Path(os.environ['APPDATA'])/'DesktopCalendar/ai-assistant')
+    path = args.config.resolve()
+    if path.name != 'configuration.dpapi' or not path.is_file():
+        parser.error('Select a saved QA configuration.dpapi')
+    config = AIConfiguration(path.parent)
     values = config.load()
     if not values.get('api_key') or not values.get('consent'):
         parser.error('The app must already have user-configured credentials and remote consent')

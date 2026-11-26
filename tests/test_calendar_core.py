@@ -163,7 +163,7 @@ class StoreTests(unittest.TestCase):
 
     def test_theme_round_trips(self):
         store = Store(self.data_file)
-        for theme_name in ("modern", "aero", "paper", "frutiger", "slate"):
+        for theme_name in ("modern", "slate"):
             store.settings["theme"] = theme_name
             store.save()
             loaded = Store(self.data_file)
@@ -187,6 +187,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.settings["theme"], "aero")
 
     def test_frutiger_theme_persistence_does_not_change_events(self):
+        from desktop_preferences import normalize_theme_name
+
         store = Store(self.data_file)
         event = Event("theme-safe", "主题切换不改事项", "2026-08-10T09:30", event_type="ddl")
         store.upsert(event)
@@ -195,6 +197,7 @@ class StoreTests(unittest.TestCase):
 
         loaded = Store(self.data_file)
         self.assertEqual(loaded.settings["theme"], "frutiger")
+        self.assertEqual(normalize_theme_name(loaded.settings["theme"]), "modern")
         self.assertEqual([item.id for item in loaded.events], ["theme-safe"])
         self.assertEqual(loaded.events[0].event_type, "ddl")
 

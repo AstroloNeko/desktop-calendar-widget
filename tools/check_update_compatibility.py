@@ -26,6 +26,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp, UpdateProgressDialog
+from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, EventCategory, RoutineItem, Store
 from data_compat import DataCompatibilityError
 from dpi_utils import dpi_for_window
@@ -57,7 +58,7 @@ def source_gui(root):
         try:
             pump(app, .2)
             print("Native source GUI DPI:", dpi_for_window(app), flush=True)
-            for theme in ("modern", "aero", "paper", "frutiger"):
+            for theme in ACTIVE_THEME_NAMES:
                 app.set_theme(theme)
                 for view in ("compact", "global"):
                     (app.enter_global_view if view == "global" else app.return_to_compact_view)()
