@@ -46,6 +46,20 @@ def fingerprint(value):
 
 
 def receipt_message(result, *, concise=False, explicit=()):
+    if result.get('action') == 'reminder_config':
+        from desktop_calendar.reminders.reminder_config import field_lines, impacts
+        lines = ["已保存提醒设置", *field_lines(result["fields"]), impacts(result["fields"])]
+        if result["qq_enabled"]:
+            lines.append({"available":"QQ 主动推送能力已核验。",
+                          "unsupported":"配置已保存，当前云端没有主动推送接口。",
+                          "unbound":"配置已保存，QQ 通道当前没有已核验的绑定。",
+                          "unverified":"配置已保存，QQ 主动推送能力尚待核验。"}[result["qq_status"]])
+        if result["remote_authorization"]:
+            lines.append("已确认涉及私人日历内容的通知授权。")
+        if result["scheduling_pending"]:
+            lines.append("调度等待重算。")
+        lines.append("配置修改不进入日历撤销历史。已发送的通知无法收回。")
+        return '\n'.join(lines)
     if result.get('action') == 'reminder_action':
         label = {'snooze':'已设置稍后提醒','cancel_snooze':'已取消稍后提醒',
                  'acknowledge':'已标记提醒已处理'}[result['kind']]

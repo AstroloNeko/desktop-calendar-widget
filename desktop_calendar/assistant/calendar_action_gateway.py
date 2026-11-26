@@ -336,7 +336,7 @@ class CalendarActionGateway:
         if not self.writable():
             fail('请先关闭当前编辑器或等待数据操作结束，再确认。', 'execution_failed')
         preview = operation['preview']
-        if preview.get('object_type') == 'reminder':
+        if preview.get('object_type') in ('reminder', 'reminder_config'):
             return execute_reminder(self, journal, operation, owner)
         if preview.get('object_type') == 'event_batch':
             hashes = [fingerprint(self._state(i)) for i in preview['event_ids']]
@@ -423,7 +423,10 @@ class CalendarActionGateway:
         def check():
             if self.reminders is None:
                 return None
-            proof = self.reminders.runtime_receipt(operation['operation_id'])
-            return (reminder_result(operation,proof,pending=proof['action']!='acknowledge' and self.reminders.dirty)
+            if operation['preview'].get('object_type') == 'reminder_config':
+                proof = self.reminders.configuration_receipt(operation['operation_id'])
+            else:
+                proof = self.reminders.runtime_receipt(operation['operation_id'])
+            return (reminder_result(operation,proof,pending=proof.get('action')!='acknowledge' and self.reminders.dirty)
                     if proof is not None else None)
         return self.dispatch(check)

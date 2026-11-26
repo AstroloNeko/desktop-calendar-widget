@@ -65,8 +65,9 @@ class QQReminderBackend:
         self.get_worker, self.client_factory = get_worker, client_factory
         self.jobs, self.events = queue.Queue(), queue.Queue()
         self.thread = None
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.cancelled = set()
+        self._capability = None
         self.closed = False
         self.private = False
 
@@ -92,6 +93,19 @@ class QQReminderBackend:
     def set_privacy(self, private):
         with self.lock:
             self.private = private
+
+    def configuration_guard(self):
+        return self.lock
+
+    def proactive_capability(self, binding):
+        with self.lock:
+            if self._capability and self._capability[0] == binding.scope:
+                return self._capability[1]
+        return None
+
+    def _observe_capability(self, binding, available):
+        with self.lock:
+            self._capability = (binding.scope, available)
 
     def cancel(self, identifier, attempt):
         with self.lock:
@@ -137,6 +151,8 @@ class QQReminderBackend:
         try:
             response = self.client_factory(binding.url).request(PATH, binding.token, payload)
         except StatusError as error:
+            if error.status == 404:
+                self._observe_capability(binding, False)
             if error.status in (400, 401, 403, 404, 413, 422, 429):
                 return "failed", f"远程服务拒绝发送（HTTP {error.status}）"
             return "unknown", f"远程响应不明确（HTTP {error.status}）"
@@ -147,6 +163,7 @@ class QQReminderBackend:
             return "unknown", "远程回执与通知身份不匹配"
         status = response.get("status")
         if status == "sent":
+            self._observe_capability(binding, True)
             return "sent", ""
         if status == "failed":
             return "failed", "远程服务明确报告发送失败"

@@ -1,4 +1,4 @@
-"""Presentation-only control contracts; no calendar or notification service."""
+"""L4: real Tk control contracts; no calendar or notification service."""
 import tkinter as tk
 from types import SimpleNamespace
 import unittest
@@ -17,8 +17,9 @@ class ReminderControlTests(unittest.TestCase):
         return SimpleNamespace(theme=get_theme(theme), dpi=SimpleNamespace(px=lambda value: round(value)),
                                search_font='Segoe UI')
 
-    def test_four_theme_primary_control_uses_semantic_colors(self):
-        for name in ('modern', 'aero', 'paper', 'frutiger'):
+    def test_active_theme_primary_control_uses_semantic_colors(self):
+        # Match main's routine QA scope while v0.14 keeps its current theme registry.
+        for name in ('modern', 'slate'):
             app = self.app(name)
             button = reminder_button(self.root, app, '保存设置', lambda: None, primary=True)
             self.assertEqual(button.cget('bg'), app.theme.accent)
@@ -28,7 +29,7 @@ class ReminderControlTests(unittest.TestCase):
 
     def test_disabled_control_does_not_invoke_action(self):
         called = []
-        app = self.app('paper')
+        app = self.app('modern')
         button = reminder_button(self.root, app, '发送测试通知', lambda: called.append(True))
         button.configure(state='disabled')
         button.invoke()
@@ -37,7 +38,7 @@ class ReminderControlTests(unittest.TestCase):
 
     def test_secondary_control_keeps_existing_callback(self):
         called = []
-        app = self.app('aero')
+        app = self.app('slate')
         button = reminder_button(self.root, app, '打开事项', lambda: called.append(True))
         self.assertEqual(button.cget('bg'), app.theme.control_background)
         button.invoke()

@@ -43,6 +43,9 @@ def event_result(record, ids, *, changed, committed, verified, details=(), recov
 
 
 def reminder_result(record, proof, *, pending=False):
+    if record["preview"].get("object_type") == "reminder_config":
+        return dict(action="reminder_config", operation_id=record["operation_id"], **proof,
+                    committed=True, goal_satisfied=True, scheduling_pending=pending)
     return dict(action="reminder_action", operation_id=record["operation_id"], kind=proof["action"],
                 count=proof["count"], until=proof["until"], changed=proof["changed"],
                 committed=True, goal_satisfied=True, scheduling_pending=pending)
@@ -62,11 +65,16 @@ def execute_reminder(gateway, journal, record, owner):
     require_calendar_write()
     plan = record["preview"]
     try:
-        proof = engine.apply_runtime_action(plan["action_plan"],plan["instances"],gateway.reminder_now(),
-                                            operation_id=record["operation_id"])
+        if plan.get("object_type") == "reminder_config":
+            proof = engine.apply_configuration(plan["configuration_plan"],gateway.reminder_now(),
+                                                operation_id=record["operation_id"],
+                                                authorized=record.get("configuration_authorized") is True)
+        else:
+            proof = engine.apply_runtime_action(plan["action_plan"],plan["instances"],gateway.reminder_now(),
+                                                operation_id=record["operation_id"])
     except (ReminderError, RepositoryConflictError) as error:
         fail(str(error), "reminder_conflict")
-    result = reminder_result(record,proof,pending=proof["action"] != "acknowledge" and engine.dirty)
+    result = reminder_result(record,proof,pending=proof.get("action") != "acknowledge" and engine.dirty)
     record.update(status="succeeded",operation_result=result)
     journal.put("operation",record["operation_id"],owner,record)
     return result

@@ -93,7 +93,7 @@ class CalendarChatService:
         if operation['status'] in ('executing', 'confirmed', 'uncertain'):
             # Restart/crash recovery is observation-only, NEVER re-execution.
             original_status = operation['status']
-            if operation['preview'].get('object_type') == 'reminder':
+            if operation['preview'].get('object_type') in ('reminder','reminder_config'):
                 result = self.gateway.recover_reminder(operation)
                 if result is None:
                     operation.update(status='uncertain',error_code='execution_uncertain',
@@ -153,12 +153,12 @@ class CalendarChatService:
         return self.journal.get('operation', session['pending'], owner)['status'] if session['pending'] else None
 
     def confirm_operation(self, session_id, operation_id, owner=OWNER, source='desktop', revision=None, *,
-                          automatic=False, trigger_request_id=None):
+                          automatic=False, trigger_request_id=None, authorize_remote=False):
         with self.lock:
             if self.stopped:
                 fail('AI服务已停止。', 'service_stopped')
             op = self._operation(session_id, operation_id, owner)
-            runtime_reminder = op['preview'].get('object_type') == 'reminder'
+            runtime_reminder = op['preview'].get('object_type') in ('reminder','reminder_config')
             if runtime_reminder and op.get('source') != source:
                 fail('请在原来源确认提醒操作。', 'authentication_failed')
             if (revision is not None or runtime_reminder) and revision != op.get('revision'):
@@ -169,6 +169,12 @@ class CalendarChatService:
                 return self.get_operation_result(session_id, operation_id, owner)
             if runtime_reminder and automatic:
                 fail('提醒运行操作必须由用户确认。','operation_conflict')
+            config_plan = op['preview'].get('configuration_plan')
+            if config_plan and config_plan['remote_authorization']:
+                if not authorize_remote:
+                    return envelope(session_id,status='confirmation_required',pending_operation=op,plain_reminder=True,
+                                    assistant_message='这项设置可能发送私人日历内容。请回复「授权确认」或「取消」。')
+                op['configuration_authorized'] = True
             if trigger_request_id:
                 op['execution_request_id'] = trigger_request_id
             if op['preview'].get('object_type')=='batch_delete':
@@ -210,7 +216,7 @@ class CalendarChatService:
     def cancel_operation(self, session_id, operation_id, owner=OWNER, source='desktop'):
         with self.lock:
             op = self._operation(session_id, operation_id, owner)
-            if op['preview'].get('object_type') == 'reminder' and op.get('source') != source:
+            if op['preview'].get('object_type') in ('reminder','reminder_config') and op.get('source') != source:
                 fail('请在原来源取消提醒操作。', 'authentication_failed')
             if op['status'] in ('ready','pending'):
                 previous_status = op['status']
@@ -298,6 +304,12 @@ class CalendarChatService:
     def _tool(self, name, args, session, owner, request_id, source, message='', diagnostic=None, continuation=(), target_lock=None, *, structured=False, preview_only=False, expected_before=None):
         validate_call(name, args)
         sid = session['session_id']
+        if name == 'query_reminder_config':
+            result = self.gateway.dispatch(lambda: calendar_reminder_tools.configuration_query(
+                self.gateway,args.get('scope','all')))
+            return envelope(sid,request_id,assistant_message=result['text'],reminder_config=result,plain_reminder=True)
+        if name == 'propose_reminder_config':
+            return calendar_reminder_tools.configuration_proposal(self,session,owner,request_id,source,args['changes'])
         if name == 'query_reminders':
             result = self.gateway.dispatch(lambda: calendar_reminder_tools.query_reminders(self.gateway,args,source))
             rows = result['rows']
@@ -631,7 +643,7 @@ class CalendarChatService:
             deleting = pending is not None and event_action(pending) == 'delete'
             delete_reply = reply in ('删除', '确认删除', '删吧', '确定删除', '删除这批', '最终确认删除')
             delete_reply = delete_reply or deleting and (reply in ('确认','确认执行','确定','可以') or affirmative_reply(reply))
-            conversation = message.strip() not in ('确认', '确认执行', '取消', '取消操作')
+            conversation = reply not in ('确认', '确认执行', '授权确认', '取消', '取消操作')
             working = deepcopy(session)
             try:
                 if reference_target is not None:
@@ -656,11 +668,12 @@ class CalendarChatService:
                 elif delete_reply:
                     response = self._confirm_delete_reply(session, pending if deleting else None, reply,
                                                           owner, source, request_id)
-                elif message.strip() in ('确认', '确认执行') and not session.get('awaiting_create'):
+                elif reply in ('确认', '确认执行', '授权确认') and not session.get('awaiting_create'):
                     visible = session.get('visible_preview', {})
                     if pending_status == 'pending' and visible.get('source') == source and visible.get('kind') != 'batch_delete' and visible.get('id') == session['pending']:
                         response = self.confirm_operation(session_id, session['pending'], owner, source,
-                                                          visible['revision'], trigger_request_id=request_id)
+                                                          visible['revision'], trigger_request_id=request_id,
+                                                          authorize_remote=reply == '授权确认' and visible['kind'] == 'reminder_config')
                     else:
                         response = envelope(session_id, request_id, assistant_message='当前没有可用这条回复确认的预览。')
                 elif message.strip() in ('取消', '取消操作') and session['pending']:
@@ -796,7 +809,13 @@ class CalendarChatService:
                         assistant_message='请先核对当前待删除事项，再确认或取消。')
 
     def _conversation(self, session, message, request_id, owner, source, diagnostic):
-        command = {'/reminders':'query_reminders','/brief':'query_brief'}.get(message.strip().casefold())
+        if message.strip(' 。！!') in ('撤销','撤销上一步','撤销提醒设置') and session.get('pending'):
+            last = self.journal.get('operation',session['pending'],owner)
+            if last['status'] == 'succeeded' and last['preview'].get('object_type') == 'reminder_config':
+                return envelope(session['session_id'],request_id,plain_reminder=True,
+                                assistant_message='提醒设置没有自动撤销。可以明确要求改回指定字段，并确认新预览。')
+        command = {'/reminders':'query_reminders','/brief':'query_brief',
+                   '/reminder-settings':'query_reminder_config'}.get(message.strip().casefold())
         if command and source != 'wechat':
             return self._tool(command,{},session,owner,request_id,source)
         session.pop('member_dates', None)
@@ -1066,7 +1085,10 @@ class CalendarChatService:
             with request_reference(datetime.fromisoformat(context['now'])):
                 return run_model_turn(self.provider, state, session['messages'], diagnostic, dispatch=dispatch_tool,
                                       on_no_tools=on_no_tools, stopped=lambda: self.stopped)
-        scoped = ([tool_definition(name) for name in ('query_reminders', 'clarify')]
-                  if calendar_reminder_tools.is_reminder_lookup(message) else None)
+        scoped = None
+        if calendar_reminder_tools.is_config_lookup(message):
+            scoped = [tool_definition(name) for name in ('query_reminder_config','clarify')]
+        elif calendar_reminder_tools.is_reminder_lookup(message):
+            scoped = [tool_definition(name) for name in ('query_reminders','clarify')]
         return run_model_turn(self.provider, state, session['messages'], diagnostic, dispatch=dispatch_tool,
                               on_no_tools=on_no_tools, stopped=lambda: self.stopped, tools=scoped)

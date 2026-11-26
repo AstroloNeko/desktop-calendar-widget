@@ -477,6 +477,9 @@ class _ChatWidgets:
             self.input.focus_set()
 
     def render_operation(self, operation):
+        if operation['preview'].get('object_type') == 'reminder_config':
+            self.append('全局提醒设置 · 待确认', 'preview')
+            return
         if operation['preview'].get('object_type') == 'reminder':
             preview = operation['preview']
             self.append(f"{preview['description']} · 待确认 · {len(preview['instances'])} 项", 'preview')

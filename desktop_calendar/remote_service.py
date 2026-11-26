@@ -99,14 +99,20 @@ def message_time(job):
     raise ValueError('缺少有效的消息发送时间。')
 
 
+def plain_reminder_receipt(response):
+    preview = (response.get('pending_operation') or {}).get('preview', {})
+    result = response.get('operation_result') or {}
+    return (response.get('plain_reminder') or preview.get('object_type') in ('reminder','reminder_config')
+            or result.get('action') in ('reminder_action','reminder_config'))
+
+
 def make_receipt(response, request_text='', *, business=None):
     status = response['status']
     op = response.get('pending_operation') or {}
     task = response.get('task') or {}
     result = response.get('operation_result') or {}
     preview = op.get('preview', {})
-    reminder_text = (response.get('plain_reminder') or preview.get('object_type') == 'reminder'
-                     or result.get('action') == 'reminder_action')
+    reminder_text = plain_reminder_receipt(response)
     if reminder_text:
         business = None
     ok = status in ('ok', 'succeeded', 'completed', 'clarification_required',
@@ -625,10 +631,7 @@ class RemoteWorker:
 
     def _set_receipt(self, record, response):
         business = None
-        preview = (response.get('pending_operation') or {}).get('preview', {})
-        runtime = ((response.get('operation_result') or {}).get('action') == 'reminder_action'
-                   or preview.get('object_type') == 'reminder' or response.get('plain_reminder'))
-        if record.get('interaction_version') == INTERACTION_VERSION and not runtime:
+        if record.get('interaction_version') == INTERACTION_VERSION and not plain_reminder_receipt(response):
             try:
                 business, record['interaction_reply'] = build_business_receipt(self.service, record, response)
             except (ChatError, KeyError, ValueError, TypeError, OSError, sqlite3.Error):

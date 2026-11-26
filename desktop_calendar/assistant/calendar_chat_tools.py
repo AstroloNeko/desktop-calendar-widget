@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 
 
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError, fail
+from desktop_calendar.reminders.reminder_config import FIELDS as REMINDER_CONFIG_FIELDS
 
 
 def text(limit):
@@ -34,6 +35,23 @@ FIELDS = {
 
 def obj(properties, required=()):
     return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
+
+
+def reminder_configuration_schema():
+    from desktop_calendar.reminders.reminder_config import put
+    properties = {}
+    for field, (label, kind) in REMINDER_CONFIG_FIELDS.items():
+        if kind is bool:
+            schema = {"type":"boolean"}
+        elif kind is str:
+            schema = {**text(5), "pattern":r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"}
+        elif isinstance(kind, range):
+            schema = {"type":"integer","minimum":kind.start,"maximum":kind.stop-1}
+        else:
+            schema = {"type":"integer","enum":kind}
+        put(properties, field, {**schema, "description":label})
+    properties["brief"] = obj(properties["brief"])
+    return obj(properties)
 
 
 HABIT_FIELDS = {
@@ -67,6 +85,8 @@ SCHEMAS = {
         "channel":{"type":"string","enum":["windows","qq"]},
     }),
     "query_brief": obj({"date":text(10), "scope":{"type":"string","enum":["agenda","ddl"]}}),
+    "query_reminder_config": obj({"scope":{"type":"string","enum":["all","event","brief","channels"]}}),
+    "propose_reminder_config": obj({"changes":reminder_configuration_schema()}, ("changes",)),
     "propose_reminder_action": obj({
         "action":{"type":"string","enum":["snooze","cancel_snooze","acknowledge"]},
         "target":obj({"title":text(300),"at":text(16),"key":text(64),
@@ -105,6 +125,8 @@ DESCRIPTIONS = {
     "get_event": "读取本会话查询过的稳定Event ID的详情；不允许猜ID。",
     "query_reminders": "只读并结束本轮，不能作为运行操作的前置搜索。读取真实提醒实例和通知状态。无条件默认今日；start/end为提醒触发日期，at为本地YYYY-MM-DDTHH:MM。按标题查询不必补日期。next只取下一次。失败、未知、错过分别用failed、unknown、missed。last_notification仅能使用本机当前通知关联。",
     "query_brief": "仅用于生成行程或DDL简报，不能用来回答通知或提醒查询。默认本地今日。最近未完成DDL使用scope=ddl。宿主直接返回最终文本。",
+    "query_reminder_config": "只读当前全局提醒、日报设置及通道偏好，返回实际生效值。问是否已开、默认时间、汇总规则或通知渠道用此工具。",
+    "propose_reminder_config": "预览明确要求的全局提醒设置，直接提交局部 changes，无需先查。默认提醒、提前天数、合并和日程通道在顶层；日报/每日简报启用、时间、栏目和渠道只能放在 brief。仅‘以后每天几点发’设置 brief.enabled=true 与 brief.time；‘日报改到几点’只改 brief.time。不推断未要求的字段，不确认、不发送通知、不改账号。",
     "propose_reminder_action": "稍后、取消稍后、标记提醒已处理的唯一提案入口。直接提交用户给的事项名称或原提醒时刻，宿主自行搜索并确认；无需先调用任何查询工具。snooze须给minutes或本地YYYY-MM-DDTHH:MM的until。取消稍后用cancel_snooze，知道了用acknowledge。当前查询序号或刚才那个使用index或last_query；明确说最近通知使用last_notification。仅用户明确要求整条最近通知时用notification_all。不要猜key。",
     "preview_create": "仅预览一个新建事项，不执行。只提供用户明确给出的字段：默认只需title/date。不要补全持续天数、颜色、分类、提醒等默认值；无时间省略time，无分类省略category_id/color_mode。日期时间歧义先clarify。",
     "preview_update": "仅预览一个已明确定位事项的局部changes Patch；只传用户本次要求修改的字段！改名只传title，绝不重发完整Event或默认值。可合并同事项尚未确认变更；不执行。",
@@ -113,10 +135,12 @@ DESCRIPTIONS = {
     "clarify": "信息不明确时向用户澄清，尤其日期/时间或相对提醒；不能宣称写入成功。",
 }
 TASK_TOOLS = {'batch_create_events','batch_update_events','batch_set_completion'}
-READ_TOOLS = {'list_categories', 'query_events', 'get_event', 'query_habits', 'get_habit', 'query_reminders', 'query_brief'}
+READ_TOOLS = {'list_categories', 'query_events', 'get_event', 'query_habits', 'get_habit', 'query_reminders', 'query_brief',
+              'query_reminder_config'}
 PROPOSAL_TOOLS = {'preview_create', 'preview_update', 'preview_complete', 'preview_delete', 'preview_create_habit', 'preview_update_habit'}
 PROPOSAL_TOOLS |= TASK_TOOLS
-PROPOSAL_TOOLS.update(('delete_events_batch', 'propose_events','revise_event_target','propose_reminder_action'))
+PROPOSAL_TOOLS.update(('delete_events_batch', 'propose_events','revise_event_target','propose_reminder_action',
+                       'propose_reminder_config'))
 
 EVENT_ADAPTERS = {'preview_create', 'preview_update', 'preview_complete',
                   'batch_create_events', 'batch_update_events', 'batch_set_completion',

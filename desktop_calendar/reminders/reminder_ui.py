@@ -8,11 +8,12 @@ import time
 from types import SimpleNamespace
 from uuid import uuid4
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from calendar_core import Event, normalize_reminder_time
 from notification_backend import WindowsNotificationBackend
 from desktop_calendar.reminders.reminder_engine import ReminderEngine, ReminderError, LEADS, parse_activation
+from desktop_calendar.reminders.reminder_config import config_plan, field_lines
 from desktop_calendar.reminders.reminder_rules import MAX_DAYS
 from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.reminders.qq_reminders import QQReminderBackend
@@ -217,6 +218,10 @@ class NativeReminderMixin:
                 key, attempt, status, reason = self.qq_reminder_backend.events.get_nowait()
             except queue.Empty:
                 break
+            try:
+                engine.remember_qq_capability()
+            except (OSError, ValueError, RuntimeError) as error:
+                engine.error = str(error)
             if key.startswith("brief-test:"):
                 token = key.removeprefix("brief-test:")
                 pending = self._brief_attempts.get("qq")
@@ -380,7 +385,8 @@ class ReminderSettingsDialog(tk.Toplevel):
         self.status = tk.StringVar(self, value=app.reminder_engine.error or "")
         self.test_status = tk.StringVar(self, value=app._notification_test_status)
         self.qq_test_status = tk.StringVar(self, value=app._qq_test_status)
-        config = app.reminder_engine.config()
+        self.config_snapshot = app.reminder_engine.configuration_snapshot()
+        config = self.config_snapshot["config"]
         self.aggregate = tk.BooleanVar(self, value=config["aggregate"])
         self.merge_backlog = tk.BooleanVar(self, value=config["merge_backlog"])
         self.windows = tk.BooleanVar(self, value=config["windows"])
@@ -808,11 +814,22 @@ class ReminderSettingsDialog(tk.Toplevel):
             brief["time"] = normalize_reminder_time(brief["time"])
             if brief["time"] is None:
                 raise ReminderError("请将简报发送时间填写为 HH:MM，例如 08:00。")
-            self.app.reminder_engine.configure({"enabled": self.enabled.get(), "private": self.private.get(),
-                                                "time": clock, "general_days": self._days(self.general.get()),
-                                                "ddl_days": self._days(self.ddl.get()), "events": self.rules,
-                                                "aggregate": self.aggregate.get(), "merge_backlog": self.merge_backlog.get(),
-                                                "windows": self.windows.get(), "qq": self.qq.get(), "brief": brief})
+            engine = self.app.reminder_engine
+            plan = config_plan(self.config_snapshot, {
+                "enabled": self.enabled.get(), "private": self.private.get(), "time":clock,
+                "general_days":self._days(self.general.get()), "ddl_days":self._days(self.ddl.get()),
+                "aggregate":self.aggregate.get(), "merge_backlog":self.merge_backlog.get(),
+                "windows":self.windows.get(), "qq":self.qq.get(), "brief":brief,
+            }, rules=self.rules)
+            authorized = False
+            if plan["remote_authorization"]:
+                _, plan["binding_scope"] = engine.delivery.qq_status()
+                authorized = messagebox.askyesno("授权通知设置",
+                    "\n".join(field_lines(plan["fields"]))+"\n\n这些设置可能向已验证的远程服务发送私人日历内容。是否授权？",
+                    parent=self)
+                if not authorized:
+                    return False
+            engine.apply_configuration(plan, datetime.now(), authorized=authorized)
             self.app.invalidate_reminders()
             self.close()
             return True

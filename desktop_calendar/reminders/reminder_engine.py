@@ -16,21 +16,17 @@ from urllib.parse import parse_qs, urlencode
 
 from calendar_core import normalize_reminder_time
 from desktop_calendar.reminders.notification_model import brief_settings
+from desktop_calendar.reminders.reminder_config import LEADS as LEADS, ReminderError as ReminderError, active_qq, verify_plan
 from desktop_calendar.reminders.reminder_rules import (
     CONFIG_KEY as CONFIG_KEY, MAX_MINUTES, effective_mode, normalize_event_rule,
 )
 
 STATE_KEY = "native_reminder_state"
-LEADS = (0, 1, 3)
 SNOOZES = (10, 30, 60)
 CATCHUP = timedelta(hours=24)
 RETRY = timedelta(minutes=2)
 DEFAULT_CONFIG = {"version": 1, "enabled": False, "time": "09:00",
                   "general_days": 0, "ddl_days": 1, "private": False, "events": {}}
-
-
-class ReminderError(ValueError):
-    pass
 
 
 def normalize_config(raw):
@@ -219,7 +215,8 @@ class ReminderEngine:
             raise ReminderError("提醒记录版本不兼容，已停止提醒；日历数据未改变。")
         return {"version": 1, **{
             key: deepcopy(raw[key]) if isinstance(raw.get(key), dict) else {}
-            for key in ("deliveries", "snoozes", "batches", "qq_cutover", "handled", "runtime_actions")
+            for key in ("deliveries", "snoozes", "batches", "qq_cutover", "handled", "runtime_actions",
+                        "config_versions", "config_actions", "config_cutovers", "qq_capability_required", "qq_capabilities")
         }}
 
     def _save(self, key, value):
@@ -248,6 +245,75 @@ class ReminderEngine:
             self.delivery.qq.set_privacy(normalized["private"])
         self.invalidate()
 
+    def configuration_snapshot(self):
+        return {"config": self.config(), "versions": self._state()["config_versions"]}
+
+    def apply_configuration(self, plan, now, *, operation_id=None, authorized=False):
+        """Publish the fields, dispatch policy, and execution proof together."""
+        from desktop_calendar.reminders.reminder_config import put
+        now = local_wall(now)
+        current, state = self.config(), self._state()
+        if operation_id and operation_id in state["config_actions"]:
+            return state["config_actions"][operation_id]
+        updated = verify_plan(plan, current, state["config_versions"])
+        if plan["remote_authorization"] and not authorized:
+            raise ReminderError("请明确授权涉及私人日历数据的设置。")
+        qq_status, binding_scope = self.delivery.qq_status()
+        if plan["remote_authorization"] and plan.get("binding_scope") != binding_scope:
+            raise ReminderError("已核验的通知绑定发生变化，请重新预览并授权。")
+        changed = bool(plan["fields"] or plan["rules"])
+        proof = {"fields":plan["fields"], "changed":changed, "qq_status":qq_status,
+                 "qq_enabled":any(active_qq(updated)), "recorded_at":now.isoformat(),
+                 "remote_authorization":plan["remote_authorization"]}
+        if not changed:
+            return proof
+        for field in plan["fields"]:
+            versions = state["config_versions"]
+            versions[field] = versions.get(field, 0) + 1
+        self.delivery.prepare_config_change(state, current, updated, now)
+        if operation_id:
+            actions = state["config_actions"]
+            actions[operation_id] = proof
+            if len(actions) > 256:
+                actions.pop(min(actions, key=lambda key: actions[key]["recorded_at"]))
+        # Retain unrecognized settings and unrelated event overrides.
+        raw = self.store.settings.get(CONFIG_KEY)
+        stored = deepcopy(raw) if isinstance(raw, dict) else {}
+        for field, edit in plan["fields"].items():
+            if field.startswith("brief.") and not isinstance(stored.get("brief"), dict):
+                stored["brief"] = {}
+            put(stored, field, edit["after"])
+        if plan["rules"]:
+            if not isinstance(stored.get("events"), dict):
+                stored["events"] = {}
+            for identifier, edit in plan["rules"].items():
+                if edit["after"] is None:
+                    stored["events"].pop(identifier, None)
+                else:
+                    stored["events"][identifier] = edit["after"]
+        if normalize_config(stored) != updated:
+            raise ReminderError("设置未通过保存前核验。")
+        repository = self.store.repository
+        options = {"operation_id":operation_id} if operation_id and callable(getattr(repository, "receipt", None)) else {}
+        with self.delivery.configuration_guard():
+            repository.apply_changes({}, preference_updates={CONFIG_KEY:stored, STATE_KEY:state}, **options)
+            self.revision += 1
+            self.delivery.refresh_configuration(current, updated)
+        return proof
+
+    def configuration_receipt(self, operation_id):
+        return self._state()["config_actions"].get(operation_id)
+
+    def remember_qq_capability(self):
+        state = self._state()
+        status, scope = self.delivery.qq_status(state)
+        if status not in ("available", "unsupported"):
+            return
+        known = {"scope":scope, "available":status == "available"}
+        if state["qq_capabilities"] != known:
+            state["qq_capabilities"] = known
+            self._save(STATE_KEY, state)
+
     def invalidate(self):
         self.dirty = True
 
@@ -267,7 +333,7 @@ class ReminderEngine:
         self.error = ""
         return True
 
-    def _rebuild(self):
+    def _rebuild(self, *, refresh_brief=False):
         config = self.config()
         previous_plans = self.plans
         self.plans = {plan.event_id: plan for plan in plans_for_store(self.store, config)}
@@ -284,7 +350,7 @@ class ReminderEngine:
                     self.backend.remove(entry["key"][:16])
                 del state["snoozes"][identifier]
                 changed = True
-        self.delivery.remove_stale(state)
+        self.delivery.remove_stale(state, refresh_brief=refresh_brief)
         if changed:
             self._save(STATE_KEY, state)
         ready = []

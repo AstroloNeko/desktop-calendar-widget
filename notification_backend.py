@@ -108,6 +108,7 @@ class WindowsNotificationBackend:
         self._thread = None
         self._transport = None
         self._transport_lock = threading.Lock()
+        self._policy_lock = threading.RLock()
         self._cancelled_tags = set()
         self._stopped = False
         self.status = "尚未启用"
@@ -121,8 +122,9 @@ class WindowsNotificationBackend:
 
     def send(self, plan, title, text, actions):
         self.start()
-        self._cancelled_tags.discard(plan.tag)
-        self._jobs.put(("show", (plan, title, text, actions)))
+        with self._policy_lock:
+            self._cancelled_tags.discard(plan.tag)
+            self._jobs.put(("show", (plan, title, text, actions)))
 
     def send_test(self, *, title=None, text=None):
         """Explicit synthetic test, independent of opt-in and event ledgers."""
@@ -132,9 +134,13 @@ class WindowsNotificationBackend:
         return token
 
     def remove(self, tag):
-        self._cancelled_tags.add(tag)
-        if self._thread and not self._stopped:
-            self._jobs.put(("remove", tag))
+        with self._policy_lock:
+            self._cancelled_tags.add(tag)
+            if self._thread and not self._stopped:
+                self._jobs.put(("remove", tag))
+
+    def configuration_guard(self):
+        return self._policy_lock
 
     def close(self):
         if self._stopped:
@@ -199,7 +205,9 @@ class WindowsNotificationBackend:
                         arguments = (plan.activation if isinstance(plan, Notice) and not plan.event_id
                                      else notification_arguments(plan))
                     try:
-                        if tag in self._cancelled_tags:
+                        with self._policy_lock:
+                            cancelled = tag in self._cancelled_tags
+                        if cancelled:
                             if not testing and isinstance(plan, Notice):
                                 self.events.put(("notice_delivery", (plan.key, plan.attempt, "cancelled", "")))
                             continue

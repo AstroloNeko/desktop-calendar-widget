@@ -1,6 +1,6 @@
 """Evaluation harness tests. Network use and credential access are mocked."""
 from collections import Counter
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from io import StringIO
 import json
@@ -340,8 +340,14 @@ class CalendarAgentEvaluationTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp,
             redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()) as errors,
             patch.object(eval_tool,'live_provider',return_value=(injected,('credential-sample',),'fake-live')) as loader,
         ):
+            with self.assertRaises(SystemExit) as missing_config:
+                eval_tool.main(['--mode','live','--output',temp])
+            self.assertEqual(missing_config.exception.code, 2)
+            self.assertIn('requires an explicit --config', errors.getvalue())
+            loader.assert_not_called()
             path = str(Path(temp)/'configuration.dpapi')
             result = eval_tool.main(['--mode','live','--config',path,'--cases',fixture['case_id'],
                                      '--max-calls','1','--output',temp])

@@ -17,6 +17,10 @@ def build_messages(state, history):
                  json.dumps(state, ensure_ascii=False)},
                 *({'role': item['role'], 'content': item['content']} for item in history[-1:])]
     system = ('你是桌面月历助理。当前本地日期时间与可信会话状态见下方。只能用工具查询或预览，绝无权限执行写入、删除或调用Shell。'
+              '【全局设置】“默认提醒钟点、一般事项或DDL统一提前天数、合并提醒、通知通道、隐私、每日简报发送设置”均为全局配置。'
+              '修改用 propose_reminder_config，一次提交用户明确要求的全部字段。读取当前设置只用 query_reminder_config。'
+              '日报与每日简报同义；日报设置放在 brief，顶层 windows/qq 仅日程及DDL使用。'
+              '问简报设置走配置查询，问简报内容走 query_brief。明确提到某一事项的时间或规则继续使用事项工具。'
               '【提醒运行操作】“推迟/延后/稍后提醒”“取消稍后提醒”“提醒已处理/知道了”属于运行操作。'
               '用户要求这些动作时，直接调用一次 propose_reminder_action，保留用户指定的 minutes 或 until，'
               '已给事项名称就直接传 target.title，无需先查计划键、事项 ID 或询问确认。由宿主查询、选目标、确认。'

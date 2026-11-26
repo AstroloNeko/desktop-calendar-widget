@@ -838,7 +838,7 @@ def main(argv=None):
     parser.add_argument('--max-calls', type=int, help='Whole-run model call budget (Live defaults to 120)')
     parser.add_argument('--dataset', type=Path, default=DATASET)
     parser.add_argument('--output', type=Path, default=ROOT/'build'/'calendar-agent-eval')
-    parser.add_argument('--config', type=Path, help='Read-only path to the existing configuration.dpapi for Live mode')
+    parser.add_argument('--config', type=Path, help='Required read-only QA configuration.dpapi for Live mode')
     args = parser.parse_args(argv)
     try:
         require(1 <= args.repeat <= REPEAT_LIMIT, f'--repeat must be 1..{REPEAT_LIMIT}')
@@ -846,6 +846,7 @@ def main(argv=None):
         max_calls = limit if args.max_calls is None else args.max_calls
         require(1 <= max_calls <= limit, f'--max-calls must be 1..{limit}')
         require(args.config is None or args.mode == 'live', '--config is available only with --mode live')
+        require(args.mode != 'live' or args.config is not None, '--mode live requires an explicit --config')
         require(args.dataset.suffix.lower() == '.json', 'dataset must be synthetic JSON')
         require(not args.output.resolve().is_relative_to(DATA_DIR.resolve()), 'unsafe report output')
         require(not args.dataset.resolve().is_relative_to(DATA_DIR.resolve()), 'unsafe dataset path')
@@ -862,8 +863,7 @@ def main(argv=None):
                      else f'Invalid evaluation input ({type(error).__name__})')
     try:
         if args.mode=='live':
-            config = args.config or DATA_DIR/'ai-assistant'/'configuration.dpapi'
-            provider, secrets, model = live_provider(config)
+            provider, secrets, model = live_provider(args.config)
         else:
             provider, secrets, model = MockProvider(), (), 'scripted'
     except (ChatError, OSError, ValueError, KeyError, TypeError):

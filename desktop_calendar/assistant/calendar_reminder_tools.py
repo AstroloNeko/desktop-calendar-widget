@@ -8,12 +8,82 @@ from desktop_calendar.assistant.calendar_chat_protocol import envelope, fail
 from desktop_calendar.assistant.calendar_chat_tools import iso_day, reference_today
 from desktop_calendar.reminders.notification_dispatch import read_time
 from desktop_calendar.reminders.notification_model import BRIEF_GROUP_LABELS, brief_items
+from desktop_calendar.reminders.reminder_config import FIELDS, config_plan, field_lines, impacts, lookup, public_config, put
 from desktop_calendar.reminders.reminder_engine import CONFIG_KEY, CATCHUP, ReminderError, normalize_config
 from desktop_calendar.reminders.reminder_runtime import channel_members, snooze_time
 
 LIMIT = 10
 TTL = 900
 LABELS = {"snooze":"稍后提醒", "cancel_snooze":"取消稍后提醒", "acknowledge":"标记提醒已处理"}
+QQ_STATE = {"available":"已核验主动推送能力", "unsupported":"当前云端没有主动推送接口",
+            "unbound":"当前没有已核验的绑定", "unverified":"当前绑定的主动推送能力尚未核验"}
+
+
+def is_config_lookup(message):
+    return bool(re.search(r"设置|配置|开关|默认几点|默认时间|提前几天|发到哪|在哪.*发送", message)
+                and re.search(r"提醒|简报|日报|通知", message)
+                and re.search(r"查|看|什么|多少|几点|几天|开了吗|开启了吗|发到哪|在哪", message)
+                and not re.search(r"改|设为|帮我|打开|关闭|启用|停用|以后|只发|不要", message))
+
+
+def configuration_query(gateway, scope):
+    engine = reminder_engine(gateway)
+    config = public_config(engine.config())
+    fields = tuple(FIELDS)
+    if scope in ("event", "brief"):
+        fields = tuple(field for field in fields if field.startswith("brief.") == (scope == "brief"))
+    elif scope == "channels":
+        fields = ("windows", "qq", "brief.windows", "brief.qq", "private")
+    shown = {}
+    lines = ["当前提醒设置"]
+    for field in fields:
+        value = lookup(config, field)
+        put(shown, field, value)
+        text = "开启" if value is True else "关闭" if value is False else str(value)
+        lines.append(f"{FIELDS[field][0]} · {text}")
+    qq_status, _ = engine.delivery.qq_status()
+    if scope in ("all", "channels"):
+        lines.append("QQ · "+QQ_STATE[qq_status])
+    return {"settings":shown, "qq_status":qq_status, "text":"\n".join(lines)}
+
+
+def configuration_proposal(service, session, owner, request_id, source, changes):
+    gateway = service.gateway
+    sid = session["session_id"]
+
+    def prepare():
+        engine = reminder_engine(gateway)
+        try:
+            plan = config_plan(engine.configuration_snapshot(), changes)
+        except ReminderError as error:
+            fail(str(error))
+        if plan["remote_authorization"]:
+            plan["qq_status"], plan["binding_scope"] = engine.delivery.qq_status()
+        return plan
+
+    plan = gateway.dispatch(prepare)
+    if not plan["fields"]:
+        return envelope(sid, request_id, assistant_message="当前提醒设置已符合要求。", plain_reminder=True)
+    previous = service._operation(sid, session["pending"], owner) if session.get("pending") else None
+    if previous and previous["status"] in ("pending", "ready", "executing", "uncertain"):
+        fail("请先处理当前的待确认操作。", "confirmation_required")
+    preview = {"object_type":"reminder_config", "action":"reminder_config", "description":"修改全局提醒设置",
+               "event_id":"reminder_config", "after":{}, "configuration_plan":plan}
+    op = dict(operation_id=secrets.token_urlsafe(24), session_id=sid, request_id=request_id, source=source,
+              status="pending", preview=preview, expires=service.clock()+TTL, revision=secrets.token_urlsafe(24),
+              requires_confirmation=True)
+    session.pop("event_input", None)
+    service.journal.put("operation", op["operation_id"], owner, op)
+    session["pending"] = op["operation_id"]
+    service._audit(op, owner, source)
+    lines = ["待确认的提醒设置", *field_lines(plan["fields"]), impacts(plan["fields"])]
+    if plan["remote_authorization"]:
+        lines += ["隐私提示 · 这些设置可能向已核验的远程服务发送私人日历内容。",
+                  "QQ · "+QQ_STATE[plan["qq_status"]], "同意请回复「授权确认」，或回复「取消」。"]
+    else:
+        lines.append("不会新增远程数据发送授权。回复「确认」或「取消」。")
+    return envelope(sid, request_id, status="confirmation_required", pending_operation=op,
+                    plain_reminder=True, assistant_message="\n".join(lines))
 
 
 def is_reminder_lookup(message):
@@ -91,7 +161,9 @@ def query_reminders(gateway, args, source):
     at = clock_value(args["at"]) if "at" in args else None
     title = args.get("title","").strip()
     data = []
-    has_channel = config["windows"] or config["qq"] and engine.delivery.binding() is not None
+    qq_status, _ = engine.delivery.qq_status(state) if config["qq"] and kind == "next" else ("unbound", None)
+    has_channel = config["windows"] or config["qq"] and qq_status not in ("unbound","unsupported") and (
+        not state["qq_capability_required"].get("event") or qq_status == "available")
     for row in rows.values():
         if title and title.casefold() not in row["title"].casefold() or at and row["when"].replace(second=0, microsecond=0) != at:
             continue
