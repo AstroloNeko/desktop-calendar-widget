@@ -16,6 +16,7 @@ from desktop_calendar.remote_notifications import (
 )
 from desktop_calendar.remote_service import JOBS, RemoteWorker, claim_checked_at
 from desktop_calendar.remote_transport import CLAIM_PATH, StatusError, Unavailable
+from version import __version__
 import test_remote_service as fixture
 from test_calendar_chat import tool
 
@@ -479,7 +480,7 @@ class NotificationContractTests(unittest.TestCase):
         path, token, body = client.request.call_args.args
         self.assertEqual((path, token), ('/api/notifications/session', fixture.CONFIG['remote_token']))
         self.assertEqual(json.loads(body), {
-            'interaction_schema_version': 1, 'client_version': '0.13.1',
+            'interaction_schema_version': 1, 'client_version': __version__,
             'capabilities': ['business_receipt', 'action', 'reference', 'quick_query'],
         })
         self.assertEqual(credentials.interaction_capabilities, ())
@@ -913,7 +914,7 @@ class WorkerTriggerTests(unittest.TestCase):
         for path, declaration in claims[:3]:
             self.assertEqual(path, CLAIM_PATH)
             self.assertEqual(declaration, {
-                'interaction_schema_version': 1, 'client_version': '0.13.1',
+                'interaction_schema_version': 1, 'client_version': __version__,
                 'capabilities': ['business_receipt', 'action', 'reference', 'quick_query'],
             })
         self.assertTrue(worker.notification_online)
