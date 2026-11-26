@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Event, Store
 from desktop_calendar.reminders.reminder_engine import STATE_KEY, plans_for_store
+from desktop_preferences import ACTIVE_THEME_NAMES
 from dpi_utils import dpi_for_window, enable_dpi_awareness
 from tools.check_habit_schedules import capture_own_window
 from tools.check_interactions import cleanup, pump
@@ -327,7 +328,7 @@ def main():
             native = dpi_for_window(app)
             seed(app)
             cases = [run_case(app, theme, dpi, native, output)
-                     for dpi in dict.fromkeys((native, 96, 120, 144)) for theme in ("modern", "slate")]
+                     for dpi in dict.fromkeys((native, 96, 120, 144)) for theme in ACTIVE_THEME_NAMES]
             app.reminder_engine.configure({"enabled": False})
             app.open_reminder_plans()
             window = app.notification_settings_window

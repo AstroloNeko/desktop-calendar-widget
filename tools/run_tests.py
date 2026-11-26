@@ -17,7 +17,8 @@ DESKTOP_SCRIPTS = frozenset('''
     check_final_visuals check_frameless_global check_global_hotkey check_global_sidebar
     check_habit_schedules check_interactions check_mutation_transactions
     check_native_notifications check_native_reminder_app check_rc_updater_gate
-    check_release_history check_reminder_center check_reminder_ui check_reminder_visuals
+    check_release_history check_reminder_center check_reminder_ef_native check_reminder_ui
+    check_reminder_ui_special check_reminder_v0140 check_reminder_visuals
     check_secondary_surfaces check_sqlite_rc_exe check_storage_upgrade_button
     check_system_tray check_update_compatibility check_update_dialog check_v092_visuals
     check_window_drag

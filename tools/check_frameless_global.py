@@ -255,7 +255,9 @@ def main():
     parser.add_argument("--taskbar", action="store_true")
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--shell-only", action="store_true")
-    parser.add_argument("--themes", nargs="+", choices=ACTIVE_THEME_NAMES, default=ACTIVE_THEME_NAMES)
+    parser.add_argument("--layout-only", action="store_true", help="Check rendered DPI layout without native input.")
+    parser.add_argument("--themes", nargs="+", choices=ACTIVE_THEME_NAMES,
+                        default=ACTIVE_THEME_NAMES)
     options = parser.parse_args()
     if os.name != "nt":
         raise SystemExit("Windows GUI session required")
@@ -282,6 +284,7 @@ def main():
     with tempfile.TemporaryDirectory() as temporary:
         with patch.object(CalendarApp, "_start_tray_icon"), patch.object(CalendarApp, "check_reminders"):
             app = CalendarApp(Store(Path(temporary) / "data.json"))
+            app._storage_prompt_dismissed = True  # Keep the header fixture independent of upgrade onboarding.
             app.report_callback_exception = lambda *parts: errors.append("".join(traceback.format_exception(*parts)))
             try:
                 app.enter_global_view()
@@ -307,6 +310,10 @@ def main():
                                 app.geometry(scaled_geometry(width, 600, 80, 50, dpi))
                                 pump(app, .22)
                                 assert_header(app)
+                    if options.layout_only:
+                        assert not errors, errors
+                        print(theme, "96/120/144/168/192 header layout: passed", flush=True)
+                        continue
                     # Restore real monitor DPI for native Z-order and screenshots.
                     app._apply_dpi_change(actual_dpi)
                     pump(app, .25)
@@ -399,6 +406,8 @@ def main():
                     assert not errors, errors
                     print(theme, "96/120/144/168/192 layout; pin/modal/category/Compact/search: passed", flush=True)
 
+                if options.layout_only:
+                    return
                 # Header whitespace drags the window, controls don't bind that gesture.
                 app.geometry(scaled_geometry(1000, 600, 80, 50, actual_dpi))
                 pump(app, .2)

@@ -71,7 +71,7 @@ def clickable(button):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--screenshots', type=Path)
-    parser.add_argument('--theme', choices=ACTIVE_THEME_NAMES, default='modern')
+    parser.add_argument('--theme', choices=ACTIVE_THEME_NAMES, default=ACTIVE_THEME_NAMES[0])
     parser.add_argument('--dpi', type=int, choices=(96, 192))
     args = parser.parse_args()
     if args.screenshots:
@@ -119,6 +119,19 @@ def main():
                     assert not side.winfo_manager() and not side.snapshot()[5]
                     assert side.drawer_button.text == '展开右栏'
                     assert app.global_timeline_canvas.winfo_width() > timeline_width
+                    closed = side.snapshot()
+                    app._rebuild_main_ui(app.quick_var.get(), app.quick_placeholder_active)
+                    pump(app)
+                    side = app.global_detail_frame
+                    assert side.snapshot() == closed and not side.winfo_manager()
+                    # Existing five-field snapshots reopen in the historical docked state.
+                    with patch.object(side, 'snapshot', return_value=closed[:5]):
+                        app._rebuild_main_ui(app.quick_var.get(), app.quick_placeholder_active)
+                    pump(app)
+                    side = app.global_detail_frame
+                    assert side.snapshot()[:5] == closed[:5] and side.dock_open
+                    side.toggle_drawer()
+                    pump(app)
                     app._focus_quick_entry()
                     pump(app)
                     assert side.winfo_manager() == 'grid' and side.snapshot()[5]

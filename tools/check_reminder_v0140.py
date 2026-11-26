@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import CalendarApp
 from calendar_core import Event, Store
 from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
+from desktop_preferences import ACTIVE_THEME_NAMES
 from dpi_utils import dpi_for_window
 from tools.check_habit_schedules import capture_own_window
 
@@ -88,11 +89,14 @@ def main():
         return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--theme", default="modern", choices=("modern", "paper", "aero"))
+    parser.add_argument("--theme", default=ACTIVE_THEME_NAMES[0], choices=ACTIVE_THEME_NAMES)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--visual-only", action="store_true")
     mode.add_argument("--lifecycle-only", action="store_true")
+    mode.add_argument("--send-native", action="store_true", help="Send a real synthetic Windows notification")
     args = parser.parse_args()
+    if not (args.visual_only or args.lifecycle_only or args.send_native):
+        parser.error("choose --visual-only, --lifecycle-only or --send-native")
     args.output.mkdir(parents=True, exist_ok=True)
     if args.lifecycle_only:
         return check_lifecycle(args.output)
@@ -219,7 +223,10 @@ def main():
     app.after(35, heartbeat)
     app.after(200, setup)
     app.after(59000, finish)
-    app.mainloop()
+    try:
+        app.mainloop()
+    finally:
+        store.repository.close()
     if args.visual_only:
         return 0 if not report["errors"] and report.get("visible_plan_members") == 8 else 2
     return 0 if (not report["errors"] and report.get("member_count") == report.get("distinct_members") == 8

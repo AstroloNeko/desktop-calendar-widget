@@ -79,7 +79,7 @@ def scenario(mode, root):
                 history = None
             observations.put({"tag":tag,"history_count":history})
 
-    app = None
+    app = monitor = None
     with patch("notification_backend.WinRTTransport",ObservedTransport):
         try:
             app = CalendarApp(store)
@@ -145,14 +145,19 @@ def scenario(mode, root):
         except (OSError, RuntimeError, ValueError) as error:
             report["errors"].append(str(error))
         finally:
-            if app is not None:
-                for window in (app.notification_settings_window,app.editor_window):
-                    if window is not None and window.winfo_exists():
-                        window.close()
-                if app.lifecycle.hidden:
-                    app.restore_from_tray()
-                cleanup(app)
-            store.repository.close()
+            if monitor is not None and monitor.poll() is None:
+                monitor.kill()
+                monitor.communicate()
+            try:
+                if app is not None:
+                    for window in (app.notification_settings_window, app.editor_window):
+                        if window is not None and window.winfo_exists():
+                            window.close()
+                    if app.lifecycle.hidden:
+                        app.restore_from_tray()
+                    cleanup(app)
+            finally:
+                store.repository.close()
     return report
 
 
@@ -163,7 +168,10 @@ def main():
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--modes",nargs="+",choices=("settings","editor","minimized","tray","test","brief","snooze"),
                         default=("settings","editor","minimized","tray","test","brief","snooze"))
+    parser.add_argument("--send-native", action="store_true", help="Send real synthetic Windows notifications")
     args = parser.parse_args()
+    if not args.send_native:
+        parser.error("real Windows notifications require --send-native")
     args.output.mkdir(parents=True,exist_ok=True)
     reports = []
     for mode in args.modes:

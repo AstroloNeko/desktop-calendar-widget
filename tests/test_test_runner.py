@@ -74,7 +74,10 @@ class OfflineChecks(unittest.TestCase):
         self.assertIn('synthetic failure', result.stderr)
 
     def test_windows_requires_explicit_opt_in(self):
-        for args in (('--windows',), ('--desktop-script', 'check_frameless_global')):
+        for args in (('--windows',), ('--desktop-script', 'check_frameless_global'),
+                     ('--desktop-script', 'check_reminder_v0140'),
+                     ('--desktop-script', 'check_reminder_ef_native'),
+                     ('--desktop-script', 'check_reminder_ui_special')):
             with self.subTest(args=args):
                 result = self.invoke(*args)
                 self.assertEqual(result.returncode, 2, result.stderr)
