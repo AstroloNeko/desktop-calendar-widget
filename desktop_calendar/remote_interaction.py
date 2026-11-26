@@ -297,6 +297,10 @@ def execute_proactive(service, record, context, reference_now, worker):
         notification_type = context.get('notification_type')
         _, _, batch, qq = engine.verified_qq_batch(identifier,binding,now,attempt,notification_type)
         action, index, minutes = context.get('action'), None, 10
+        if action is not None and batch['kind'] == 'brief':
+            fail('此操作只适用于原日程或 DDL 提醒。','action_expired')
+        if action == 'snooze_10m' and len(qq['members']) > 20:
+            fail('原通知只展示前 20 项，请按编号引用或到桌面端操作。','clarification_required')
         if action is None:
             text = record['text'].strip(' 。！!')
             if notification_type == 'brief':

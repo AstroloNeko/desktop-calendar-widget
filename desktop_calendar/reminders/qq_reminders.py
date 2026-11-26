@@ -46,7 +46,7 @@ def notice_payload(notice, binding, private):
     else:
         fallback = notice.summary(20)[:3800]
         if notice.kind in ("event","ddl") and len(notice.items) > 20:
-            fallback += f"\n共 {len(notice.items)} 项。按钮作用于本通知中仍有效的全部提醒实例。"
+            fallback += f"\n共 {len(notice.items)} 项。知道了作用于本批仍有效的全部提醒。超过 20 项时请按编号引用或到桌面端稍后处理。"
     wire_items = [] if private else [
         {**{key: item[key] for key in ("title", "group", "date", "time") if key in item}, "index": index}
         for index, item in enumerate(notice.items[:50], 1)

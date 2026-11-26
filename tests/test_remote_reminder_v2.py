@@ -115,6 +115,15 @@ class RemoteReminderV2Tests(TestCase):
         self.assertEqual(self.reply(job)["error"],"action_expired")
         self.assertEqual(self.provider.messages,[])
 
+    def test_truncated_batch_rejects_snooze_button_but_accepts_acknowledge(self):
+        self.enable()
+        notice = self.seed(25)
+        denied = self.reply(self.job("truncated-button",context=self.action(notice,"snooze_10m")))
+        self.assertFalse(denied["ok"])
+        ack = self.reply(self.job("truncated-ack",context=self.action(notice,"acknowledge")))
+        self.assertEqual(ack["business_receipt"]["reminder_summary"]["count"],25)
+        self.assertEqual(self.provider.messages,[])
+
     def test_v1_cannot_receive_v2_and_text_fallback_does_not_execute(self):
         self.enable()
         self.worker._notification(0,VerifiedAccount("owner-one",interaction_version=1,

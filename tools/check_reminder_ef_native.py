@@ -38,10 +38,16 @@ def visible_test_banner(title):
     $root=[Windows.Automation.AutomationElement]::RootElement
     $name=[Windows.Automation.AutomationElement]::NameProperty
     $condition=[Windows.Automation.PropertyCondition]::new($name,'TITLE')
+    $shells=@(Get-Process explorer,ShellExperienceHost,ShellHost,StartMenuExperienceHost -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.Id })
     $until=(Get-Date).AddSeconds(7)
     while ((Get-Date) -lt $until) {
-        $item=$root.FindFirst([Windows.Automation.TreeScope]::Descendants,$condition)
-        if ($item -and -not $item.Current.IsOffscreen) { 'visible'; exit 0 }
+        $windows=$root.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition)
+        foreach ($window in $windows) {
+            if ($window.Current.ProcessId -notin $shells) { continue }
+            $item=$window.FindFirst([Windows.Automation.TreeScope]::Descendants,$condition)
+            if ($item -and -not $item.Current.IsOffscreen) { 'visible'; exit 0 }
+        }
         Start-Sleep -Milliseconds 100
     }
     exit 1
@@ -107,9 +113,11 @@ def scenario(mode, root):
                 try:
                     output, _ = monitor.communicate(timeout=12)
                     report["on_screen_marker"] = output.strip() == b"visible"
+                    report["on_screen_probe_exit"] = monitor.returncode
                 except subprocess.TimeoutExpired:
                     monitor.kill()
                     monitor.communicate()
+                    report["on_screen_probe_timeout"] = True
                 report["human_activation"] = app._notification_test_clicked
                 report["status"] = app._notification_test_status
                 report["windows_submitted"] = report["human_activation"] or "已提交给 Windows" in report["status"]
