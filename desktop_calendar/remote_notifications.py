@@ -9,6 +9,7 @@ import time
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 from desktop_calendar.remote_cloud import AccountMismatch, NotificationSession, firebase_origin, valid_account
+from desktop_calendar.remote_interaction import LEGACY_CAPABILITIES
 from desktop_calendar.remote_transport import StatusError, Unavailable
 
 
@@ -25,6 +26,7 @@ class VerifiedAccount:
     account_id: str = field(repr=False)
     display_name: str = field(default='', repr=False)
     interaction_version: int = 0
+    interaction_capabilities: tuple = LEGACY_CAPABILITIES
 
 
 def sse_events(chunks):
@@ -234,7 +236,8 @@ class NotificationListener:
                     if stop.is_set():
                         break
                     if self.changed(generation, VerifiedAccount(credentials.account_id, credentials.display_name,
-                                                                credentials.interaction_version)) is False:
+                                                                credentials.interaction_version,
+                                                                credentials.interaction_capabilities)) is False:
                         raise Unavailable
                     if not stop.is_set() and self.stream(credentials, stop, ready, wake):
                         delay = self.retry[0]

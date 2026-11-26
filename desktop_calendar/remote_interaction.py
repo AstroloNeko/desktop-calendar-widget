@@ -1,4 +1,6 @@
 """Opt-in v1 business receipts and locally authorized remote interactions."""
+from datetime import date
+import json
 import re
 import secrets
 
@@ -6,9 +8,15 @@ from desktop_calendar.assistant.calendar_chat_protocol import (
     ChatError, envelope, fail, fingerprint, require_calendar_write,
 )
 from desktop_calendar.remote_history import describe_response
+from version import __version__
 
 
 VERSION = 1
+LEGACY_CAPABILITIES = ('business_receipt', 'action', 'reference')
+CAPABILITIES = (*LEGACY_CAPABILITIES, 'quick_query')
+CAPABILITY_REQUEST = json.dumps({
+    'interaction_schema_version': VERSION, 'capabilities': CAPABILITIES, 'client_version': __version__,
+}, separators=(',', ':')).encode('utf-8')
 TTL = 900
 JOBS = 'wechat-job'
 ACTION_USE = 'remote-action-use'
@@ -23,6 +31,21 @@ def interaction_from_job(value):
     if not isinstance(value, dict) or type(value.get('schema_version')) is not int or value['schema_version'] != VERSION:
         raise ValueError('不支持的远程交互协议。')
     kind, source = value.get('kind'), value.get('source_msg_id')
+    if kind == 'quick_query':
+        fields = {'schema_version', 'kind', 'command', 'start', 'end', 'ddl_only'}
+        if (not fields <= value.keys() <= fields | {'done'}
+                or value['command'] not in ('today', 'tomorrow', 'week', 'ddl')
+                or type(value['ddl_only']) is not bool
+                or ('done' in value and type(value['done']) is not bool)):
+            raise ValueError('快捷查询格式无效。')
+        start, end = value['start'], value['end']
+        if not all(isinstance(day, str) and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', day)
+                   for day in (start, end)):
+            raise ValueError('快捷查询日期格式无效。')
+        first, last = date.fromisoformat(start), date.fromisoformat(end)
+        if not (1900 <= first.year <= last.year <= 2199 and 0 <= (last - first).days <= 366):
+            raise ValueError('快捷查询日期范围无效。')
+        return value
     if not isinstance(source, str) or not _MSG_ID.fullmatch(source):
         raise ValueError('缺少有效的原消息标识。')
     fields = {'schema_version', 'kind', 'source_msg_id'}
@@ -167,6 +190,15 @@ def execute_undo_reply(service, journal, scope, record, reference_now):
 
 def execute_interaction(service, journal, scope, record, reference_now, *, context=None):
     context = context or record['interaction']
+    if context['kind'] == 'quick_query':
+        query = service.gateway.query({key: context[key] for key in ('start', 'end', 'ddl_only', 'done')
+                                       if key in context})
+        events = query['events']
+        summary = '当前查询条件下没有匹配结果。'
+        if events:
+            summary = (f"查到 {query['total']} 项，列出前 {len(events)} 项。" if query['truncated']
+                       else f'查到 {len(events)} 项。')
+        return envelope(record['session_id'], record['request_id'], assistant_message=summary, candidates=events)
     try:
         origin = journal.get(JOBS, fingerprint([scope, context['source_msg_id']]), scope)
     except ChatError:

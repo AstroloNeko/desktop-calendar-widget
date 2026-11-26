@@ -1,26 +1,73 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Desktop Calendar remote interaction v1 draft",
+  "title": "Desktop Calendar Remote Interaction Protocol v1 (Authoritative Shared Schema)",
   "oneOf": [
-    {"$ref": "#/$defs/businessReceipt"},
-    {"$ref": "#/$defs/interaction"}
+    { "$ref": "#/$defs/businessReceipt" },
+    { "$ref": "#/$defs/interaction" },
+    { "$ref": "#/$defs/clientCapabilityDeclaration" },
+    { "$ref": "#/$defs/serverSessionCapabilities" }
   ],
   "$defs": {
-    "msgId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
-    "actionId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{24,64}$"},
+    "msgId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "actionId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{24,64}$"
+    },
+    "capabilityName": {
+      "type": "string",
+      "enum": ["business_receipt", "action", "reference", "quick_query"]
+    },
+    "clientCapabilityDeclaration": {
+      "type": "object",
+      "description": "Declared by v0.13.1+ clients on POST /api/notifications/session and EVERY POST /api/jobs/claim request (JSON body and/or HTTP headers).",
+      "additionalProperties": false,
+      "properties": {
+        "interaction_schema_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capabilityName" }
+        },
+        "client_version": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "serverSessionCapabilities": {
+      "type": "object",
+      "description": "Server capability fields advertised on POST /api/notifications/session response.",
+      "properties": {
+        "interaction_schema_version": {
+          "type": "integer",
+          "enum": [0, 1]
+        },
+        "interaction_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capabilityName" }
+        }
+      }
+    },
     "event": {
       "type": "object",
       "required": ["index", "title", "date"],
       "additionalProperties": false,
       "properties": {
-        "index": {"type": "integer", "minimum": 1, "maximum": 30},
-        "title": {"type": "string"},
-        "date": {"type": "string", "format": "date"},
-        "end": {"type": "string", "format": "date"},
-        "time": {"type": ["string", "null"], "pattern": "^[0-9]{2}:[0-9]{2}$"},
-        "done": {"type": "boolean"},
-        "event_type": {"enum": ["general", "urgent", "ddl"]},
-        "deadline": {"type": ["string", "null"], "format": "date"}
+        "index": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "title": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "end": { "type": "string", "format": "date" },
+        "time": { "type": ["string", "null"], "pattern": "^[0-9]{2}:[0-9]{2}$" },
+        "done": { "type": "boolean" },
+        "event_type": { "enum": ["general", "urgent", "ddl"] },
+        "deadline": { "type": ["string", "null"], "format": "date" }
       }
     },
     "action": {
@@ -28,59 +75,92 @@
       "required": ["id", "kind", "expires_at_ts"],
       "additionalProperties": false,
       "properties": {
-        "id": {"$ref": "#/$defs/actionId"},
-        "kind": {"enum": ["confirm", "cancel", "undo", "select_candidate"]},
-        "index": {"type": "integer", "minimum": 1, "maximum": 30},
-        "expires_at_ts": {"type": "integer"}
+        "id": { "$ref": "#/$defs/actionId" },
+        "kind": { "enum": ["confirm", "cancel", "undo", "select_candidate"] },
+        "index": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "expires_at_ts": { "type": "integer" }
       },
-      "if": {"properties": {"kind": {"const": "select_candidate"}}},
-      "then": {"required": ["index"]},
-      "else": {"not": {"required": ["index"]}}
+      "if": { "properties": { "kind": { "const": "select_candidate" } } },
+      "then": { "required": ["index"] },
+      "else": { "not": { "required": ["index"] } }
     },
     "businessReceipt": {
       "type": "object",
+      "description": "Optional structured business receipt uploaded by client on POST /api/jobs/<msg_id>/complete alongside mandatory reply_text.",
       "required": ["schema_version", "result_type", "summary", "events", "available_actions"],
       "additionalProperties": false,
       "properties": {
-        "schema_version": {"const": 1},
-        "result_type": {"enum": ["query", "create", "update", "delete", "complete", "confirmation",
-          "clarification", "candidates", "undo", "failed", "partial", "uncertain", "cancelled", "message"]},
-        "summary": {"type": "string"},
-        "events": {"type": "array", "maxItems": 30, "items": {"$ref": "#/$defs/event"}},
-        "available_actions": {"type": "array", "maxItems": 30, "items": {"$ref": "#/$defs/action"}},
-        "reference_until": {"type": "integer"},
-        "undo_reference": {"$ref": "#/$defs/actionId"},
+        "schema_version": { "const": 1 },
+        "result_type": {
+          "enum": [
+            "query",
+            "create",
+            "update",
+            "delete",
+            "complete",
+            "confirmation",
+            "clarification",
+            "candidates",
+            "undo",
+            "failed",
+            "partial",
+            "uncertain",
+            "cancelled",
+            "message"
+          ]
+        },
+        "summary": { "type": "string" },
+        "events": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/event" }
+        },
+        "available_actions": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/action" }
+        },
+        "reference_until": { "type": "integer" },
+        "undo_reference": { "$ref": "#/$defs/actionId" },
         "pending_confirmation": {
           "type": "object",
           "required": ["stage", "expires_at_ts"],
           "additionalProperties": false,
           "properties": {
-            "stage": {"enum": ["confirm", "reviewing_specific", "reviewing_batch", "awaiting_final_confirmation"]},
-            "expires_at_ts": {"type": "integer"}
+            "stage": {
+              "enum": [
+                "confirm",
+                "reviewing_specific",
+                "reviewing_batch",
+                "awaiting_final_confirmation"
+              ]
+            },
+            "expires_at_ts": { "type": "integer" }
           }
         },
         "outcome": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "committed": {"type": ["boolean", "null"]},
-            "goal_satisfied": {"type": ["boolean", "null"]},
-            "changed": {"type": ["boolean", "null"]}
+            "committed": { "type": ["boolean", "null"] },
+            "goal_satisfied": { "type": ["boolean", "null"] },
+            "changed": { "type": ["boolean", "null"] }
           }
         }
       }
     },
     "interaction": {
+      "description": "Optional structured interaction payload delivered inside job.interaction on POST /api/jobs/claim when current request declares matching version & capability.",
       "oneOf": [
         {
           "type": "object",
           "required": ["schema_version", "kind", "source_msg_id", "action_id"],
           "additionalProperties": false,
           "properties": {
-            "schema_version": {"const": 1},
-            "kind": {"const": "action"},
-            "source_msg_id": {"$ref": "#/$defs/msgId"},
-            "action_id": {"$ref": "#/$defs/actionId"}
+            "schema_version": { "const": 1 },
+            "kind": { "const": "action" },
+            "source_msg_id": { "$ref": "#/$defs/msgId" },
+            "action_id": { "$ref": "#/$defs/actionId" }
           }
         },
         {
@@ -88,10 +168,25 @@
           "required": ["schema_version", "kind", "source_msg_id"],
           "additionalProperties": false,
           "properties": {
-            "schema_version": {"const": 1},
-            "kind": {"const": "reference"},
-            "source_msg_id": {"$ref": "#/$defs/msgId"},
-            "index": {"type": "integer", "minimum": 1, "maximum": 30}
+            "schema_version": { "const": 1 },
+            "kind": { "const": "reference" },
+            "source_msg_id": { "$ref": "#/$defs/msgId" },
+            "index": { "type": "integer", "minimum": 1, "maximum": 30 }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Capability-gated ('quick_query') deterministic local query bypassing LLM.",
+          "required": ["schema_version", "kind", "command", "start", "end", "ddl_only"],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": 1 },
+            "kind": { "const": "quick_query" },
+            "command": { "enum": ["today", "tomorrow", "week", "ddl"] },
+            "start": { "type": "string", "format": "date" },
+            "end": { "type": "string", "format": "date" },
+            "ddl_only": { "type": "boolean" },
+            "done": { "type": "boolean" }
           }
         }
       ]

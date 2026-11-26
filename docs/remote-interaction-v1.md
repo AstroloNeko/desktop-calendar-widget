@@ -1,6 +1,6 @@
-# 远程结构化交互 v1 草案
+# 远程结构化交互 v1
 
-本文是客户端 Mock 联调契约。Cloud Run 生产版本无需修改即可继续使用纯文本路径。字段命名与上线开关由客户端和 Antigravity 共同确认。配套 [JSON Schema](remote-interaction-v1.schema.json) 包含完整回执和输入约束。
+本文对应 Antigravity 共享规范 `V0131_PROTOCOL_AND_CAPABILITY_SPEC.md`。配套 [JSON Schema](remote-interaction-v1.schema.json) 与私有云端同名文件同步。Cloud Run 旧生产版本继续使用纯文本路径。
 
 ## 已部署字段与客户端兼容
 
@@ -11,7 +11,13 @@
 
 ## 能力协商及请求示例
 
-成功的 `POST /api/notifications/session` 响应可在现有字段之外公布 `"interaction_schema_version": 1`。缺少该值或为未知版本时，客户端只发旧回执，按钮和引用输入也不能当成文字执行。原生渠道字段与能力协商相互独立。
+客户端在建立通知会话和每次 `POST /api/jobs/claim` 时发送同一份 JSON 能力声明。服务端按当次 claim 过滤任务，历史协商记录仅用于诊断。
+
+```json
+{"interaction_schema_version":1,"capabilities":["business_receipt","action","reference","quick_query"],"client_version":"0.13.1"}
+```
+
+成功的 `POST /api/notifications/session` 响应可公布整数 `"interaction_schema_version": 1` 和 `interaction_capabilities`。缺少版本、版本未知或为 0 时使用纯文本回执。显式能力列表取双方交集。仅公布 v1 版本的早期服务兼容原有回执、按钮和引用能力。客户端收到未知或未启用的结构化交互时，按失败回执处理。原生渠道字段与能力协商相互独立。
 
 旧 complete 的 `ok`、`error`、`operation_id` 和 `reply_text` 保持原样。协商成功、账号与渠道路由完整时，`POST /api/jobs/<msg_id>/complete` 可带以下附加业务结果。
 
@@ -71,6 +77,14 @@
 {"schema_version":1,"kind":"reference","source_msg_id":"qq_synthetic_query_01","index":2}
 ```
 
+快捷查询以本地日历为数据源。支持 `today`、`tomorrow`、`week` 和 `ddl`，起止日期使用有效的 ISO 日历日期（含首尾），`ddl_only` 和可选的 `done` 均为布尔值。客户端直接查询本地 Gateway，生成正常的纯文本与查询回执，并把编号对应的 Event ID 和 Revision 留在本机以支持后续引用。
+
+```json
+{"schema_version":1,"kind":"quick_query","command":"ddl","start":"2026-11-25","end":"2026-12-25","ddl_only":true,"done":false}
+```
+
+服务端对欠缺快捷查询能力的客户端下发等效纯文本。按钮和引用保持结构化，过期后转为 `expired`。云端目前每次扫描至多 50 条待领任务，短期内连续超过该窗口的未过期且不兼容任务仍可能暂时延迟后续普通任务。
+
 ## 本机授权与降级
 
 - 只能在与来源匹配的当前服务器、内部账号、渠道、应用、会话中使用本机记录的动作。原消息必须已成功提交给服务器。Event ID、当前快照指纹和 Pending Revision 留在本机，云端只回传动作 ID。
@@ -78,7 +92,7 @@
 - 动作在执行前在原账号台账登记。重复点击，即使云端换了 MsgId，也不能再执行。若主机在登记后、记录结果前关闭，沿用待核查策略。撤销只允许当前内存历史栈顶的那一笔已核验写入，关闭程序或栈顶改变后，旧撤销按钮会拒绝执行。直接发送「撤销」或「撤销上一步」只检查本会话最近一条远程结果，不越过后续消息寻找旧写入。
 - 结构化回执由本机结果生成。模板失败、版本不识别或渠道不支持时可直接发送 `reply_text`。客户端不生成 QQ Markdown、按钮布局或平台消息 ID。
 
-## Antigravity 对接清单
+## 云端对接约定
 
 1. 在现有通知会话响应加入按部署开关控制的能力字段。灰度关闭能力时，也应继续接收尚未上传的旧业务回执及原纯文本字段。
 2. 扩展 complete 的可选字段解析与幂等保存，将 `business_receipt` 和原任务、原发送者、实际发出消息 ID 绑定。结果未知、部分完成、待确认须分别呈现。纯文本兜底使用已保存的 `reply_text`。

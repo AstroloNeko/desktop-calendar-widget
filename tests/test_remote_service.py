@@ -299,7 +299,7 @@ class RemoteServiceTests(unittest.TestCase):
         release_claim = threading.Event()
         claim_count = 0
 
-        def request(path, token=None):
+        def request(path, token=None, body=None):
             nonlocal claim_count
             calls.append(path)
             if path == '/':

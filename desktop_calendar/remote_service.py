@@ -19,7 +19,7 @@ from desktop_calendar.remote_channels import conversation_from_job
 from desktop_calendar.remote_cloud import NOTIFICATION_CONTRACT, remote_scope, valid_account
 from desktop_calendar.remote_history import describe_response
 from desktop_calendar.remote_interaction import (
-    JOBS, UNDO_REPLIES, VERSION as INTERACTION_VERSION, build_business_receipt, execute_interaction,
+    CAPABILITY_REQUEST, JOBS, UNDO_REPLIES, VERSION as INTERACTION_VERSION, build_business_receipt, execute_interaction,
     execute_undo_reply, interaction_from_job,
 )
 from desktop_calendar.remote_notifications import ACCOUNT_MISMATCH, AUTH_REJECTED, NotificationListener, VerifiedAccount
@@ -180,6 +180,7 @@ class RemoteWorker:
         self.account_verified = False
         self.account_name = ''
         self.interaction_version = 0
+        self.interaction_capabilities = ()
         self.last_cloud_ok = None
         self.cloud_unavailable = False
         self.processing_id = ''
@@ -233,6 +234,7 @@ class RemoteWorker:
             self.account_verified = False
             self.account_name = ''
             self.interaction_version = 0
+            self.interaction_capabilities = ()
             self.last_cloud_ok = None
             self.cloud_unavailable = False
             self.processing_id = ''
@@ -266,6 +268,7 @@ class RemoteWorker:
             self.account_verified = False
             self.account_name = ''
             self.interaction_version = 0
+            self.interaction_capabilities = ()
             self.check_result = ''
             self.status = '远程服务已停止。'
             self.notification_status = ''
@@ -330,6 +333,7 @@ class RemoteWorker:
                 self.account_verified = False
                 self.account_name = ''
                 self.interaction_version = 0
+                self.interaction_capabilities = ()
                 self.notification_online = False
                 if check_failed or self.check_result == 'checking':
                     self.check_result = 'failed'
@@ -375,6 +379,8 @@ class RemoteWorker:
                     return False
                 self.account_name = profile.display_name
                 self.interaction_version = profile.interaction_version
+                self.interaction_capabilities = (profile.interaction_capabilities
+                                                 if profile.interaction_version == INTERACTION_VERSION else ())
                 self.account_verified = True
                 self.condition.notify_all()
                 self._notify_status_change()
@@ -481,7 +487,7 @@ class RemoteWorker:
                             continue
                         checking_queue = True
                         try:
-                            response = client.request(CLAIM_PATH, token)
+                            response = client.request(CLAIM_PATH, token, CAPABILITY_REQUEST)
                             received_at = time.time()
                             job = response['job']
                             if job is not None and not self._identified(job):
@@ -571,16 +577,19 @@ class RemoteWorker:
             conversation = conversation_from_job(job)
             route = conversation.route(server)
             record.update(channel=conversation.channel, owner=conversation.owner(server), route=route)
-            if (route and self.config and job.get('owner_id') == self.config[3] and
-                    self.interaction_version == INTERACTION_VERSION):
+            capabilities = (self.interaction_capabilities
+                            if route and self.config and job.get('owner_id') == self.config[3] else ())
+            if 'business_receipt' in capabilities:
                 record['interaction_version'] = INTERACTION_VERSION
             if 'interaction' in job:
-                if not record.get('interaction_version'):
+                interaction = interaction_from_job(job['interaction'])
+                if interaction['kind'] not in capabilities:
                     raise ValueError('服务器未启用远程交互。')
-                record['interaction'] = interaction_from_job(job['interaction'])
-            button = (record.get('interaction') or {}).get('kind') == 'action'
+                record['interaction'] = interaction
+            kind = (record.get('interaction') or {}).get('kind')
             text = job.get('text', '')
-            if not isinstance(text, str) or len(text.strip()) > 4000 or not (button or text.strip()):
+            if not isinstance(text, str) or len(text.strip()) > 4000 or not (
+                    kind in ('action', 'quick_query') or text.strip()):
                 raise ValueError
             record.update(text=text, reference_now=message_time(job).isoformat())
         except (ValueError, KeyError):
@@ -658,9 +667,11 @@ class RemoteWorker:
                         reference_now = datetime.fromisoformat(record['reference_now'])
                         undo_reply = (record.get('interaction_version') == INTERACTION_VERSION and
                                       record['text'].strip(' 。！!') in UNDO_REPLIES)
-                        if record.get('interaction') or undo_reply:
+                        interaction = record.get('interaction')
+                        if interaction or undo_reply:
+                            kind = interaction['kind'] if interaction else 'action'
                             with self.condition:
-                                capability = self._current(generation) and self.interaction_version == INTERACTION_VERSION
+                                capability = self._current(generation) and kind in self.interaction_capabilities
                             if not capability:
                                 raise ChatError('action_expired', '远程交互已停用，请发送文字指令。')
                             execute = execute_interaction if record.get('interaction') else execute_undo_reply

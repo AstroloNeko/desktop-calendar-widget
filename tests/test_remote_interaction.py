@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 import json
 import unittest
+from unittest.mock import patch
 
 from calendar_core import Event
 from desktop_calendar.assistant.calendar_chat_protocol import fingerprint
 from desktop_calendar.remote_notifications import VerifiedAccount
 from desktop_calendar.remote_cloud import remote_scope
-from desktop_calendar.remote_service import RemoteWorker, message_time
+from desktop_calendar.remote_service import JOBS, RemoteWorker, message_time
 import test_remote_service as fixture
 
 
@@ -29,7 +30,12 @@ class RemoteInteractionTests(unittest.TestCase):
         return job
 
     def enable(self):
-        self.worker._notification(0, VerifiedAccount(ACCOUNT, '演示账号', 1))
+        self.worker._notification(0, VerifiedAccount(ACCOUNT, '演示账号', 1,
+                                  ('business_receipt', 'action', 'reference', 'quick_query')))
+
+    def quick_query(self, **changes):
+        return dict(schema_version=1, kind='quick_query', command='today', start='2026-01-02',
+                    end='2026-01-02', ddl_only=False) | changes
 
     def data(self, job, replies=()):
         return json.loads(self.process(job, replies)['receipt'])
@@ -45,6 +51,76 @@ class RemoteInteractionTests(unittest.TestCase):
         action = next(item for item in receipt['business_receipt']['available_actions'] if item['kind'] == kind)
         return self.native(identifier, context=dict(schema_version=1, kind='action',
             source_msg_id=source, action_id=action['id']), **route)
+
+    def test_quick_queries_use_local_gateway_with_text_receipts_and_revision_targets(self):
+        self.enable()
+        self.event('first', '事项一')
+        self.event('second', '事项二', '2026-01-03')
+        self.executor(lambda: self.runtime.gateway.commands.upsert(
+            Event('due', '交报告', '2026-01-03T17:00', event_type='ddl')))
+        queries = (
+            ('today', {}, ['事项一']),
+            ('tomorrow', dict(start='2026-01-03', end='2026-01-03'), ['交报告', '事项二']),
+            ('week', dict(end='2026-01-05'), ['事项一', '交报告', '事项二']),
+            ('ddl', dict(end='2026-01-04', ddl_only=True, done=False), ['交报告']),
+            ('tomorrow', dict(start='2026-01-04', end='2026-01-04', done=True), []),
+        )
+        with patch.object(self.service, 'send_message', side_effect=AssertionError('query went through Agent')):
+            for index, (command, filters, titles) in enumerate(queries):
+                with self.subTest(command=command, filters=filters):
+                    row = self.process(self.native(f'quick-{index}', context=self.quick_query(command=command, **filters)))
+                    body = json.loads(row['receipt'])
+                    receipt = body['business_receipt']
+                    self.assertTrue(body['ok'])
+                    self.assertEqual(receipt['result_type'], 'query')
+                    self.assertEqual([event['title'] for event in receipt['events']], titles)
+                    self.assertEqual([event['index'] for event in receipt['events']], list(range(1, len(titles) + 1)))
+                    self.assertTrue(all(title in body['reply_text'] for title in titles))
+                    self.assertEqual(bool(receipt.get('reference_until')), bool(titles))
+                    self.assertEqual(len(row['interaction_reply']['targets']), len(titles))
+                    self.assertTrue(all(target['revision'] for target in row['interaction_reply']['targets']))
+        self.assertEqual(self.provider.messages, [])
+        self.executor(lambda: self.runtime.gateway.commands.delete('first'))
+        stale = self.native('quick-stale-ref', '把第一项改到下午三点',
+                            context=dict(schema_version=1, kind='reference', source_msg_id='quick-0'))
+        self.assertEqual(self.data(stale)['error'], 'reference_conflict')
+        self.assertEqual(self.provider.messages, [])
+
+    def test_invalid_quick_queries_cannot_fall_through_to_model(self):
+        self.enable()
+        invalid = [self.quick_query(**changes) for changes in (
+            dict(command='help'), dict(start='20260102'), dict(start='2026-02-29'),
+            dict(end='2026-01-01'), dict(end='2028-01-01'), dict(ddl_only=1),
+            dict(done='false'), dict(schema_version=True), dict(source_msg_id='extra'),
+        )]
+        missing = self.quick_query()
+        del missing['end']
+        for index, context in enumerate([*invalid, missing]):
+            with self.subTest(context=context):
+                self.assertEqual(self.data(self.native(f'invalid-quick-{index}', '创建事项', context=context))
+                                 ['error'], 'invalid_job')
+        self.assertEqual(self.provider.messages, [])
+        self.assertFalse(self.events())
+
+    def test_capability_disabled_rejects_structured_jobs_but_accepts_cloud_text_fallback(self):
+        self.enable()
+        claimed = self.worker._intake(self.native('queued-quick', context=self.quick_query()), fixture.SERVER)
+        self.worker._notification(0, VerifiedAccount(ACCOUNT))
+        self.worker._handle(claimed, self.client, fixture.CONFIG['remote_token'], fixture.SERVER, 0)
+        self.assertEqual(json.loads(self.ledger.get(JOBS, claimed['id'], fixture.SERVER)['receipt'])
+                         ['error'], 'action_expired')
+        for index, context in enumerate((self.quick_query(), dict(schema_version=2, kind='reference'),
+                                         dict(schema_version=1, kind='future'))):
+            response = self.data(self.native(f'unsupported-{index}', '创建事项', context=context))
+            self.assertEqual(response['error'], 'invalid_job')
+            self.assertNotIn('business_receipt', response)
+        self.assertEqual(self.provider.messages, [])
+        fallback = self.data(self.native('fallback', '查询今天的日程'), [
+            fixture.tool('query_events', dict(start='2026-01-01', end='2026-01-01'))])
+        self.assertTrue(fallback['ok'])
+        self.assertNotIn('business_receipt', fallback)
+        self.assertTrue(self.provider.messages)
+        self.assertFalse(self.events())
 
     def test_native_qq_preserves_published_owner_pending_and_old_receipt_bytes(self):
         original = fixture.job('old-preview', '先预览创建组会', sender=KEY)

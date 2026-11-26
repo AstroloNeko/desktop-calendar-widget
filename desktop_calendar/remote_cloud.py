@@ -9,6 +9,7 @@ import time
 from urllib.parse import quote, urlsplit
 
 from desktop_calendar.assistant.calendar_chat_protocol import fingerprint
+from desktop_calendar.remote_interaction import CAPABILITIES, CAPABILITY_REQUEST, LEGACY_CAPABILITIES, VERSION
 from desktop_calendar.remote_transport import Client, StatusError, Unavailable, normalize_url, valid_token
 
 
@@ -56,6 +57,7 @@ class NotificationSession:
     account_id: str = field(default='', repr=False)
     display_name: str = field(default='', repr=False)
     interaction_version: int = 0
+    interaction_capabilities: tuple = LEGACY_CAPABILITIES
 
     def __post_init__(self):
         try:
@@ -100,7 +102,7 @@ class FirebaseNotificationContract:
     """Cloud Run issues a short-lived ID token for exactly one wakeup path."""
 
     def notification_session(self, client, token, expected_account=''):
-        data = client.request('/api/notifications/session', token, b'{}')
+        data = client.request('/api/notifications/session', token, CAPABILITY_REQUEST)
         account = data.get('user_id')
         if expected_account and account != expected_account:
             raise AccountMismatch('通知账户与本机绑定账户不符。')
@@ -125,8 +127,12 @@ class FirebaseNotificationContract:
         refresh_after = remaining - (refresh_before if remaining > refresh_before else remaining / 2)
         stream_url = f"{origin}/wakeups/{quote(account, safe='')}/version.json"
         version = data.get('interaction_schema_version')
+        version = VERSION if type(version) is int and version == VERSION else 0
+        advertised = data.get('interaction_capabilities', LEGACY_CAPABILITIES)
+        capabilities = (tuple(cap for cap in CAPABILITIES if cap in advertised)
+                        if version and isinstance(advertised, (list, tuple)) else ())
         return NotificationSession(stream_url, data.get('id_token'), now + remaining, now + refresh_after, account,
-                                   display_name(data.get('display_name')), 1 if type(version) is int and version == 1 else 0)
+                                   display_name(data.get('display_name')), version, capabilities)
 
 
 NOTIFICATION_CONTRACT = FirebaseNotificationContract()

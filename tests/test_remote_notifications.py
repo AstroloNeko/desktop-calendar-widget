@@ -475,7 +475,14 @@ class NotificationContractTests(unittest.TestCase):
         client.request.return_value = self.document()
         before = time.monotonic()
         credentials = FirebaseNotificationContract().notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
-        client.request.assert_called_once_with('/api/notifications/session', fixture.CONFIG['remote_token'], b'{}')
+        client.request.assert_called_once()
+        path, token, body = client.request.call_args.args
+        self.assertEqual((path, token), ('/api/notifications/session', fixture.CONFIG['remote_token']))
+        self.assertEqual(json.loads(body), {
+            'interaction_schema_version': 1, 'client_version': '0.13.1',
+            'capabilities': ['business_receipt', 'action', 'reference', 'quick_query'],
+        })
+        self.assertEqual(credentials.interaction_capabilities, ())
         self.assertEqual(credentials.stream_url,
                          'https://unit-test.asia-southeast1.firebasedatabase.app/wakeups/owner-one/version.json')
         self.assertLessEqual(credentials.expires_at - before, 3501)
@@ -484,18 +491,26 @@ class NotificationContractTests(unittest.TestCase):
         self.assertEqual(FirebaseNotificationContract().notification_session(
             client, fixture.CONFIG['remote_token']).stream_url, credentials.stream_url)
 
-    def test_display_name_and_draft_capability_are_optional(self):
+    def test_display_name_and_negotiated_capabilities_are_optional(self):
         client = Mock()
         contract = FirebaseNotificationContract()
         client.request.return_value = self.document(display_name=' 演示账号 ', interaction_schema_version=1)
         verified = contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
         self.assertEqual(verified.display_name, '演示账号')
         self.assertEqual(verified.interaction_version, 1)
+        self.assertEqual(verified.interaction_capabilities, ('business_receipt', 'action', 'reference'))
         self.assertNotIn('演示账号', repr(verified))
+        for advertised, expected in ((['business_receipt', 'quick_query', 'future'], ('business_receipt', 'quick_query')),
+                                     ([], ()), ('quick_query', ()), (None, ())):
+            client.request.return_value = self.document(interaction_schema_version=1,
+                                                        interaction_capabilities=advertised)
+            verified = contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
+            self.assertEqual(verified.interaction_capabilities, expected)
         for value in (None, '1', True, 2):
             client.request.return_value = self.document(display_name='无效\n名称', interaction_schema_version=value)
             verified = contract.notification_session(client, fixture.CONFIG['remote_token'], 'owner-one')
             self.assertEqual((verified.display_name, verified.interaction_version), ('', 0))
+            self.assertEqual(verified.interaction_capabilities, ())
 
     def test_rejects_mismatched_account_paths_domains_and_credentials(self):
         invalid = (
@@ -847,7 +862,7 @@ class WorkerTriggerTests(unittest.TestCase):
         release = threading.Event()
         before = time.time()
 
-        def request(path, token):
+        def request(path, token, body=None):
             calls.append(path)
             if len(calls) == 1:
                 return {'job': None, 'status': 'empty', 'checked_at': '2026-11-24T08:22:09Z', 'message': 'empty'}
@@ -884,13 +899,23 @@ class WorkerTriggerTests(unittest.TestCase):
 
     def test_idle_stream_claims_only_at_start_reconnect_and_safety_deadline(self):
         claims = []
-        worker = self.start_worker(lambda path, token: claims.append(path) or {'job': None}, grace=1, safety=0.28)
+        def request(path, token, body=None):
+            claims.append((path, json.loads(body)))
+            return {'job': None}
+
+        worker = self.start_worker(request, grace=1, safety=0.28)
         self.assertTrue(until(lambda: len(claims) == 1))
         worker.notifications.signal()
         self.assertTrue(until(lambda: len(claims) == 2))
         time.sleep(0.15)
-        self.assertEqual(claims, [CLAIM_PATH] * 2)
+        self.assertEqual(len(claims), 2)
         self.assertTrue(until(lambda: len(claims) == 3))
+        for path, declaration in claims[:3]:
+            self.assertEqual(path, CLAIM_PATH)
+            self.assertEqual(declaration, {
+                'interaction_schema_version': 1, 'client_version': '0.13.1',
+                'capabilities': ['business_receipt', 'action', 'reference', 'quick_query'],
+            })
         self.assertTrue(worker.notification_online)
 
     def test_online_default_off_manual_check_and_live_interval_changes(self):
@@ -935,7 +960,7 @@ class WorkerTriggerTests(unittest.TestCase):
 
     def test_disconnect_falls_back_then_reconnect_checks_and_stops_frequent_claims(self):
         claims = []
-        worker = self.start_worker(lambda path, token: claims.append(path) or {'job': None}, grace=0.06)
+        worker = self.start_worker(lambda path, token, body=None: claims.append(path) or {'job': None}, grace=0.06)
         self.assertTrue(until(lambda: len(claims) >= 1))
         worker.notifications.signal()
         self.assertTrue(until(lambda: len(claims) >= 2))
@@ -968,7 +993,7 @@ class WorkerTriggerTests(unittest.TestCase):
     def test_auth_rejection_pauses_claims_until_credentials_change(self):
         claims = []
 
-        def request(path, token):
+        def request(path, token, body=None):
             claims.append(token)
             if token == fixture.CONFIG['remote_token']:
                 raise StatusError(401)
@@ -991,7 +1016,7 @@ class WorkerTriggerTests(unittest.TestCase):
         claims = []
         succeed = threading.Event()
 
-        def request(path, token=None):
+        def request(path, token=None, body=None):
             if path == '/':
                 return {'status': 'ok'}
             claims.append(path)
@@ -1162,7 +1187,7 @@ class WorkerTriggerTests(unittest.TestCase):
         scope = fixture.SERVER
         claims = []
 
-        def request(path, token):
+        def request(path, token, body=None):
             claims.append(path)
             return {'job': message}
 
