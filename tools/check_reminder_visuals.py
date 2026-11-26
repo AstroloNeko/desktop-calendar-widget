@@ -96,7 +96,7 @@ def main():
                             assert window.tree.selection() == ('event:1',)
                             window.tree.yview_moveto(1)
                             pump(app, .05)
-                            assert window.tree.bbox(window.tree.get_children('upcoming')[-1])
+                            assert window.tree.bbox(window.tree.get_children()[-1])
                             with patch.object(app.reminder_engine, 'overview', return_value=ReminderOverview(True, ())):
                                 window.refresh()
                                 pump(app, .05)
@@ -117,7 +117,7 @@ def main():
                     assert window.tree.winfo_height() >= app.dpi.px(3 * 26), ('Compact footer squeezed out reminder rows', window.tree.winfo_height())
                     window.tree.yview_moveto(1)
                     pump(app, .05)
-                    assert window.tree.bbox(window.tree.get_children('upcoming')[-1])
+                    assert window.tree.bbox(window.tree.get_children()[-1])
                     capture_own_window(dialog, output / 'small-work-area.png')
                     window.close()
                 original = json.loads(before)

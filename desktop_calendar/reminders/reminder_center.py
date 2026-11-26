@@ -1,21 +1,72 @@
 """A bounded reminder-plan viewer. All mutations use existing app/engine APIs."""
+from collections import Counter
 from datetime import datetime
 import time
 import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
 
-from desktop_calendar.reminders.reminder_widgets import COMBO, ReminderButton, card, reminder_font
+from calendar_core import EVENT_TYPE_LABELS
+from desktop_calendar.reminders.reminder_widgets import ReminderButton, card, reminder_font
 from desktop_calendar.reminders.reminder_overview import batch_channel_statuses
 from desktop_calendar.ui.themed_controls import SettingsScroll
+from desktop_calendar.ui.ui_draw import blend
 from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.reminders.notification_dispatch import STATUS_LABELS
 from desktop_calendar.reminders.notification_model import BRIEF_GROUP_LABELS
 
 
+class PlanFilterCard(tk.Button):
+    """One native focus target for the count, label and full hit area."""
+
+    def __init__(self, parent, app, color, text, command):
+        self.theme, self.color = app.theme, color
+        self.selected = self.hovered = False
+        dp = app.dpi.px
+        self.surface = tk.Frame(parent, bg=self.theme.divider, cursor="hand2")
+        super().__init__(self.surface, textvariable=text, command=command, takefocus=True,
+                         anchor="w", padx=dp(9), pady=dp(6), font=reminder_font(app, 9, "bold"),
+                         relief="flat", bd=0, highlightthickness=dp(1),
+                         highlightcolor=self.theme.input_focus, cursor="hand2")
+        self.pack(fill="both", expand=True, padx=dp(1), pady=dp(1))
+        self.surface.bind("<Enter>", lambda _event: self.set_hover(True))
+        self.surface.bind("<Leave>", lambda event: self.set_hover(
+            self.surface.winfo_containing(event.x_root, event.y_root) is self))
+        self.surface.bind("<Button-1>", self.activate)
+        self.bind("<Enter>", lambda _event: self.set_hover(True))
+        self.bind("<Leave>", lambda event: self.set_hover(
+            self.surface.winfo_containing(event.x_root, event.y_root) is self.surface))
+        self.bind("<Return>", self.activate)
+        self.bind("<space>", self.activate)
+        self.paint()
+
+    def activate(self, _event):
+        self.invoke()
+        return "break"
+
+    def set_hover(self, hovered):
+        self.hovered = hovered
+        self.paint()
+
+    def set_selected(self, selected):
+        self.selected = selected
+        self.paint()
+
+    def paint(self):
+        theme = self.theme
+        base = theme.workspace_detail
+        tinted = blend(base, self.color, .20 if self.hovered else .12)
+        fill = tinted if self.selected else theme.control_hover if self.hovered else base
+        edge = self.color if self.selected or self.hovered else theme.divider
+        text = self.color if self.selected else theme.text_primary
+        self.surface.configure(bg=edge)
+        self.configure(bg=fill, fg=text, highlightbackground=fill, activebackground=tinted, activeforeground=self.color)
+
+
 class ReminderPlanPanel(tk.Frame):
-    GROUPS = (("attention", "需要处理"), ("snoozed", "已稍后提醒"),
-              ("upcoming", "即将提醒"), ("processed", "已处理"))
+    GROUPS = {"attention": "需要处理", "snoozed": "已稍后提醒", "upcoming": "即将提醒", "processed": "已处理"}
+    COLUMNS = (("item", "事项 / 类型", 109), ("business", "提醒状态", 65),
+               ("when", "计划提醒时间", 90), ("windows", "Windows 通知", 79), ("qq", "QQ 通知", 68))
 
     def __init__(self, parent, app, close, *, clock=datetime.now):
         theme, dp = app.theme, app.dpi.px
@@ -24,6 +75,7 @@ class ReminderPlanPanel(tk.Frame):
         self.revision, self.refreshed_at = -1, 0
         self.rows = {}
         self.brief_rows = {}
+        self.active_filter = None
         width = dp(500)
 
         self.detail = tk.StringVar(value="选择一项查看详情。")
@@ -51,29 +103,27 @@ class ReminderPlanPanel(tk.Frame):
         self.metrics.pack(fill="x", pady=(0, dp(8)))
         self.metrics.columnconfigure((0, 1, 2), weight=1, uniform="reminder-count")
         self.counts = {}
+        self.filter_cards = {}
         colors = (theme.danger, theme.event_type_urgent, theme.accent)
-        for column, ((group, label), color) in enumerate(zip(self.GROUPS[:3], colors)):
-            metric, body = card(self.metrics, app, padding=6)
-            metric.grid(row=0, column=column, sticky="ew", padx=(dp(6) if column else 0, 0))
-            self.counts[group] = tk.StringVar(value="0")
-            tk.Label(body, textvariable=self.counts[group], bg=body.cget("bg"), fg=color,
-                     anchor="w", font=reminder_font(app, 11, "bold"), width=3).pack(side="left")
-            tk.Label(body, text=label, bg=body.cget("bg"), fg=theme.text_primary,
-                     anchor="w", font=reminder_font(app, 8)).pack(side="left", fill="x", expand=True)
+        for column, (group, color) in enumerate(zip(self.GROUPS, colors)):
+            count = self.counts[group] = tk.StringVar(self, value="0")
+            text = tk.StringVar(self, value=f"0   {self.GROUPS[group]}")
+            def update_caption(*_args, count=count, text=text, label=self.GROUPS[group]):
+                text.set(f"{count.get()}   {label}")
+            count.trace_add("write", update_caption)
+            hub = PlanFilterCard(self.metrics, app, color, text, lambda group=group: self.toggle_filter(group))
+            self.filter_cards[group] = hub
+            hub.surface.grid(row=0, column=column, sticky="ew", padx=(dp(6) if column else 0, 0))
         self.table_card, table_body = card(self, app, padding=8)
         self.table_card.pack(fill="both", expand=True)
         toolbar = tk.Frame(table_body, bg=theme.workspace_detail)
         toolbar.pack(fill="x")
-        tk.Label(toolbar, text="提醒计划", bg=theme.workspace_detail, fg=theme.text_primary,
+        self.list_title = tk.StringVar(self, value="全部提醒计划")
+        tk.Label(toolbar, textvariable=self.list_title, bg=theme.workspace_detail, fg=theme.text_primary,
                  anchor="w", font=reminder_font(app, 10, "bold")).pack(side="left")
         self.refresh_button = ReminderButton(toolbar, app, "刷新", self.refresh)
         self.refresh_button.pack(side="right")
-        self.filters = {"全部计划": "", **{label: group for group, label in self.GROUPS}, "每日简报": "brief"}
-        self.filter_choice = tk.StringVar(value="全部计划")
-        filter_box = ttk.Combobox(toolbar, textvariable=self.filter_choice, values=tuple(self.filters),
-                                  width=9, state="readonly", font=reminder_font(app, 9), style=COMBO)
-        filter_box.pack(side="right", padx=dp(5))
-        filter_box.bind("<<ComboboxSelected>>", lambda _e: self.refresh())
+        self.show_all_button = ReminderButton(toolbar, app, "查看全部", lambda: self.set_filter(None))
         self.summary = tk.StringVar()
         self.summary_label = tk.Label(table_body, textvariable=self.summary, justify="left", anchor="w",
                                      bg=theme.workspace_detail, fg=theme.text_secondary, font=reminder_font(app, 8),
@@ -96,12 +146,11 @@ class ReminderPlanPanel(tk.Frame):
             ("ReminderHeading.cell", {"sticky": "nswe", "children": [
                 ("Treeheading.padding", {"sticky": "nswe", "children": [
                     ("Treeheading.text", {"sticky": "w"})]})]})])
-        self.tree = ttk.Treeview(frame, columns=("when", "windows", "qq"), show="tree headings",
+        self.tree = ttk.Treeview(frame, columns=tuple(key for key, _text, _size in self.COLUMNS), show="headings",
                                  selectmode="browse", style="ReminderPlan.Treeview")
-        for identifier, text, minimum in (("#0", "事项 / 类型", 92), ("when", "计划提醒时间", 104),
-                                         ("windows", "Windows 通知", 88), ("qq", "QQ 通知", 82)):
+        for identifier, text, minimum in self.COLUMNS:
             self.tree.heading(identifier, text=text, anchor="w")
-            self.tree.column(identifier, width=dp(minimum), minwidth=dp(minimum), stretch=False)
+            self.tree.column(identifier, width=dp(minimum), minwidth=1, stretch=False)
         self.scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview,
                                         style="Global.Vertical.TScrollbar")
         frame.rowconfigure(0, weight=1)
@@ -120,9 +169,6 @@ class ReminderPlanPanel(tk.Frame):
         self.tree.bind("<Button-1>", self._block_column_resize, add="+")
         self.tree.tag_configure("alternate", background=theme.workspace_detail)
         self.tree.tag_configure("hover", background=theme.schedule_card_hover)
-        for group, color in (("attention", theme.danger), ("snoozed", theme.event_type_urgent), ("upcoming", theme.text_primary)):
-            self.tree.tag_configure("group:"+group, background=theme.panel_secondary,
-                                    foreground=color, font=reminder_font(app, 9, "bold"))
         self._hovered = None
         self.tree.bind("<Motion>", self._hover)
         self.tree.bind("<Leave>", lambda _event: self._hover())
@@ -154,12 +200,17 @@ class ReminderPlanPanel(tk.Frame):
 
     def _size_columns(self, event):
         dp = self.app.dpi.px
-        widths = {"when": max(dp(104), round(event.width * .24)),
-                  "windows": max(dp(88), round(event.width * .19)),
-                  "qq": max(dp(82), round(event.width * .17))}
-        for key, width in widths.items():
+        base = [dp(minimum) for _key, _title, minimum in self.COLUMNS]
+        total = sum(base)
+        if event.width < total:
+            widths = [max(1, width * event.width // total) for width in base]
+        else:
+            extra = event.width - total
+            weights = (.53, .08, .15, .13, .11)
+            widths = [width + int(extra * weight) for width, weight in zip(base, weights)]
+        widths[0] += max(0, event.width - sum(widths))
+        for (key, _title, _minimum), width in zip(self.COLUMNS, widths):
             self.tree.column(key, width=width)
-        self.tree.column("#0", width=max(dp(92), event.width - sum(widths.values())))
 
     def _block_column_resize(self, event):
         if self.tree.identify_region(event.x, event.y) == "separator":
@@ -174,10 +225,36 @@ class ReminderPlanPanel(tk.Frame):
             self.tree.item(key, tags=("hover", *self.tree.item(key, "tags")))
         self._hovered = key
 
-    def refresh(self):
+    def toggle_filter(self, group):
+        self.set_filter(None if group == self.active_filter else group)
+
+    def set_filter(self, group):
+        if group == self.active_filter:
+            return
+        previous = self.active_filter
+        self.active_filter = group
+        for key, hub in self.filter_cards.items():
+            hub.set_selected(key == group)
+        if group:
+            self.show_all_button.pack(side="right", padx=self.app.dpi.px(6))
+        else:
+            if self.show_all_button.focus_get() is self.show_all_button:
+                self.filter_cards[previous].focus_set()
+            self.show_all_button.pack_forget()
+        self.refresh(reset_scroll=True)
+
+    def _title(self, visible_count):
+        label = self.GROUPS.get(self.active_filter, "全部提醒计划")
+        self.list_title.set(f"{label} · {visible_count} 条")
+
+    def refresh(self, *, reset_scroll=False):
+        selected = self.tree.selection()
+        scroll = self.tree.yview()
         try:
             now = self.clock()
-            overview = self.app.reminder_engine.overview(now)
+            engine = self.app.reminder_engine
+            overview = engine.overview(now)
+            batches = engine._state()["batches"] if self.active_filter is None else {}
         except (OSError, ValueError) as error:
             self.summary.set("无法读取提醒计划：" + str(error))
             for count in self.counts.values():
@@ -185,59 +262,69 @@ class ReminderPlanPanel(tk.Frame):
             self.rows = {}
             self.brief_rows = {}
             self.tree.delete(*self.tree.get_children())
-            self.empty_label.configure(text="暂时无法读取提醒计划\n\n请检查上方提示后刷新")
+            self._title(0)
+            self.empty_label.configure(text="暂时无法读取提醒计划。请刷新后重试。")
             self.empty_label.place(relx=.5, rely=.5, anchor="center")
             self.show_selection()
             return
-        selected = self.tree.selection()
-        scroll = self.tree.yview()
-        opened = {group: bool(self.tree.item(group, "open")) for group, _ in (*self.GROUPS, ("brief", "")) if self.tree.exists(group)}
-        self.tree.delete(*self.tree.get_children())
+
+        counts = Counter(row.group for row in overview.rows)
+        for group, count in self.counts.items():
+            count.set(str(counts[group]))
         self.rows = {}
-        filtered_group = self.filters[self.filter_choice.get()]
-        visible_rows = 0
-        for group, label in self.GROUPS:
-            entries = [row for row in overview.rows if row.group == group]
-            if group in self.counts:
-                self.counts[group].set(str(len(entries)))
-            if not entries or (filtered_group and group != filtered_group):
-                continue
-            self.tree.insert("", "end", iid=group, text=f"{label}  {len(entries)}",
-                             open=opened.get(group, True), tags=("group:"+group,))
-            for index, row in enumerate(entries):
-                key = "event:" + row.event_id
-                self.rows[key] = row
-                short_date = "%m-%d %H:%M" if row.when.year == now.year else "%Y-%m-%d %H:%M"
-                title = row.title.replace("\n", " ")
-                self.tree.insert(group, "end", iid=key, text=f"DDL · {title}" if row.ddl else title,
-                                 values=(row.when.strftime(short_date), row.windows, row.qq),
-                                 tags=("alternate",) if index % 2 else ())
-            visible_rows += len(entries)
         self.brief_rows = {}
-        if filtered_group in ("", "brief"):
-            batches = self.app.reminder_engine._state()["batches"]
-            briefs = [(key, batch) for key, batch in batches.items() if batch["kind"] == "brief"]
-            if briefs:
-                self.tree.insert("", "end", iid="brief", text="每日简报记录",
-                                 open=opened.get("brief", filtered_group == "brief"))
-                for identifier, batch in sorted(briefs, key=lambda item: item[1]["when"], reverse=True)[:30]:
-                    key = "brief:" + identifier
-                    self.brief_rows[key] = identifier
-                    self.tree.insert("brief", "end", iid=key, text="每日行程简报",
-                                     values=(batch["when"].replace("T", " ")[:16], *batch_channel_statuses(batch)))
-                visible_rows += len(self.brief_rows)
-        if selected and (selected[0] in self.rows or selected[0] in self.brief_rows):
-            self.tree.selection_set(selected)
-            if scroll:
-                self.tree.yview_moveto(scroll[0])
-        summary = (f"{len(overview.rows)} 项计划" if overview.enabled else "日程提醒已关闭")
-        self.summary.set(f"{summary} · Windows 已提交 {overview.submitted} · QQ 已发送 {overview.qq_sent}")
-        if visible_rows:
+        records = {}
+        kinds = {event.id: event.event_type for event in self.app.store.events}
+        for row in overview.rows:
+            if self.active_filter and row.group != self.active_filter:
+                continue
+            key = f"event:{row.event_id}"
+            self.rows[key] = row
+            clock_format = "%m-%d %H:%M" if row.when.year == now.year else "%Y-%m-%d %H:%M"
+            kind = "DDL" if row.ddl else EVENT_TYPE_LABELS.get(kinds.get(row.event_id), "日程")
+            title = f"{kind} · {' '.join(row.title.splitlines())}"
+            records[key] = (title, self.GROUPS.get(row.group, row.status), row.when.strftime(clock_format),
+                            row.windows, row.qq)
+
+        briefs = ((key, batch) for key, batch in batches.items() if batch["kind"] == "brief")
+        for identifier, batch in sorted(briefs, key=lambda item: item[1]["when"], reverse=True)[:30]:
+            key = f"brief:{identifier}"
+            self.brief_rows[key] = identifier
+            when = batch["when"].replace("T", " ")[:16]
+            if when.startswith(f"{now.year}-"):
+                when = when[5:]
+            records[key] = ("每日行程简报", "简报记录", when, *batch_channel_statuses(batch))
+
+        old_keys = self.tree.get_children()
+        self.tree.delete(*(key for key in old_keys if key not in records))
+        for index, (key, values) in enumerate(records.items()):
+            tags = ("alternate",) if index % 2 else ()
+            if key == self._hovered:
+                tags = ("hover", *tags)
+            if self.tree.exists(key):
+                self.tree.item(key, values=values, tags=tags)
+                if self.tree.index(key) != index:
+                    self.tree.move(key, "", index)
+            else:
+                self.tree.insert("", "end", iid=key, values=values, tags=tags)
+        if reset_scroll:
+            self.tree.yview_moveto(0)
+            if selected and selected[0] in records:
+                self.tree.see(selected[0])
+        elif scroll:
+            self.tree.yview_moveto(scroll[0])
+        if self._hovered not in records:
+            self._hovered = None
+
+        self._title(len(records))
+        prefix = "" if overview.enabled else "日程提醒已关闭 · "
+        self.summary.set(f"{prefix}Windows 已提交 {overview.submitted} · QQ 已发送 {overview.qq_sent}")
+        if records:
             self.empty_label.place_forget()
         else:
-            self.empty_label.configure(text="此分组暂无记录" if filtered_group else "暂无提醒计划")
+            self.empty_label.configure(text="此类暂无提醒计划" if self.active_filter else "暂无提醒计划")
             self.empty_label.place(relx=.5, rely=.5, anchor="center")
-        self.revision = self.app.reminder_engine.revision
+        self.revision = engine.revision
         self.refreshed_at = time.monotonic()
         self.show_selection()
 
@@ -329,14 +416,13 @@ class ReminderPlanPanel(tk.Frame):
             try:
                 self.app.reminder_engine.cancel_snooze(row.event_id)
                 self.refresh()
-                self.detail.set("已取消稍后提醒；不会重新发送原始通知，事项日期与完成状态保持不变。")
+                self.app._show_feedback("已取消稍后提醒")
             except (OSError, ValueError) as error:
                 self.detail.set("取消未完成：" + str(error))
 
     def show_notice(self, identifier):
-        if self.filter_choice.get() != "全部计划":
-            self.filter_choice.set("全部计划")
-            self.refresh()
+        if self.active_filter and not any(row.batch == identifier for row in self.rows.values()):
+            self.set_filter(None)
         for key, row in self.rows.items():
             if row.batch == identifier:
                 self.tree.see(key)

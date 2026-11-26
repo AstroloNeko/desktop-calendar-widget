@@ -77,6 +77,99 @@ def shot(window, output, filename):
     capture_own_window(window, output / (filename + ".png"))
 
 
+def verify_plan_filters(app, window, theme, dpi, native, output):
+    plan = window.plan
+    default_counts = {group: count.get() for group, count in plan.counts.items()}
+    assert len(plan.tree.get_children()) == len(plan.rows)
+    assert not any(plan.tree.get_children(key) for key in plan.tree.get_children())
+    assert plan.list_title.get() == "全部提醒计划 · 28 条"
+    assert plan.tree.set("event:fixture-0", "business") == "需要处理"
+    assert plan.tree.set("event:fixture-2", "business") == "已稍后提醒"
+    assert not plan.show_all_button.winfo_manager()
+    state = app.reminder_engine._state()
+    state["batches"]["fixture-brief"] = {"kind": "brief", "when": FIXED_NOW.isoformat(), "channels": {
+        "windows": {"status": "submitted"}}}
+    with patch.object(app.reminder_engine, "_state", return_value=state):
+        plan.refresh()
+        assert plan.tree.set("brief:fixture-brief", "business") == "简报记录"
+        assert plan.list_title.get() == "全部提醒计划 · 29 条"
+    plan.refresh()
+
+    def click_card(card):
+        # Use the trailing padding, outside the caption, to exercise the full hit area.
+        x, y = card.winfo_width()-4, card.winfo_height()//2
+        card.event_generate("<Enter>", x=x, y=y)
+        pump(app, .03)
+        assert card.hovered
+        card.event_generate("<ButtonPress-1>", x=x, y=y)
+        card.event_generate("<ButtonRelease-1>", x=x, y=y)
+
+    def check_card(group):
+        assert plan.active_filter == group
+        hub = plan.filter_cards[group]
+        assert hub.selected and hub.surface.cget("bg") == hub.color
+        assert len(plan.rows) == int(default_counts[group])
+        assert all(row.group == group for row in plan.rows.values())
+        assert {key: value.get() for key, value in plan.counts.items()} == default_counts
+        assert plan.list_title.get() == f"{plan.GROUPS[group]} · {default_counts[group]} 条"
+        assert plan.show_all_button.winfo_ismapped()
+        if dpi == native:
+            shot(window, output, f"{theme}-plans-{group}")
+
+    attention = plan.filter_cards["attention"]
+    click_card(attention)
+    pump(app, .05)
+    check_card("attention")
+    attention.surface.event_generate("<ButtonPress-1>", x=0, y=0)
+    attention.surface.event_generate("<ButtonRelease-1>", x=0, y=0)
+    pump(app, .05)
+    assert plan.active_filter is None and not attention.selected
+    attention.set_hover(False)
+
+    snoozed = plan.filter_cards["snoozed"]
+    snoozed.focus_force()
+    assert snoozed.focus_get() is snoozed
+    assert snoozed.tk_focusNext() is plan.filter_cards["upcoming"]
+    snoozed.event_generate("<KeyPress-Return>")
+    pump(app, .05)
+    check_card("snoozed")
+    assert not plan.tree.selection()
+    assert all(button.cget("state") == "disabled"
+               for button in (plan.open_button, plan.cancel_button, plan.details_button))
+    plan.tree.selection_set("event:fixture-2")
+    pump(app, .05)
+    assert plan.cancel_button.cget("state") == "normal"
+    app._reminder_views_dirty = True
+    app._refresh_reminder_views()
+    assert plan.active_filter == "snoozed" and plan.tree.selection() == ("event:fixture-2",)
+
+    # Advance only the display clock. The engine's normal read-only projection
+    # reclassifies the expired Snooze. No worker or fixture ledger is changed.
+    with patch.object(plan, "clock", lambda: FIXED_NOW + timedelta(days=2)):
+        app._reminder_views_dirty = True
+        app._refresh_reminder_views()
+        assert plan.active_filter == "snoozed"
+        assert plan.list_title.get() == "已稍后提醒 · 0 条"
+        assert not plan.tree.selection()
+        assert plan.empty_label.winfo_ismapped() or plan.empty_label.winfo_manager() == "place"
+        assert plan.details_content.get() == ""
+        assert all(button.cget("state") == "disabled"
+                   for button in (plan.open_button, plan.cancel_button, plan.details_button))
+    app._reminder_views_dirty = True
+    app._refresh_reminder_views()
+    plan.show_all_button.invoke()
+    assert plan.active_filter is None and len(plan.rows) == 28
+
+    upcoming = plan.filter_cards["upcoming"]
+    upcoming.focus_force()
+    upcoming.event_generate("<KeyPress-space>")
+    pump(app, .05)
+    check_card("upcoming")
+    upcoming.event_generate("<KeyPress-space>")
+    pump(app, .05)
+    assert plan.active_filter is None and not upcoming.selected
+
+
 def run_case(app, theme, dpi, native, output):
     with patch.object(app.dpi, "current_window_dpi", return_value=dpi):
         app._apply_dpi_change(dpi)
@@ -161,7 +254,7 @@ def run_case(app, theme, dpi, native, output):
             plan = window.plan
             assert len(plan.rows) == 28
             assert not plan.tree.selection() and not plan.selection_actions.winfo_ismapped()
-            assert tuple(plan.tree["columns"]) == ("when", "windows", "qq")
+            assert tuple(plan.tree["columns"]) == ("item", "business", "when", "windows", "qq")
             recorded = tuple(plan.tree.item("event:fixture-0", "values"))[-2:]
             assert recorded == ("已提交", "发送失败"), recorded
             assert plan.rows["event:fixture-4"].group == "attention"
@@ -176,16 +269,14 @@ def run_case(app, theme, dpi, native, output):
             assert plan.cancel_button.cget("state") == "disabled"
             if dpi == native:
                 shot(window, output, f"{theme}-plans")
-            plan.filter_choice.set("需要处理")
-            plan.refresh()
-            assert len(plan.rows) == int(plan.counts["attention"].get())
-            plan.filter_choice.set("全部计划")
-            plan.refresh()
+            verify_plan_filters(app, window, theme, dpi, native, output)
+            plan.tree.selection_set("event:fixture-0")
+            pump(app, .08)
             min_width, min_height = window.minsize()
             window.geometry(f"{min_width}x{min_height}")
             pump(app, .25)
-            assert all(plan.tree.column(key, "width") > 0 for key in ("#0", "when", "windows", "qq"))
-            assert sum(plan.tree.column(key, "width") for key in ("#0", "when", "windows", "qq")) <= plan.tree.winfo_width()
+            assert all(plan.tree.column(key, "width") > 0 for key in plan.tree["columns"])
+            assert sum(plan.tree.column(key, "width") for key in plan.tree["columns"]) <= plan.tree.winfo_width()
             if dpi == native:
                 shot(window, output, f"{theme}-plans-small")
             assert plan.tree.winfo_height() >= app.dpi.px(94), (dpi, min_width, min_height, plan.tree.winfo_height())
@@ -216,31 +307,37 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     enable_dpi_awareness()
     store = Store(output / f"isolated-ui-{uuid4().hex}.json")
-    with patch.object(CalendarApp, "_schedule_calendar_reminders"):
+    with patch.object(CalendarApp, "_schedule_calendar_reminders"), \
+            patch.object(CalendarApp, "_native_reminders_tick", return_value=2000):
         app = CalendarApp(store)
-    try:
-        app._reminder_preview_clock = lambda: FIXED_NOW
-        pump(app, .22)
-        native = dpi_for_window(app)
-        seed(app)
-        cases = [run_case(app, theme, dpi, native, output)
-                 for dpi in dict.fromkeys((native, 96, 120, 144)) for theme in ("modern", "paper")]
-        app.reminder_engine.configure({"enabled": False})
-        app.open_reminder_plans()
-        window = app.notification_settings_window
-        pump(app, .2)
-        assert not window.plan.rows and window.plan.empty_label.winfo_ismapped()
-        shot(window, output, "empty-plan")
-        window.close()
-        report = {"physical_dpi": native, "cases": cases, "empty_plan": "passed",
-                  "remote_fixture": "local injected observations, no network or real account"}
-        (output / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(json.dumps(report, ensure_ascii=False))
-    finally:
-        window = app.notification_settings_window
-        if window and window.winfo_exists():
+        try:
+            app._reminder_preview_clock = lambda: FIXED_NOW
+            pump(app, .22)
+            native = dpi_for_window(app)
+            seed(app)
+            cases = [run_case(app, theme, dpi, native, output)
+                     for dpi in dict.fromkeys((native, 96, 120, 144)) for theme in ("modern", "paper")]
+            app.reminder_engine.configure({"enabled": False})
+            app.open_reminder_plans()
+            window = app.notification_settings_window
+            pump(app, .2)
+            assert not window.plan.rows and window.plan.empty_label.winfo_ismapped()
+            shot(window, output, "empty-plan")
+            window.plan.filter_cards["attention"].invoke()
+            pump(app, .12)
+            assert window.plan.list_title.get() == "需要处理 · 0 条"
+            assert window.plan.empty_label.winfo_ismapped()
+            shot(window, output, "empty-plan-filtered")
             window.close()
-        cleanup(app)
+            report = {"physical_dpi": native, "cases": cases, "empty_plan": "passed", "plan_filters": "pointer, keyboard and auto refresh passed",
+                      "remote_fixture": "local injected observations, no network or real account"}
+            (output / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(json.dumps(report, ensure_ascii=False))
+        finally:
+            window = app.notification_settings_window
+            if window and window.winfo_exists():
+                window.close()
+            cleanup(app)
 
 
 if __name__ == "__main__":

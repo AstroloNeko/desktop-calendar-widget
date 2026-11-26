@@ -168,11 +168,9 @@ def main():
             window.private.set(False)
         if index == 3 and args.visual_only:
             assert window.plan.counts["upcoming"].get() == "8"
-            window.plan.filter_choice.set("需要处理")
-            window.plan.refresh()
+            window.plan.filter_cards["attention"].invoke()
             assert not window.plan.rows and window.plan.counts["upcoming"].get() == "8"
-            window.plan.filter_choice.set("全部计划")
-            window.plan.refresh()
+            window.plan.show_all_button.invoke()
             report["plan_filter"] = "passed"
             report["brief_preview_privacy"] = "passed"
         if index < 3:
