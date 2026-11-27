@@ -217,6 +217,31 @@ class Perf001P0RegressionTests(unittest.TestCase):
                 self.assertEqual(buckets.get(day, []), expected)
                 self.assertEqual(day in deadlines, store.has_ddl_on(day))
 
+    def test_flow_click_draws_once_then_repeated_click_skips_drawing(self):
+        from event_selection import EventSelection
+        from timeline_model import TimelineSelection
+        first, second = date(2026, 5, 1), date(2026, 5, 2)
+        canvas = Mock()
+        canvas.grab_current.return_value = canvas
+        owner = SimpleNamespace(selected=first, _schedule_press=lambda e: False, bulk_selection=EventSelection(),
+                                _canvas_has_timeline_item=lambda w: False, timeline_selection=TimelineSelection(),
+                                _global_flow_day_from_event=lambda e: e.day, _global_flow_drag_start=None,
+                                _global_flow_drag_end=None, _set_quick_placeholder=Mock(), _draw_calendar_flow=Mock(),
+                                _draw_flow_range_preview=Mock())
+        owner._flow_selected_range = lambda: CalendarApp._flow_selected_range(owner)
+        event = SimpleNamespace(widget=canvas, day=second)
+        for _ in range(2):
+            CalendarApp._start_flow_drag(owner, event)
+            CalendarApp._finish_flow_drag(owner, event)
+        self.assertEqual(owner.selected, second)
+        owner._draw_calendar_flow.assert_called_once()
+        CalendarApp._start_flow_drag(owner, event)
+        CalendarApp._update_flow_drag(owner, SimpleNamespace(widget=canvas, day=first))
+        CalendarApp._update_flow_drag(owner, event)
+        CalendarApp._finish_flow_drag(owner, event)
+        self.assertEqual(owner._draw_calendar_flow.call_count, 2)
+        self.assertEqual(canvas.grab_release.call_count, 3)
+
     def test_compact_selection_updates_only_two_cells_and_falls_back_on_time_or_month_change(self):
         cells = [SimpleNamespace(day=date(2026, 5, d), draw=Mock(), selected=(d == 1)) for d in (1, 2, 3)]
         owner = SimpleNamespace(view_mode="compact", selected=cells[0].day, shown_year=2026, shown_month=5,

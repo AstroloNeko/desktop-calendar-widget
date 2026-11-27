@@ -5325,8 +5325,8 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         selected = self._global_flow_day_from_event(event)
         if selected is None:
             return None
-        if hasattr(self, "bulk_selection"):
-            self.clear_bulk_selection()
+        had_item_selection = bool(self.timeline_selection.selected_item_id or self.bulk_selection.ids)
+        self.bulk_selection.clear()
         existing_range = self._flow_selected_range()
         preserve_range = bool(
             existing_range
@@ -5343,9 +5343,11 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self._global_flow_drag_end = selected
         self._global_flow_drag_moved = False
         self.timeline_selection.clear()
+        changed = self.selected != selected or (not preserve_range and existing_range != (selected, selected, 1))
         self.selected = selected
-        self._set_quick_placeholder()
-        self._draw_calendar_flow()
+        if changed or had_item_selection:
+            self._set_quick_placeholder()
+            self._draw_calendar_flow()
         return "break"
 
     def _update_flow_drag(self, event: tk.Event) -> Optional[str]:
@@ -5360,7 +5362,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if selected != self._global_flow_drag_end or self._global_flow_drag_start != anchor:
             self._global_flow_drag_start = anchor
             self._global_flow_drag_end = selected
-            self._global_flow_drag_moved = selected != anchor
+            self._global_flow_drag_moved = True
             self._draw_flow_range_preview()
         return "break"
 
@@ -5390,9 +5392,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 event.widget.grab_release()
         except tk.TclError:
             pass
-        self.selected = range_start
-        self._set_quick_placeholder()
-        self._draw_calendar_flow()
+        if moved or self.selected != range_start:
+            self.selected = range_start
+            self._set_quick_placeholder()
+            self._draw_calendar_flow()
         return "break"
 
     def _flow_selected_range(self) -> Optional[tuple[date, date, int]]:
