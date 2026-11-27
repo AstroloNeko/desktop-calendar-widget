@@ -43,6 +43,10 @@ py -3 tools/run_tests.py --desktop-script check_direct_schema8_exe --allow-deskt
 
 所有例行原生界面矩阵使用共享活动主题注册表。原生通知运行前需要原生 DLL。通知脚本与 UI 夹具均使用本次测试档案，QQ 实机验收属于独立 Live 流程。
 
+## 协议与发布候选专项
+
+`pwsh -NoProfile -File tools/check_proactive_schema.ps1` 使用 PowerShell 7.4 及以上的本地 Draft 2020-12 校验器，验证协商、投递和降级载荷。运行时跨字段约束由端云离线回归覆盖。候选包和后续实机门禁参见 [Windows 候选验收手册](v0.14-windows-rc-qa.md)。
+
 ## Live 模型与远程验收
 
 这些命令会访问实际服务。先取得专项授权，并为本次运行明确选择独立 QA 凭据、服务端和数据。`$qaModelConfig` 应预先设置为 QA 在当前 Windows 用户下生成的 `configuration.dpapi` 路径，评测使用合成日历和调用预算。微信探针通过 `CALENDAR_SERVER_URL` 使用指定的 QA 服务。带 `--isolated-test-queue` 的操作还需要该服务的 QA Worker 凭据以及专用测试队列，详见 [微信探针](wechat-b2-probe.md)。

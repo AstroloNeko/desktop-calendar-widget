@@ -9,7 +9,7 @@ from uuid import uuid4
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError
 from desktop_calendar.reminders.reminder_config import lookup
 from desktop_calendar.reminders.reminder_engine import CONFIG_KEY, STATE_KEY, normalize_config
-from tools.calendar_agent_eval import EvaluationCalendar, RecordingProvider, ROOT, fixed_time, live_provider, redact, require
+from tools.calendar_agent_eval import EvaluationCalendar, RecordingProvider, ROOT, fixed_time, git_metadata, live_provider, redact, require
 
 
 MOMENT = datetime.fromisoformat("2026-11-26T10:00:00+08:00")
@@ -198,10 +198,13 @@ def main():
     parser.add_argument("--config", type=Path, required=True, help="Explicit read-only configuration.dpapi authorized for Live evaluation")
     parser.add_argument("--cases", nargs="+")
     parser.add_argument("--suite", choices=("runtime","config"), default="runtime")
+    parser.add_argument("--max-calls", type=int, default=24)
     args = parser.parse_args()
+    if not 1 <= args.max_calls <= 24:
+        parser.error("--max-calls must be between 1 and 24")
     provider, secrets, name = live_provider(args.config)
     require(name.startswith("deepseek"), "select the saved DeepSeek model for this live test")
-    budget = [24]
+    budget = [args.max_calls]
     outcomes = []
     configuration = args.suite == "config"
     suite = config_cases if configuration else cases
@@ -234,7 +237,7 @@ def main():
     require(outcomes, "no matching cases")
     output = ROOT/"build"/"calendar-agent-eval"/f"reminder-{args.suite}-{uuid4().hex[:8]}.json"
     output.parent.mkdir(parents=True,exist_ok=True)
-    output.write_text(json.dumps({"model":name,"cases":outcomes},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+    output.write_text(json.dumps({"model":name,"git":git_metadata(),"max_calls":args.max_calls,"cases":outcomes},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     print(output)
     return 0 if all(case["passed"] for case in outcomes) else 1
 

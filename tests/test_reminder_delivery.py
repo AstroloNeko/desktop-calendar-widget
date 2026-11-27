@@ -348,6 +348,25 @@ class ReminderDeliveryTests(unittest.TestCase):
         self.assertEqual(private["items"], [])
         self.assertNotIn("50%", private["fallback_text"])
 
+    def test_brief_context_obeys_slot_capability_and_completion_limits(self):
+        from desktop_calendar.reminders.notification_model import BriefProgress
+        capable = replace(self.binding, brief_context_version=1)
+        notice = Notice("b" * 64, "brief", self.now, self.now + timedelta(minutes=2), ())
+        self.assertEqual(notice_payload(notice, capable, False)["brief_context"], {"slot": "morning"})
+        for total, completed, allowed in ((0, 0, True), (5000, 5000, True), (5001, 2, False),
+                                          (3, 4, False), (4, -1, False)):
+            with self.subTest(total=total, completed=completed):
+                evening = replace(notice, brief_slot="evening", progress=BriefProgress(total, completed))
+                public = notice_payload(evening, capable, False)
+                self.assertEqual("completion" in public["brief_context"], allowed)
+                self.assertNotIn("brief_context", notice_payload(evening, self.binding, False))
+                private = notice_payload(evening, capable, True)
+                self.assertEqual(private["brief_context"], {"slot": "evening"})
+                self.assertNotIn("brief_counts", private)
+                self.assertFalse(private["items"])
+                self.assertNotIn("完成率", private["fallback_text"])
+        self.assertNotIn("brief_context", notice_payload(replace(notice, kind="event"), capable, False))
+
     def test_empty_brief_does_not_send(self):
         self.engine.configure({"brief": {"enabled": True}})
         self.engine.tick(self.now)

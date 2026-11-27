@@ -7,9 +7,12 @@ import threading
 import uuid
 
 from desktop_calendar.remote_transport import Client, StatusError, Unavailable
-from desktop_calendar.reminders.notification_model import Notice, identity, legacy_brief_projection, select_brief_items
+from desktop_calendar.reminders.notification_model import (
+    BRIEF_SLOTS, Notice, identity, legacy_brief_projection, select_brief_items,
+)
 
 PATH = "/api/notifications/proactive"
+MAX_BRIEF_COMPLETION_TOTAL = 5000
 ACTIONS = {
     "event": ("acknowledge", "view_items", "snooze_10m"),
     "ddl": ("acknowledge", "view_items", "snooze_10m"),
@@ -56,10 +59,13 @@ def notice_payload(notice, binding, private):
         if notice.kind in ("event","ddl") and len(notice.items) > 20:
             fallback += f"\n共 {len(notice.items)} 项。知道了作用于本批仍有效的全部提醒。超过 20 项时请按编号引用或到桌面端稍后处理。"
     context = {}
-    if notice.kind == "brief" and binding.brief_context_version == 1:
+    if notice.kind == "brief" and binding.brief_context_version == 1 and notice.brief_slot in BRIEF_SLOTS:
         context["slot"] = notice.brief_slot
-        if not private and notice.progress is not None:
-            context["completion"] = {"total": notice.progress.total, "completed": notice.progress.completed}
+        progress = notice.progress
+        if (not private and notice.brief_slot == "evening" and progress is not None
+                and type(progress.total) is int and type(progress.completed) is int
+                and 0 <= progress.completed <= progress.total <= MAX_BRIEF_COMPLETION_TOTAL):
+            context["completion"] = {"total": progress.total, "completed": progress.completed}
     wire_items = [
         {**{key: item[key] for key in ("title", "group", "date", "time") if key in item}, "index": index}
         for index, item in enumerate(selected, 1)

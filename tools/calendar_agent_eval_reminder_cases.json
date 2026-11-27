@@ -161,7 +161,7 @@
     "reminder_config": {"enabled":false,"time":"08:45"},
     "turns": [{"action":"message","text":"明天下午三点开组会，提前15分钟提醒我。","mock":[[{"name":"propose_events","arguments":{"action":"create","items":[{"fields":{"title":"组会","date":"2026-11-26","time":"15:00","reminder_rule":{"mode":"relative","minutes":15}}}]}}]]}],
     "expected_plan": [{"turn":1,"action":"create","members":[{"title":"组会","date":"2026-11-26","time":"15:00","reminder_rule":{"mode":"relative","minutes":15}}]}],
-    "expected_interaction": [{"kind":"succeeded","writes":1,"receipt":{"event":{"reminder_plan":{"mode":"relative","planned_at":"2026-11-26T14:45","global_enabled":false,"schedule_status":"recalculated"}}}}],
+    "expected_interaction": [{"kind":"succeeded","writes":1,"receipt":{"event":{"reminder_plan":{"mode":"relative","planned_at":"2026-11-26T14:45","global_enabled":false,"rule_enabled":true,"schedule_status":"recalculated"}}}}],
     "expected_final_state": {"create":[{"title":"组会","date":"2026-11-26","time":"15:00","reminder_plan":{"mode":"relative","planned_at":"2026-11-26T14:45","global_enabled":false}}],"update":{},"delete":[],"writes":1}
   },
   {
