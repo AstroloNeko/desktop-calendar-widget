@@ -194,6 +194,26 @@ class Perf001P0RegressionTests(unittest.TestCase):
                 store.save_preferences({"theme": "modern"})
         self.assertEqual(store.settings["theme"], "slate")
 
+    def test_compact_selection_updates_only_two_cells_and_falls_back_on_time_or_month_change(self):
+        cells = [SimpleNamespace(day=date(2026, 5, d), draw=Mock(), selected=(d == 1)) for d in (1, 2, 3)]
+        owner = SimpleNamespace(view_mode="compact", selected=cells[0].day, shown_year=2026, shown_month=5,
+                                day_cells=cells, render=Mock(), render_agenda=Mock(), _compact_render_date=date.today(),
+                                _ddl_render_time=datetime.min, _ddl_next_change=datetime.max)
+        CalendarApp.select_day(owner, cells[1].day)
+        CalendarApp.select_day(owner, cells[1].day)
+        self.assertEqual([c.draw.call_count for c in cells], [1, 1, 0])
+        self.assertEqual([c.selected for c in cells], [False, True, False])
+        owner.render_agenda.assert_called_once_with(refresh_ddl=False)
+        owner.render.assert_not_called()
+        owner._ddl_next_change = datetime.min
+        CalendarApp.select_day(owner, cells[1].day)
+        owner._ddl_next_change = datetime.max
+        owner._compact_render_date = date.min
+        CalendarApp.select_day(owner, cells[2].day)
+        owner._compact_render_date = date.today()
+        CalendarApp.select_day(owner, date(2026, 6, 1))
+        self.assertEqual(owner.render.call_count, 3)
+
     def test_complete_and_undo_via_desktop_commands_change_the_queue(self):
         from event_commands import EventCommandHistory
         store = self._sqlite_store()

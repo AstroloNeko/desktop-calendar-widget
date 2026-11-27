@@ -4517,6 +4517,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 date_status=custom_status,
             )
         self.render_agenda()
+        self._compact_render_date = today
         if self.day_detail_window and self.day_detail_window.winfo_exists():
             self.day_detail_window.refresh()
         if self.ddl_list_window and self.ddl_list_window.winfo_exists():
@@ -5794,7 +5795,15 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.after_idle(self._update_scrollbar)
 
     def _refresh_ddl_regions(self) -> None:
-        pinned_ddl, regular_ddl = self.store.grouped_ddl_events()
+        now = datetime.now()
+        pinned_ddl, regular_ddl = self.store.grouped_ddl_events(now)
+        # Repaint the deadline panels only when a row becomes pinned or overdue.
+        transitions = (self.store.event_ends_at(item) for item in pinned_ddl)
+        next_overdue = next((end + timedelta(microseconds=1) for end in transitions if end >= now), datetime.max)
+        next_pinned = (self.store.event_ends_at(regular_ddl[0]) - timedelta(hours=24)
+                       if regular_ddl else datetime.max)
+        self._ddl_render_time = now
+        self._ddl_next_change = min(next_overdue, next_pinned)
         self._render_ddl_area(
             pinned_ddl,
             self.pinned_ddl_inner,
@@ -6055,10 +6064,22 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.agenda_scrollbar.pack_forget()
 
     def select_day(self, day: date) -> None:
+        previous = self.selected
         self.selected = day
-        if day.year != self.shown_year or day.month != self.shown_month:
-            self.shown_year, self.shown_month = day.year, day.month
-        self.render()
+        month_changed = (day.year, day.month) != (self.shown_year, self.shown_month)
+        self.shown_year, self.shown_month = day.year, day.month
+        now = datetime.now()
+        if (self.view_mode != "compact" or month_changed or self._compact_render_date != now.date()
+                or not self._ddl_render_time <= now < self._ddl_next_change):
+            self.render()
+            return
+        if previous == day:
+            return
+        for cell in self.day_cells:
+            if cell.day == previous or cell.day == day:
+                cell.selected = cell.day == day
+                cell.draw()
+        self.render_agenda(refresh_ddl=False)
 
     def change_month(self, delta: int) -> None:
         self._cancel_schedule_drag()
