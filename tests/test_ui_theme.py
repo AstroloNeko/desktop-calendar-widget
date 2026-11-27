@@ -51,17 +51,32 @@ class ThemeRegistryTests(unittest.TestCase):
             app.set_theme.assert_called_with(entry["value"])
 
     def test_theme_selection_persists_each_active_choice(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
         from app import CalendarApp
+        from calendar_core import Store
+        from desktop_calendar.storage.sqlite_calendar_repository import SqliteCalendarRepository
 
-        app = Mock(theme_name="modern", quick_placeholder_active=False)
-        app.store.settings = {"unrelated": "preserved"}
-        with patch("app.activate_theme") as activate:
-            for name in reversed(ACTIVE_THEME_NAMES):
-                CalendarApp.set_theme(app, name)
-                self.assertEqual(app.theme_name, name)
-                activate.assert_called_with(ACTIVE_THEMES[name])
-                self.assertEqual(app.store.settings, {"theme": name, "unrelated": "preserved"})
-        self.assertEqual(app.store.save.call_count, len(ACTIVE_THEME_NAMES))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "theme.sqlite3"
+            store = Store(path, repository_factory=SqliteCalendarRepository)
+            try:
+                store.save_preferences({"unrelated": "preserved"})
+                app = Mock(theme_name="modern", quick_placeholder_active=False, store=store)
+                app._save_preferences = lambda updates: CalendarApp._save_preferences(app, updates)
+                with patch("app.activate_theme") as activate:
+                    for name in reversed(ACTIVE_THEME_NAMES):
+                        CalendarApp.set_theme(app, name)
+                        self.assertEqual(app.theme_name, name)
+                        activate.assert_called_with(ACTIVE_THEMES[name])
+                        reopened = Store(path, repository_factory=SqliteCalendarRepository)
+                        try:
+                            self.assertEqual(reopened.settings["theme"], name)
+                            self.assertEqual(reopened.settings["unrelated"], "preserved")
+                        finally:
+                            reopened.repository.close()
+            finally:
+                store.repository.close()
 
 
 if __name__ == "__main__":
