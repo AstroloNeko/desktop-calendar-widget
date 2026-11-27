@@ -504,6 +504,19 @@ class Store:
         """Legacy preferences/reminder/backup bridge; business commits use apply_changes."""
         self.repository.write_current()
 
+    def save_preferences(self, updates: dict[str, Any]) -> bool:
+        """Persist only the changed UI/window preferences without full-collection diffing."""
+        writer = getattr(self.repository, "write_preferences", None)
+        if callable(writer):
+            commit = writer(updates)
+            return bool(commit.changed)
+        updated = deepcopy(dict(updates))
+        if all(key in self.settings and self.settings[key] == value for key, value in updated.items()):
+            return False
+        self.settings.update(updated)
+        self.save()
+        return True
+
     def prepare_event(self, event: Event) -> Event:
         """Validate a detached candidate without changing canonical tasks or writing data."""
         candidate = Event.from_dict(asdict(event))

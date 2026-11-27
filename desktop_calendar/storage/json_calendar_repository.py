@@ -107,6 +107,25 @@ class JsonCalendarRepository:
             raise
         return RepositoryCommit(True,self.revision())
 
+    def write_preferences(self, updates):
+        """Update selected settings keys via Store.save when values change."""
+        store = self.legacy_store
+        updated = deepcopy(dict(updates))
+        if all(key in store.settings and store.settings[key] == value for key, value in updated.items()):
+            return RepositoryCommit(False, self.revision())
+        previous = {key: (key in store.settings, store.settings.get(key)) for key in updated}
+        store.settings.update(updated)
+        try:
+            store.save()
+        except BaseException:
+            for key, (existed, value) in previous.items():
+                if existed:
+                    store.settings[key] = value
+                else:
+                    store.settings.pop(key, None)
+            raise
+        return RepositoryCommit(True, self.revision())
+
     def close(self):
         """JSON owns no persistent connection."""
 

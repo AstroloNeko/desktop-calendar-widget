@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from calendar_core import Event
 from desktop_calendar.assistant.calendar_chat_protocol import fingerprint
@@ -149,6 +149,21 @@ class RemoteInteractionTests(unittest.TestCase):
             invalid = self.data({**self.native('bad-'+next(iter(change)), '添加组会'), **change})
             self.assertEqual(invalid['error'], 'invalid_job')
         self.assertEqual(len(self.events()), 1)
+
+    def test_qq_create_and_undo_update_actual_reminder_queue(self):
+        from desktop_calendar.reminders.reminder_engine import ReminderEngine
+        engine = self.executor(lambda: ReminderEngine(self.store, Mock()))
+        self.executor(lambda: engine.configure({"enabled": True}))
+        self.runtime.gateway.reminders = engine
+        self.refresh.side_effect = lambda change: engine.invalidate()
+        self.enable()
+        done = self.data(self.native('qq-reminder-create', '创建组会'), [self.create()])
+        def queued():
+            engine.tick(datetime(2026, 1, 1))
+            return [plan.event_id for _, _, plan in engine.queue]
+        self.assertEqual(self.executor(queued), [self.events()[0].id])
+        self.data(self.click('qq-reminder-undo', 'qq-reminder-create', done, 'undo'))
+        self.assertEqual(self.executor(queued), [])
 
     def test_button_confirms_once_and_undo_is_operation_bound(self):
         self.enable()

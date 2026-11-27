@@ -29,11 +29,13 @@ class GlobalSidebar(tk.Frame):
         self.workspace_width = 0
         self._drawer = None
         self.drawer_button = drawer_button
+        self._last_arrange_key = None
 
         grip = tk.Frame(self, width=dp(4), bg=theme.workspace_grid, cursor="sb_h_double_arrow")
         self.grip = grip
         grip.pack(side="left", fill="y")
         grip.bind("<B1-Motion>", self._resize_from_left)
+        grip.bind("<ButtonRelease-1>", self._resize_from_left)
         grip.bind("<Enter>", lambda _e: grip.configure(bg=theme.input_focus))
         grip.bind("<Leave>", lambda _e: grip.configure(bg=self._grip_color()))
         body = tk.Frame(self, bg=bg)
@@ -48,7 +50,7 @@ class GlobalSidebar(tk.Frame):
             button = button_factory(tabs, app, text, lambda mode=name: self.switch(mode, focus=True),
                                     width=82, height=26, font_size=8, surface_background=surface, outlined=True)
             # The grid stretches these canvases; redraw against the allocated size.
-            button.bind("<Configure>", lambda _e, tab=button: tab.draw(), add="+")
+            button.bind("<Configure>", button._on_configure if hasattr(button, "_on_configure") else (lambda _e, tab=button: tab.draw()), add="+")
             if theme.rounded_widget_shells:
                 button.show_focus_ring = True
                 button.bind("<FocusIn>", lambda _e, tab=button: tab.draw(), add="+")
@@ -173,26 +175,31 @@ class GlobalSidebar(tk.Frame):
             self.grid_forget()
             self.place_forget()
             self._drawer = drawer
+            self._last_arrange_key = None
             self.grip.configure(bg=self._grip_color())
         maximum = min(self.MAX_WIDTH, max(self.MIN_WIDTH, logical - 560)) if not drawer else self.MAX_WIDTH
         preferred = self.preferred_width or GLOBAL_TIMELINE_LAYOUT.detail_panel_width(logical)
         pixels = min(max(1, width - dp(12)), dp(max(self.MIN_WIDTH, min(maximum, preferred))))
-        if not drawer:
-            if int(self.cget("width")) != pixels:
-                self.configure(width=pixels)
-            if self.dock_open and not self.winfo_manager():
-                self.grid(row=0, column=2, sticky="nsew", padx=(dp(self.app.theme.metrics.workspace_gap), 0))
-            elif not self.dock_open:
-                self.grid_forget()
-        elif self.drawer_open:
-            gap = dp(self.app.theme.metrics.workspace_gap)
-            self.place(relx=1, y=gap, anchor="ne", width=pixels, relheight=1,
-                       height=-2 * gap, bordermode="outside")
-            self.lift()
-        else:
-            self.place_forget()
+        visible = self.drawer_open if drawer else self.dock_open
+        arrange_key = (drawer, pixels, visible)
+        if arrange_key != self._last_arrange_key or bool(self.winfo_manager()) != visible:
+            self._last_arrange_key = arrange_key
+            if not drawer:
+                if int(self.cget("width")) != pixels:
+                    self.configure(width=pixels)
+                if self.dock_open and not self.winfo_manager():
+                    self.grid(row=0, column=2, sticky="nsew", padx=(dp(self.app.theme.metrics.workspace_gap), 0))
+                elif not self.dock_open:
+                    self.grid_forget()
+            elif self.drawer_open:
+                gap = dp(self.app.theme.metrics.workspace_gap)
+                self.place(relx=1, y=gap, anchor="ne", width=pixels, relheight=1,
+                           height=-2 * gap, bordermode="outside")
+                self.lift()
+            else:
+                self.place_forget()
         if self.drawer_button is not None:
-            label = "收起右栏" if (self.drawer_open if drawer else self.dock_open) else "展开右栏"
+            label = "收起右栏" if visible else "展开右栏"
             if self.drawer_button.text != label:
                 self.drawer_button.set_text(label)
 

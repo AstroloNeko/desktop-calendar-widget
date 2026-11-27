@@ -463,7 +463,7 @@ class NativeMoveTests(unittest.TestCase):
         from view_mode import WindowGeometry
         geometry = WindowGeometry(1000, 600, 80, 50)
         fake = SimpleNamespace(_global_window_move=None, view_mode="global", winfo_exists=lambda: True,
-                               state=lambda: "normal", _capture_window_geometry=lambda: geometry,
+                               state=lambda: "normal", _capture_window_geometry=lambda *, refresh: geometry,
                                store=SimpleNamespace(settings={"global_geometry": geometry.as_dict()}, save=Mock()))
         CalendarApp._save_global_geometry(fake)
         fake.store.save.assert_not_called()

@@ -213,4 +213,6 @@ class BackupActionsMixin:
             geometry = WindowGeometry.from_mapping(self.store.settings.get("global_geometry"))
             if geometry is not None:
                 self._apply_saved_geometry(geometry)
+        if hasattr(self, "invalidate_reminders"):
+            self.invalidate_reminders()
         self.render()

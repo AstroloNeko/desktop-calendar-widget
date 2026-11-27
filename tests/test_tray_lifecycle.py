@@ -27,6 +27,7 @@ class FakeApp(ApplicationLifecycleMixin):
         self._active_modal_window = Mock(return_value=None)
         self._active_overlays = Mock(return_value=[])
         self.grab_current = Mock(return_value=None)
+        self._geometry_save_job = None
         self._global_window_move = None
         self._global_normal_geometry = WindowGeometry(1000, 700, -800, 20)
         self._capture_window_geometry = Mock(return_value=WindowGeometry(372, 548, -500, 30))
@@ -70,6 +71,17 @@ class LifecycleTests(unittest.TestCase):
     def setUp(self):
         self.foreground = patch("app_lifecycle.raise_for_interaction").start()
         self.addCleanup(patch.stopall)
+
+    def test_revision_conflict_leaves_exit_retryable(self):
+        from desktop_calendar.storage.calendar_repository import RepositoryConflictError
+        app = FakeApp()
+        app._save_window_settings.side_effect = RepositoryConflictError("stale")
+        with patch("app_lifecycle.messagebox.showerror"):
+            self.assertFalse(app.on_close())
+        self.assertFalse(app.lifecycle.exiting)
+        app.destroy.assert_not_called()
+        app._save_window_settings.side_effect = None
+        self.assertTrue(app.on_close())
 
     def test_hide_does_not_save_destroy_or_change_history(self):
         app = FakeApp()

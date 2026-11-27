@@ -83,6 +83,34 @@ class BackupUiTests(unittest.TestCase):
         self.owner = Owner(self.root)
         self.path = self.root / "export.dcalbackup"
 
+    def test_import_then_restore_replaces_the_scheduled_queue(self):
+        from datetime import datetime
+        from desktop_calendar.reminders.reminder_engine import ReminderEngine
+        owner = self.owner
+        engine = ReminderEngine(owner.store, Mock())
+        engine.configure({"enabled": True})
+        owner.store.upsert(Event("old", "Old", "2026-12-02T10:00", has_time=True, reminder=0))
+        create_backup(owner.store.data_file.read_bytes(), self.path)
+        external = Store(self.root / "import.json")
+        external.settings.update(owner.store.settings)
+        external.upsert(Event("new", "New", "2026-12-03T10:00", has_time=True, reminder=0))
+        owner.view_mode = "compact"
+        for name in ("_cancel_schedule_drag", "_reset_global_category_filter", "_invalidate_search",
+                     "set_theme", "_apply_theme_opacity", "_set_initial_geometry", "render"):
+            setattr(owner, name, Mock())
+        owner.invalidate_reminders = engine.invalidate
+        owner._refresh_restored_data = lambda: BackupActionsMixin._refresh_restored_data(owner)
+        def queued():
+            engine.tick(datetime(2026, 12, 1))
+            return [plan.event_id for _, _, plan in engine.queue]
+        self.assertEqual(queued(), ["old"])
+        with (patch("backup_ui.filedialog.askopenfilename", side_effect=[str(external.data_file), str(self.path)]),
+              patch("backup_ui.messagebox.askyesno", return_value=True), patch("backup_ui.messagebox.showinfo")):
+            owner.import_legacy_calendar()
+            self.assertEqual(queued(), ["new"])
+            owner.restore_data_backup()
+            self.assertEqual(queued(), ["old"])
+
     def test_manual_export(self):
         with patch("backup_ui.filedialog.asksaveasfilename", return_value=str(self.path)), \
              patch("backup_ui.messagebox.showinfo") as info:

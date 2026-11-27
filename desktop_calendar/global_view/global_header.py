@@ -43,6 +43,7 @@ class GlobalHeader(tk.Frame):
         super().__init__(parent, bg=theme.header_background, height=app.dpi.px(HEADER_HEIGHT))
         self.app = app
         self.pack_propagate(False)
+        self._last_layout_size = None
         self.sheen = tk.Canvas(self, bg=theme.header_background, bd=0, highlightthickness=0)
         self.sheen.place(x=0, y=0, relwidth=1, height=app.dpi.px(5))
         self.edge = tk.Frame(self, bg=theme.header_border, height=app.dpi.px(1))
@@ -72,7 +73,11 @@ class GlobalHeader(tk.Frame):
                                     surface_background=theme.header_background,
                                     accented=key == "create",
                                     icon=key if key in ("compact", "previous", "following", "minimize") else None)
-            button.bind("<Configure>", lambda _e, control=button: control.draw(), add="+")
+            button.bind(
+                "<Configure>",
+                button._on_configure if hasattr(button, "_on_configure") else (lambda _e, control=button: control.draw()),
+                add="+",
+            )
             self.controls[key] = button
             self.tooltips.append(tooltip_factory(button, tip))
         # Whitelist only blank chrome and title labels. Buttons are never drag targets.
@@ -95,16 +100,24 @@ class GlobalHeader(tk.Frame):
             self.hide_tooltips()
             self.app._start_global_window_move(event)
 
-    def _layout(self, _event=None):
+    def _layout(self, event=None):
+        width_px = int(event.width) if event is not None and hasattr(event, "width") else self.winfo_width()
+        height_px = int(event.height) if event is not None and hasattr(event, "height") else self.winfo_height()
+        if width_px <= 1:
+            return
+        size_key = (width_px, height_px)
+        if size_key == self._last_layout_size:
+            return
+        self._last_layout_size = size_key
         dp = self.app.dpi.px
         theme = self.app.theme
         self.sheen.delete("all")
         if theme.style in ("aero", "frutiger"):
-            vertical_gradient(self.sheen, 0, 0, self.winfo_width(), dp(5),
+            vertical_gradient(self.sheen, 0, 0, width_px, dp(5),
                               blend(theme.header_background, theme.header_highlight, .68), theme.header_background)
         else:
-            self.sheen.create_line(0, 0, self.winfo_width(), 0, fill=theme.window_border_inner)
-        bounds = header_layout(self.app.dpi.logical(self.winfo_width()))
+            self.sheen.create_line(0, 0, width_px, 0, fill=theme.window_border_inner)
+        bounds = header_layout(self.app.dpi.logical(width_px))
         x, y, width, _ = bounds["title"]
         self.month.place(x=dp(x), y=dp(y), width=dp(width), height=dp(28))
         self.subtitle.place(x=dp(x), y=dp(y + 29), width=dp(width), height=dp(18))

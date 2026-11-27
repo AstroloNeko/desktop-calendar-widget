@@ -171,7 +171,7 @@ class DeliveryQueue:
     def tick(self, now):
         from desktop_calendar.reminders.reminder_runtime import delivery_member_revision
         e = self.engine
-        config = e.config()
+        config = e._config_view()
         brief = config["brief"]
         binding = self.binding() if config["qq"] or brief["qq"] and any(brief_enabled(brief, slot) for slot in BRIEF_SLOTS) else None
         scope = binding.scope if binding else ""
@@ -180,11 +180,21 @@ class DeliveryQueue:
             e.invalidate()
         if e.dirty:
             e._rebuild()
-        state = e._state()
+        state = e._state_view()
+        mutable = False
+
+        def ensure_mutable():
+            nonlocal state, mutable
+            if not mutable:
+                state = e._state()
+                mutable = True
+            return state
+
         changed = False
         due = defaultdict(list)
         dispatched = []
         if scope and state["qq_cutover"].get("scope") != scope:
+            ensure_mutable()
             state["qq_cutover"] = {"scope": scope, "at": now.isoformat()}
             changed = True
         qq_scope = scope or state["qq_cutover"].get("scope", "")
@@ -200,7 +210,10 @@ class DeliveryQueue:
             record = record if isinstance(record, dict) else {}
             status = record.get("status")
             if status == "dispatching":
-                record["status"] = "unknown"
+                ensure_mutable()
+                delivery_entry = state["deliveries"].get(plan.key)
+                if isinstance(delivery_entry, dict):
+                    delivery_entry["status"] = "unknown"
                 changed = True
                 continue
             if record.get("batch") or status in ("accepted", "expired", "exhausted", "snoozed", "unknown"):
@@ -225,6 +238,8 @@ class DeliveryQueue:
                 group += (plan.key,)
             due[group].append(plan)
 
+        if due:
+            ensure_mutable()
         for group, plans in due.items():
             _, kind, channels = group[:3]
             members = [(plan.event_id, plan.key) for plan in plans]
@@ -255,25 +270,41 @@ class DeliveryQueue:
             for channel, account in ([("windows", "")] if windows else []) + ([("qq", binding.account_scope)] if qq else []):
                 identifier = identity(policy, channel, now.date().isoformat(), account)
                 if identifier not in state["batches"]:
+                    ensure_mutable()
                     record = self.new_record("brief", start, expires, (), (channel,), scope)
                     record["brief_slot"] = slot
                     state["batches"][identifier] = record
                     changed = True
 
-        for identifier, record in state["batches"].items():
+        for identifier in tuple(state["batches"]):
+            record = state["batches"].get(identifier)
             if not isinstance(record, dict):
                 continue
-            for channel, entry in record["channels"].items():
+            for channel in tuple(record["channels"]):
+                record = state["batches"][identifier]
+                entry = record["channels"][channel]
+
+                def mutable_batch():
+                    ensure_mutable()
+                    mut_record = state["batches"][identifier]
+                    return mut_record, mut_record["channels"][channel]
+
                 task = (identifier, channel, entry["attempts"])
                 status = entry["status"]
+                if status != "dispatching" and not (
+                    status == "cancelled" and entry.get("paused_for_completion")
+                ) and (status in TERMINAL or entry["attempts"] >= MAX_ATTEMPTS):
+                    continue
                 if status == "dispatching":
                     if task not in self.inflight or read_time(entry["at"], now) + ACK_TIMEOUT <= now:
+                        record, entry = mutable_batch()
                         entry.update(status="unknown", reason="提交结果未持久化或等待超时")
                         self.inflight.discard(task)
                         self.replace_on_cancel.discard(task)
                         changed = True
                     continue
                 if status == "cancelled" and entry.get("paused_for_completion") and self.current_members(record, state):
+                    record, entry = mutable_batch()
                     entry.update(status="pending", paused_for_completion=False)
                     status = "pending"
                     changed = True
@@ -284,30 +315,36 @@ class DeliveryQueue:
                 if is_brief and read_time(record["when"], now).date() == now.date():
                     start, expires = brief_window(now.date(), brief, slot)
                     if (record["when"], record["expires"]) != (start.isoformat(), expires.isoformat()):
+                        record, entry = mutable_batch()
                         record.update(when=start.isoformat(), expires=expires.isoformat())
                         changed = True
                 expiry = read_time(record["expires"], now)
                 if expiry <= now:
+                    record, entry = mutable_batch()
                     entry.update(status="expired", reason="已超过补发有效期")
                     changed = True
                     continue
                 prefs = brief if is_brief else config
                 if (is_brief and not brief_enabled(brief, slot)) or not prefs[channel] or (channel == "qq" and record["scope"] != qq_scope):
+                    record, entry = mutable_batch()
                     entry.update(status="cancelled", reason="提醒、通道或绑定已变更")
                     changed = True
                     continue
                 kind = brief_policy_key(slot) if is_brief else "event"
                 if not self.past_cutover(state,kind,channel,read_time(record["when"],now)):
+                    record, entry = mutable_batch()
                     entry.update(status="cancelled", reason="该历史通知早于当前通道启用时刻")
                     changed = True
                     continue
                 if channel == "qq" and not binding:
                     if status == "pending" and entry.get("reason") != "等待核验原绑定账号":
+                        record, entry = mutable_batch()
                         entry["reason"] = "等待核验原绑定账号"
                         changed = True
                     continue
                 if channel == "qq" and state["qq_capability_required"].get(kind) and not verified_qq:
                     if entry.get("reason") != "等待核验QQ主动推送能力":
+                        record, entry = mutable_batch()
                         entry["reason"] = "等待核验QQ主动推送能力"
                         changed = True
                     continue
@@ -326,6 +363,7 @@ class DeliveryQueue:
                 if not is_brief and not members:
                     completed = any(event.done for event_id, _ in record["members"]
                                     if (event := e.store.event_by_id(event_id)) is not None)
+                    record, entry = mutable_batch()
                     entry.update(status="cancelled", reason="原事项提醒已失效", paused_for_completion=completed)
                     changed = True
                     continue
@@ -335,6 +373,7 @@ class DeliveryQueue:
                 if is_brief:
                     local_items, progress = brief_content(e.store, read_time(record["when"], now), brief, slot=slot)
                     has_content = bool(local_items or progress and progress.total)
+                    record, entry = mutable_batch()
                     record["brief_items"] = [{key: value for key, value in item.items() if key != "title"}
                                              for item in local_items]
                     items = tuple({} for _ in local_items) if private else local_items
@@ -343,6 +382,7 @@ class DeliveryQueue:
                 else:
                     items = event_items(e.store, members, private)
                 if is_brief and not has_content and not brief["send_empty"]:
+                    record, entry = mutable_batch()
                     entry.update(status="skipped")
                     changed = True
                     continue
@@ -350,6 +390,7 @@ class DeliveryQueue:
                 notice = Notice(identifier, record["kind"], read_time(record["when"], now), expiry, items,
                                 members[0][0] if len(members) == 1 and len(record["members"]) == 1 else "",
                                 attempt, record["scope"], brief_slot=slot, progress=progress)
+                record, entry = mutable_batch()
                 entry.update(status="dispatching", attempts=attempt, at=now.isoformat(), reason="", tag=notice.tag)
                 if not is_brief:
                     entry["members"] = [list(member) for member in members]

@@ -142,11 +142,12 @@ def scaled_geometry(width: int, height: int, x: int, y: int, dpi: Optional[int] 
     return f"{scale_px(width, dpi)}x{scale_px(height, dpi)}{int(x):+d}{int(y):+d}"
 
 
-def window_handle(widget: tk.Misc) -> Optional[int]:
+def window_handle(widget: tk.Misc, *, refresh: bool = True) -> Optional[int]:
     if not IS_WINDOWS:
         return None
     try:
-        widget.update_idletasks()
+        if refresh and (not widget.winfo_ismapped() or int(widget.winfo_width()) <= 1):
+            widget.update_idletasks()
         child = int(widget.winfo_id())
         user32 = ctypes.windll.user32
         get_ancestor = _win32_function(user32.GetAncestor, [wintypes.HWND, wintypes.UINT], wintypes.HWND)
@@ -159,7 +160,7 @@ def window_handle(widget: tk.Misc) -> Optional[int]:
 def dpi_for_window(widget: tk.Misc, fallback: int = BASE_DPI) -> int:
     if not IS_WINDOWS:
         return fallback
-    hwnd = window_handle(widget)
+    hwnd = window_handle(widget, refresh=False)
     if hwnd:
         try:
             user32 = ctypes.windll.user32
@@ -203,7 +204,7 @@ def work_area_for_window(widget: tk.Misc) -> WorkArea:
     if not IS_WINDOWS:
         return WorkArea(0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
     fallback = WorkArea(0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
-    hwnd = window_handle(widget)
+    hwnd = window_handle(widget, refresh=False)
     if not hwnd:
         return fallback
     user32 = ctypes.windll.user32

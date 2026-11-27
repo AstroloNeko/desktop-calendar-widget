@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from data_compat import DataCompatibilityError
+from desktop_calendar.storage.calendar_repository import RepositoryConflictError
 from view_mode import initial_global_geometry
 from win_integration import raise_for_interaction
 
@@ -260,7 +261,7 @@ class ApplicationLifecycleMixin:
                 state.hidden = False
             self._owned_data_dialog(lambda: messagebox.showerror(
                 "桌面月历", f"退出时已拒绝不兼容的数据写入。\n\n{exc}", parent=self))
-        except (OSError, tk.TclError) as exc:
+        except (OSError, RepositoryConflictError, tk.TclError) as exc:
             state.exiting = False
             self.restore_from_tray()
             self._owned_data_dialog(lambda: messagebox.showerror(

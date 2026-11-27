@@ -168,6 +168,13 @@ class SqliteCalendarRepository(JsonCalendarRepository):
         except sqlite3.Error as exc:
             raise OSError('SQLite 提醒状态保存失败：' + str(exc)) from exc
 
+    def write_preferences(self, updates):
+        """Persist selected preference keys without reading or comparing full collections."""
+        try:
+            return self._apply({}, preferences=deepcopy(dict(updates)), replace_preferences=False)
+        except sqlite3.Error as exc:
+            raise OSError('SQLite 偏好设置保存失败：' + str(exc)) from exc
+
     def apply_changes(self, changes, *, expected_revision=None, operation_id=None, preference_updates=None):
         try:
             return self._apply(changes, expected_revision=expected_revision, operation_id=operation_id,

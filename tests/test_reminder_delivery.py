@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from calendar_core import Event, Store
 from desktop_calendar.reminders.notification_model import (
@@ -82,6 +82,23 @@ class ReminderDeliveryTests(unittest.TestCase):
         self.engine.tick(self.now)
         notice = self.windows.send.call_args.args[0]
         self.assertEqual({item["event_id"] for item in notice.items}, {"first", "second"})
+
+    def test_failed_batch_save_does_not_publish_or_send_either_channel(self):
+        self.engine.configure({"enabled": True, "qq": True})
+        self.engine.tick(self.now)
+        self.now += timedelta(minutes=1)
+        self.add("due")
+        original = json.dumps(self.store.settings[STATE_KEY], sort_keys=True)
+        with patch.object(self.store.repository, "_commit", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.engine.tick(self.now)
+        self.assertEqual(original, json.dumps(self.store.settings[STATE_KEY], sort_keys=True))
+        self.windows.send.assert_not_called()
+        self.qq.send.assert_not_called()
+        self.engine.tick(self.now)
+        self.engine.tick(self.now + timedelta(seconds=2))
+        self.windows.send.assert_called_once()
+        self.qq.send.assert_called_once()
 
     def test_one_channel_failure_does_not_replay_the_other(self):
         for failed in ("windows", "qq"):

@@ -68,6 +68,8 @@ class AgentEventReminderTests(TestCase):
                               dict(title='组会',date=future,time='15:00',reminder_rule=dict(mode='relative',minutes=15))),
                               'relative',future+'T14:45')
         self.assertEqual(meeting['time'],'15:00')
+        self.assertIn((meeting['id'], datetime(2026, 11, 27, 14, 45)),
+                      [(plan.event_id, plan.when) for _, _, plan in self.engine.queue])
         ddl = self.result(self.create('周五下午五点交报告，提前两天提醒。',
                           dict(title='报告',date=future,time='17:00',event_type='ddl',
                                reminder_rule=dict(mode='relative',minutes=2880))),

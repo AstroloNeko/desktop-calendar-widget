@@ -771,8 +771,14 @@ class WindowBehaviorTests(unittest.TestCase):
         self.assertEqual(actions, ["save", "widgets", "draw"])
 
     def test_global_display_mode_is_saved_with_window_settings(self) -> None:
-        source = inspect.getsource(CalendarApp._save_window_settings)
-        self.assertIn('self.store.settings["global_display_mode"]', source)
+        from unittest.mock import Mock
+        owner = SimpleNamespace(_geometry_save_job=None, view_mode="global", global_display_mode="timeline",
+                                agenda_open=True, theme_name="slate", window_mode="pinned",
+                                lifecycle=LifecycleState(), state=lambda: "zoomed", _global_normal_geometry=None,
+                                store=SimpleNamespace(settings={}, save=Mock()))
+        CalendarApp._save_window_settings(owner)
+        self.assertEqual(owner.store.settings["global_display_mode"], "timeline")
+        owner.store.save.assert_called_once()
 
     def test_calendar_flow_today_indicator_uses_theme_tokens(self) -> None:
         source = inspect.getsource(CalendarApp._draw_calendar_flow)

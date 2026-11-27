@@ -34,7 +34,7 @@ def normalize_config(raw):
         raw = {}
     if type(raw.get("version", 1)) is not int or raw.get("version", 1) != 1:
         raise ReminderError("提醒设置版本不兼容，已停止提醒；日历数据未改变。")
-    result = deepcopy(DEFAULT_CONFIG)
+    result = {**DEFAULT_CONFIG, "events": {}}
     result.update(enabled=raw.get("enabled") is True, private=raw.get("private") is True,
                   time=normalize_reminder_time(raw.get("time")) or "09:00")
     for key in ("windows", "aggregate", "merge_backlog", "qq"):
@@ -204,15 +204,30 @@ class ReminderEngine:
         self.rebuild_count = 0
         self.revision = 0
 
-    def config(self):
+    def _config_view(self):
         return normalize_config(self.store.settings.get(CONFIG_KEY))
 
-    def _state(self):
+    def config(self):
+        return self._config_view()
+
+    def _state_raw(self):
         raw = self.store.settings.get(STATE_KEY, {})
         if not isinstance(raw, dict):
             raw = {}
         if type(raw.get("version", 1)) is not int or raw.get("version", 1) != 1:
             raise ReminderError("提醒记录版本不兼容，已停止提醒；日历数据未改变。")
+        return raw
+
+    def _state_view(self):
+        raw = self._state_raw()
+        return {"version": 1, **{
+            key: raw[key] if isinstance(raw.get(key), dict) else {}
+            for key in ("deliveries", "snoozes", "batches", "qq_cutover", "handled", "runtime_actions",
+                        "config_versions", "config_actions", "config_cutovers", "qq_capability_required", "qq_capabilities")
+        }}
+
+    def _state(self):
+        raw = self._state_raw()
         return {"version": 1, **{
             key: deepcopy(raw[key]) if isinstance(raw.get(key), dict) else {}
             for key in ("deliveries", "snoozes", "batches", "qq_cutover", "handled", "runtime_actions",

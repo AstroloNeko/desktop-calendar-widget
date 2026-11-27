@@ -18,7 +18,7 @@ DPI_AWARENESS_MODE = enable_dpi_awareness()
 
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk, font as tkfont
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from calendar_core import (
     APP_DIR,
@@ -448,6 +448,7 @@ class ThemeButton(LogicalCanvas):
         self.icon = icon
         self._armed = False
         self.state = "normal"
+        self._last_drawn_size: Optional[tuple[int, int]] = None
         super().__init__(
             parent,
             dpi=app.dpi,
@@ -465,6 +466,11 @@ class ThemeButton(LogicalCanvas):
         self.bind("<ButtonRelease-1>", self._release)
         self.bind("<space>", lambda _event: self.command())
         self.bind("<Return>", lambda _event: self.command())
+        self.draw()
+
+    def _on_configure(self, event: tk.Event) -> None:
+        if (event.width, event.height) == self._last_drawn_size:
+            return
         self.draw()
 
     def _set_state(self, state: str) -> None:
@@ -488,6 +494,7 @@ class ThemeButton(LogicalCanvas):
         self.draw()
 
     def draw(self) -> None:
+        self._last_drawn_size = (self.winfo_width(), self.winfo_height())
         theme = self.app.theme
         width = max(2, self.logical_width())
         height = max(2, self.logical_height())
@@ -634,11 +641,18 @@ class TaskCheck(LogicalCanvas):
         self.app = app
         self.done = done
         self.command = command
+        self._last_drawn_size: Optional[tuple[int, int]] = None
         self.bind("<Button-1>", lambda _event: self.command())
-        self.bind("<Configure>", lambda _event: self.draw())
+        self.bind("<Configure>", self._on_configure)
+        self.draw()
+
+    def _on_configure(self, event: tk.Event) -> None:
+        if (event.width, event.height) == self._last_drawn_size:
+            return
         self.draw()
 
     def draw(self) -> None:
+        self._last_drawn_size = (self.winfo_width(), self.winfo_height())
         self.delete("all")
         theme = self.app.theme
         center_y = max(12, int(self.logical_height() / 2))
@@ -807,12 +821,18 @@ class DayCell(LogicalCanvas):
         self.holiday: Optional[HolidayInfo] = None
         self.date_status = "normal"
         self.ddl = False
-        self.bind("<Configure>", lambda _event: self.draw())
+        self._last_drawn_size: Optional[tuple[int, int]] = None
+        self.bind("<Configure>", self._on_configure)
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
         self.bind("<Button-1>", self._click)
         self.bind("<Double-Button-1>", self._double_click)
         self.bind("<Button-3>", self._right_click)
+
+    def _on_configure(self, event: tk.Event) -> None:
+        if (event.width, event.height) == self._last_drawn_size:
+            return
+        self.draw()
 
     def update_day(
         self,
@@ -859,6 +879,7 @@ class DayCell(LogicalCanvas):
     def draw(self) -> None:
         # Date cells are rebuilt from a clean tagged canvas on every state
         # transition, so hover/selected/today layers cannot accumulate.
+        self._last_drawn_size = (self.winfo_width(), self.winfo_height())
         self.delete("all")
         theme = self.app.theme
         self.configure(bg=theme.calendar_background)
@@ -3105,6 +3126,11 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self._geometry_save_job: Optional[str] = None
         self._global_render_job: Optional[str] = None
         self._global_resize_job: Optional[str] = None
+        self._last_global_configure_geom: Optional[tuple[int, int, int, int]] = None
+        self._last_global_workspace_size: Optional[tuple[int, int]] = None
+        self._last_global_canvas_size: Optional[tuple[str, int, int]] = None
+        self._global_mode_widgets_key: Optional[tuple[str, str]] = None
+        self._last_header_size: Optional[tuple[int, int]] = None
         self._global_day_width = 0
         self._global_content_width = 0
         self._global_content_height = 0
@@ -3169,14 +3195,13 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.configure(bg=self.theme.window_shadow)
         self.overrideredirect(True)
         if not self.store.settings.get("crisp_text_migrated_v1", False):
-            self.store.settings["opacity"] = 1.0
-            self.store.settings["crisp_text_migrated_v1"] = True
             try:
-                self.store.save()
+                self._save_preferences({"opacity": 1.0, "crisp_text_migrated_v1": True})
             except OSError:
                 # Keep the crisp in-memory default even if a portable/read-only
                 # launch cannot persist the one-time migration yet.
-                pass
+                self.store.settings["opacity"] = 1.0
+                self.store.settings["crisp_text_migrated_v1"] = True
         try:
             opacity = min(1.0, max(0.90, float(self.store.settings.get("opacity", 1.0))))
         except (TypeError, ValueError):
@@ -3273,6 +3298,14 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
 
         configure_scrollbars(self, style, self.theme, self.dpi.px)
 
+    def _save_preferences(self, updates: dict[str, Any]) -> bool:
+        saver = getattr(self.store, "save_preferences", None)
+        if callable(saver):
+            return saver(updates)
+        self.store.settings.update(updates)
+        self.store.save()
+        return True
+
     def _apply_theme_opacity(self, value: Optional[float] = None) -> None:
         if value is None:
             try:
@@ -3280,10 +3313,11 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             except (TypeError, ValueError):
                 value = 1.0
         value = min(1.0, max(0.90, value))
+        target = 1.0 if self.theme.style in ("aero", "frutiger") else value
         # Tk applies alpha to every child uniformly. Simulated glass themes
         # therefore use an opaque composite so desktop content cannot ghost
         # through text and controls.
-        self.attributes("-alpha", 1.0 if self.theme.style in ("aero", "frutiger") else value)
+        self.attributes("-alpha", target)
 
     def report_callback_exception(self, exc_type, exc_value, exc_traceback) -> None:
         log_exception(exc_type, exc_value, exc_traceback)
@@ -3649,9 +3683,12 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self._set_quick_placeholder()
         self._update_mode_badge()
 
-    def _draw_header(self, _event=None) -> None:
+    def _draw_header(self, event=None) -> None:
+        if event is not None and (int(event.width), int(event.height)) == self._last_header_size:
+            return
         width = max(1, self.header.logical_width())
         height = max(1, self.header.logical_height())
+        self._last_header_size = (self.header.winfo_width(), self.header.winfo_height())
         self.header.delete("header_art")
         if self.theme.style == "frutiger":
             vertical_multi_gradient(
@@ -3981,8 +4018,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def get_view_mode(self) -> str:
         return self.view_mode
 
-    def _capture_window_geometry(self) -> WindowGeometry:
-        self.update_idletasks()
+    def _capture_window_geometry(self, *, refresh: bool = True) -> WindowGeometry:
+        if refresh or not self.winfo_ismapped() or self.winfo_width() <= 1 or self.winfo_height() <= 1:
+            self.update_idletasks()
         return WindowGeometry(
             self.dpi.logical(self.winfo_width()),
             self.dpi.logical(self.winfo_height()),
@@ -4002,10 +4040,6 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if self.view_mode == "global":
             return
         compact_geometry = self._capture_window_geometry()
-        self.store.settings["compact_geometry"] = compact_geometry.as_dict()
-        self.store.settings["x"] = compact_geometry.x
-        self.store.settings["y"] = compact_geometry.y
-        self.store.settings["view_mode"] = "global"
         self.view_mode = "global"
         self.desktop_session_active = False
         self.timeline_selection.clear()
@@ -4026,7 +4060,14 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.update_idletasks()
         make_frameless_app_window(self)
         self.render()
-        self.store.save()
+        self._save_preferences(
+            {
+                "compact_geometry": compact_geometry.as_dict(),
+                "x": compact_geometry.x,
+                "y": compact_geometry.y,
+                "view_mode": "global",
+            }
+        )
         self.after(80, self.apply_window_mode)
 
     def return_to_compact_view(self) -> None:
@@ -4040,8 +4081,9 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.global_header.hide_tooltips()
         if self.state() == "normal":
             self._global_normal_geometry = self._capture_window_geometry()
+        preference_updates: dict[str, Any] = {"view_mode": "compact"}
         if self._global_normal_geometry is not None:
-            self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
+            preference_updates["global_geometry"] = self._global_normal_geometry.as_dict()
         compact = WindowGeometry.from_mapping(self.store.settings.get("compact_geometry"))
         self.withdraw()
         try:
@@ -4054,7 +4096,6 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.title(APP_NAME)
         self.view_mode = "compact"
         self._activate_compact_return_session()
-        self.store.settings["view_mode"] = "compact"
         self._rebuild_main_ui("", True)
         if compact is None:
             self._set_initial_geometry()
@@ -4064,7 +4105,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.deiconify()
         self.update_idletasks()
         make_tool_window(self)
-        self.store.save()
+        self._save_preferences(preference_updates)
         self.after(80, self.apply_window_mode)
 
     def minimize_global(self) -> None:
@@ -4093,22 +4134,31 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def _schedule_view_geometry_save(self, event: tk.Event) -> None:
         if event.widget is not self or self.view_mode != "global" or self._dpi_rebuilding or self._global_window_move:
             return
+        geom_key = (int(event.x), int(event.y), int(event.width), int(event.height))
+        if geom_key == self._last_global_configure_geom:
+            return
+        self._last_global_configure_geom = geom_key
         if self._geometry_save_job:
             try:
                 self.after_cancel(self._geometry_save_job)
             except tk.TclError:
                 pass
-        self._geometry_save_job = self.after(180, self._save_global_geometry)
+        self._geometry_save_job = self.after(450, self._save_global_geometry)
 
     def _save_global_geometry(self) -> None:
         self._geometry_save_job = None
         if self.view_mode != "global" or not self.winfo_exists() or self.state() != "normal" or self._global_window_move:
             return
-        self._global_normal_geometry = self._capture_window_geometry()
-        if self.store.settings.get("global_geometry") == self._global_normal_geometry.as_dict():
+        self._global_normal_geometry = self._capture_window_geometry(refresh=False)
+        geo_dict = self._global_normal_geometry.as_dict()
+        if self.store.settings.get("global_geometry") == geo_dict:
             return  # A late Configure after a system move must not persist it twice.
-        self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
-        self.store.save()
+        save_prefs = getattr(self, "_save_preferences", None)
+        if callable(save_prefs):
+            save_prefs({"global_geometry": geo_dict})
+        else:
+            self.store.settings["global_geometry"] = geo_dict
+            self.store.save()
 
     def _ddl_canvas_height(self, item_count: int) -> int:
         return DDL_ROW_HEIGHT * min(max(0, item_count), DDL_VISIBLE_ROWS)
@@ -4238,15 +4288,13 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             raise_for_interaction(self)
         self._update_mode_badge()
 
-    def _schedule_dpi_check(self, _event=None) -> None:
+    def _schedule_dpi_check(self, event=None) -> None:
         if self._dpi_rebuilding:
             return
-        if self._dpi_check_job:
-            try:
-                self.after_cancel(self._dpi_check_job)
-            except tk.TclError:
-                pass
-        self._dpi_check_job = self.after(140, self._check_dpi_change)
+        if event is not None and event.widget is not self:
+            return
+        if self._dpi_check_job is None:
+            self._dpi_check_job = self.after(140, self._check_dpi_change)
 
     def _check_dpi_change(self) -> None:
         self._dpi_check_job = None
@@ -4273,6 +4321,10 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             except tk.TclError:
                 pass
             self._global_render_job = None
+        self._last_global_workspace_size = None
+        self._last_global_canvas_size = None
+        self._global_mode_widgets_key = None
+        self._last_header_size = None
         sidebar = getattr(self, "global_detail_frame", None)
         if sidebar is not None and sidebar.winfo_exists():
             self._global_sidebar_snapshot = sidebar.snapshot()
@@ -4419,8 +4471,6 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         return "break"
 
     def render(self) -> None:
-        if hasattr(self, "invalidate_reminders"):
-            self.invalidate_reminders()
         if getattr(self, "_schedule_drag", None):
             self._cancel_schedule_drag()
         if self.view_mode == "global":
@@ -4472,10 +4522,22 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         if self.ddl_list_window and self.ddl_list_window.winfo_exists():
             self.ddl_list_window.refresh()
 
-    def _schedule_global_render(self, _event=None) -> None:
-        if self.view_mode != "global" or self._global_render_job:
+    def _schedule_global_render(self, event: Optional[tk.Event] = None) -> None:
+        if self.view_mode != "global":
             return
-        self._global_render_job = self.after(32, self._finish_global_render)
+        if event is not None:
+            active_canvas = (
+                getattr(self, "global_flow_canvas", None)
+                if self.global_display_mode == "flow"
+                else getattr(self, "global_timeline_canvas", None)
+            )
+            if event.widget is not active_canvas:
+                return
+            size_key = (self.global_display_mode, int(event.width), int(event.height))
+            if size_key == self._last_global_canvas_size:
+                return
+        if self._global_render_job is None:
+            self._global_render_job = self.after(32, self._finish_global_render)
 
     def _finish_global_render(self) -> None:
         self._global_render_job = None
@@ -4527,14 +4589,22 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self._cancel_schedule_drag()
         self._cancel_flow_drag(redraw=False)
         self.global_display_mode = normalized
-        self.store.settings["global_display_mode"] = normalized
-        self.store.save()
+        save_prefs = getattr(self, "_save_preferences", None)
+        if callable(save_prefs):
+            save_prefs({"global_display_mode": normalized})
+        else:
+            self.store.settings["global_display_mode"] = normalized
+            self.store.save()
         self._update_global_display_mode_widgets()
         self._draw_active_global_view()
 
-    def _update_global_display_mode_widgets(self) -> None:
+    def _update_global_display_mode_widgets(self, *, force: bool = False) -> None:
         if not hasattr(self, "global_timeline_shell"):
             return
+        mode_key = (self.global_display_mode, self.theme_name)
+        if not force and mode_key == self._global_mode_widgets_key:
+            return
+        self._global_mode_widgets_key = mode_key
         is_flow = self.global_display_mode == "flow"
         if is_flow:
             self.global_timeline_shell.grid_remove()
@@ -4567,12 +4637,29 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
             self.after_cancel(self._global_render_job)
             self._global_render_job = None
         self._update_global_display_mode_widgets()
+        active_canvas = (
+            getattr(self, "global_flow_canvas", None)
+            if self.global_display_mode == "flow"
+            else getattr(self, "global_timeline_canvas", None)
+        )
+        if active_canvas is not None and active_canvas.winfo_exists():
+            self._last_global_canvas_size = (
+                self.global_display_mode,
+                int(active_canvas.winfo_width()),
+                int(active_canvas.winfo_height()),
+            )
         if self.global_display_mode == "flow":
             self._draw_calendar_flow()
         else:
             self._draw_global_timeline()
 
     def _on_global_workspace_configure(self, event: tk.Event) -> None:
+        if event.widget is not getattr(self, "global_workspace", None):
+            return
+        size_key = (int(event.width), int(event.height))
+        if size_key == self._last_global_workspace_size:
+            return
+        self._last_global_workspace_size = size_key
         if hasattr(self, "global_detail_frame") and self.global_detail_frame.winfo_exists():
             self.global_detail_frame.arrange(event.width)
         self._schedule_global_render()
@@ -6729,13 +6816,22 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         shell = tk.Canvas(parent, height=entry.winfo_reqheight()+dp(12), width=1,
                           bg=parent.cget("bg"), bd=0, highlightthickness=0)
         shell.pack(side="left", fill="x", expand=True)
+        last_paint_key: Optional[tuple[int, int, bool, bool]] = None
+
         def paint(event=None):
+            nonlocal last_paint_key
+            width = int(event.width) if event is not None and hasattr(event, "width") else shell.winfo_width()
+            height = int(event.height) if event is not None and hasattr(event, "height") else shell.winfo_height()
             focused = entry.focus_get() == entry
+            paint_key = (width, height, focused, self._quick_entry_hovered)
+            if paint_key == last_paint_key:
+                return
+            last_paint_key = paint_key
             fill = theme.schedule_card_background if focused else theme.input_background
             border = theme.input_focus if focused else theme.input_hover_border if self._quick_entry_hovered else fill
             shell.delete("field")
-            rounded_rectangle(shell, dp(1), dp(1), shell.winfo_width()-dp(1),
-                              shell.winfo_height()-dp(1), dp(6), fill=fill,
+            rounded_rectangle(shell, dp(1), dp(1), width-dp(1),
+                              height-dp(1), dp(6), fill=fill,
                               outline=border, width=dp(1), tags="field")
             entry.configure(bg=fill)
         shell.bind("<Configure>", paint)
@@ -6793,16 +6889,14 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.agenda_toggle.configure(text="▴" if self.agenda_open else "▾")
         pinned_ddl, regular_ddl = self.store.grouped_ddl_events()
         self._apply_main_layout(len(pinned_ddl), len(regular_ddl))
-        self.store.settings["agenda_open"] = self.agenda_open
         self._save_window_settings()
         self.after(80, self.apply_window_mode)
 
     def toggle_window_mode(self) -> None:
         self.window_mode = "pinned" if self.window_mode == "desktop" else "desktop"
         self.desktop_session_active = False
-        self.store.settings["window_mode"] = self.window_mode
         self.apply_window_mode(force_desktop=self.window_mode == "desktop")
-        self.store.save()
+        self._save_preferences({"window_mode": self.window_mode})
 
     def apply_window_mode(self, force_desktop: bool = False) -> None:
         if not self.winfo_exists():
@@ -6976,25 +7070,37 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.after(150, self.apply_window_mode)
 
     def _save_window_settings(self) -> None:
+        if self._geometry_save_job:
+            try:
+                self.after_cancel(self._geometry_save_job)
+            except tk.TclError:
+                pass
+            self._geometry_save_job = None
+        updates: dict[str, Any] = {
+            "view_mode": self.view_mode,
+            "global_display_mode": self.global_display_mode,
+            "agenda_open": self.agenda_open,
+            "window_mode": self.window_mode,
+            "theme": self.theme_name,
+        }
         if self.view_mode == "global":
             if self.lifecycle.hidden and self.lifecycle.view == "global" and self.lifecycle.snapshot is not None:
                 self._global_normal_geometry = self.lifecycle.snapshot
             elif self.state() == "normal":
                 self._global_normal_geometry = self._capture_window_geometry()
             if self._global_normal_geometry is not None:
-                self.store.settings["global_geometry"] = self._global_normal_geometry.as_dict()
+                updates["global_geometry"] = self._global_normal_geometry.as_dict()
         elif ((self.lifecycle.hidden and self.lifecycle.view == "compact" and self.lifecycle.snapshot is not None)
               or self.state() == "normal" and not self.lifecycle.hidden):
             compact_geometry = self.lifecycle.snapshot if self.lifecycle.hidden else self._capture_window_geometry()
-            self.store.settings["compact_geometry"] = compact_geometry.as_dict()
-            self.store.settings["x"] = compact_geometry.x
-            self.store.settings["y"] = compact_geometry.y
-        self.store.settings["view_mode"] = self.view_mode
-        self.store.settings["global_display_mode"] = self.global_display_mode
-        self.store.settings["agenda_open"] = self.agenda_open
-        self.store.settings["window_mode"] = self.window_mode
-        self.store.settings["theme"] = self.theme_name
-        self.store.save()
+            updates["compact_geometry"] = compact_geometry.as_dict()
+            updates["x"] = compact_geometry.x
+            updates["y"] = compact_geometry.y
+        if callable(getattr(self.store, "save_preferences", None)):
+            self._save_preferences(updates)
+        else:
+            self.store.settings.update(updates)
+            self.store.save()
 
     def show_day_menu(self, day: date, x: int, y: int) -> None:
         menu = themed_popup_menu(self, self.theme, (FONT, 9))
@@ -7144,20 +7250,17 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         self.theme = get_theme(normalized)
         activate_theme(self.theme)
         self._apply_theme_opacity()
-        self.store.settings["theme"] = normalized
-        self.store.save()
+        self._save_preferences({"theme": normalized})
         self._rebuild_main_ui(quick_value, quick_was_placeholder)
         self.after(80, self.apply_window_mode)
 
     def set_opacity(self, value: float) -> None:
-        self.store.settings["opacity"] = value
-        self.store.save()
+        self._save_preferences({"opacity": value})
         self._apply_theme_opacity(value)
 
     def toggle_holidays(self, enabled: bool) -> None:
         self.show_holidays = enabled
-        self.store.settings["show_holidays"] = enabled
-        self.store.save()
+        self._save_preferences({"show_holidays": enabled})
         self.render()
 
     def _start_tray_icon(self) -> None:
