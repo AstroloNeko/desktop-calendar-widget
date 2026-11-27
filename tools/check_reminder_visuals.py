@@ -6,6 +6,7 @@ from pathlib import Path
 import queue
 import sys
 import tempfile
+import tkinter as tk
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -14,10 +15,18 @@ from desktop_preferences import ACTIVE_THEME_NAMES
 from calendar_core import Event, Store
 from dpi_utils import WorkArea, dpi_for_window
 from desktop_calendar.reminders.reminder_engine import STATE_KEY, plans_for_store
+from desktop_calendar.reminders.notification_model import BRIEF_CLOCKS
 from desktop_calendar.reminders.reminder_overview import ReminderOverview
 from tools.check_habit_schedules import capture_own_window
 from tools.check_interactions import cleanup, pump
 from tools.check_reminder_ui import visible
+
+
+def preview_labels(parent):
+    for child in parent.winfo_children():
+        if isinstance(child, tk.Label):
+            yield child
+        yield from preview_labels(child)
 
 
 def main():
@@ -40,7 +49,7 @@ def main():
                 backend = Mock(events=queue.Queue(), status='隔离测试服务 · 未发送真实通知', _thread=None)
                 app.notification_backend = backend
                 app.reminder_engine.backend = backend
-                app.reminder_engine.configure({'enabled': True})
+                app.reminder_engine.configure({'enabled': True, 'private': False})
                 plans = {p.event_id: p for p in plans_for_store(store, app.reminder_engine.config())}
                 state = app.reminder_engine._state()
                 state['deliveries'][plans['0'].key] = {'status': 'failed', 'attempts': 1, 'at': datetime.now().isoformat()}
@@ -73,6 +82,20 @@ def main():
                             assert visible(window.rule_hint, window)
                             if dpi == native:
                                 capture_own_window(window, output / f'{theme}-settings-rules.png')
+                            window.tabs.select(1)
+                            window.preview_source.set('示例数据')
+                            window.preview_slot.set('晚间预览')
+                            window.brief[BRIEF_CLOCKS['evening']].set('18:00')
+                            window.brief['upcoming'].set(True)
+                            window.brief['overdue'].set(True)
+                            pump(app, .08)
+                            assert window.tabs.index('current') == 1
+                            context, = (label for label in preview_labels(window.preview_body)
+                                        if label.cget('text') == '今天已逾期 17:00')
+                            assert context.winfo_width() >= context.winfo_reqwidth()
+                            assert visible(window.brief_test_button, window)
+                            if dpi == native:
+                                capture_own_window(window, output / f'{theme}-brief.png')
                             window.close()
                             app.open_reminder_plans()
                             dialog = app.notification_settings_window
@@ -80,8 +103,10 @@ def main():
                             pump(app, .1)
                             assert visible(dialog.save_button, dialog)
                             assert len(window.rows) == 40
+                            assert window.open_button.cget('state') == 'disabled'
                             window.tree.selection_set('event:3')
                             window.show_selection()
+                            assert window.open_button.cget('state') == 'normal'
                             assert store.events[3].title in window.detail.get()
                             assert store.events[3].title in window.details_title.get()
                             window.tree.selection_set('event:1')
@@ -95,9 +120,14 @@ def main():
                                 assert window.tree.item(window._hovered, 'tags').count('hover') <= 1
                             window.refresh()
                             assert window.tree.selection() == ('event:1',)
+                            # Refresh repacks the details; let Tk settle the viewport before scrolling.
+                            dialog.update_idletasks()
                             window.tree.yview_moveto(1)
                             pump(app, .05)
-                            assert window.tree.bbox(window.tree.get_children()[-1])
+                            assert window.tree.bbox(window.tree.get_children()[-1]), (
+                                theme, dpi, 'last plan row not visible', window.tree.winfo_height(),
+                                window.winfo_height(), window.tree.yview(), window.tree.winfo_ismapped(),
+                                window.detail_frame.winfo_height(), dialog.geometry())
                             with patch.object(app.reminder_engine, 'overview', return_value=ReminderOverview(True, ())):
                                 window.refresh()
                                 pump(app, .05)

@@ -131,7 +131,7 @@ from desktop_calendar.ui.ui_draw import (
 )
 from desktop_calendar.ui.ui_theme import ACTIVE_THEMES, Theme, get_theme, normalize_theme_name
 from desktop_calendar.ui.themed_controls import (
-    RoundedCardShell, configure_scrollbars, form_button, form_entry, themed_check, themed_popup_menu,
+    RoundedCardShell, configure_scrollbars, form_button, form_combobox, form_entry, themed_check, themed_popup_menu,
 )
 
 
@@ -1174,14 +1174,14 @@ class EventEditor(tk.Toplevel):
             highlightthickness=0,
         )
         self.category_color_preview.pack(side="left", padx=(0, master.dpi.px(5)))
-        self.category_box = ttk.Combobox(
-            category_select,
+        self.category_box, category_control = form_combobox(
+            category_select, master, compact=True,
             textvariable=self.category_var,
             values=("无分类", *(category.name for category in self.categories)),
             state="readonly",
             font=(FONT, 9),
         )
-        self.category_box.pack(side="left", fill="x", expand=True)
+        category_control.pack(side="left", fill="x", expand=True)
         self.category_box.bind("<<ComboboxSelected>>", self._category_changed)
         manage_categories = ThemeButton(
             category_row,
@@ -1201,15 +1201,15 @@ class EventEditor(tk.Toplevel):
         reminder_col = tk.Frame(reminder_row, bg=CARD)
         reminder_col.pack(side="left", fill="x", expand=True)
         self._field_label(reminder_col, "即时提醒（按分钟提前需填写事项时间）")
-        reminder_box = ttk.Combobox(
-            reminder_col,
+        reminder_box, reminder_control = form_combobox(
+            reminder_col, master, compact=True,
             textvariable=self.reminder_var,
             values=(self.default_reminder_choice, self.explicit_reminder_choice, self.off_reminder_choice,
                     *self.reminder_choices),
             state="readonly",
             font=(FONT, 9),
         )
-        reminder_box.pack(fill="x", pady=(4, 0))
+        reminder_control.pack(fill="x", pady=(master.dpi.px(4), 0))
         reminder_box.bind("<<ComboboxSelected>>", lambda _event: setattr(self, "reminder_changed", True))
 
         color_heading = tk.Frame(shell, bg=CARD)
@@ -1632,19 +1632,9 @@ class RoutineEditor(tk.Toplevel):
         self.bind("<MouseWheel>", self._content_wheel, add="+")
 
         tk.Label(shell, text="要做什么？", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
-        self.title_entry = tk.Entry(
-            shell,
-            textvariable=self.title_var,
-            bg=FIELD_BACKGROUND,
-            fg=INK,
-            insertbackground=INK,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            highlightcolor=ACCENT,
-            font=(FONT, 11),
-        )
-        self.title_entry.pack(fill="x", pady=(5, 14), ipady=7)
+        dp = master.dpi.px
+        self.title_entry, title_control = form_entry(shell, master, self.title_var, font_size=11)
+        title_control.pack(fill="x", pady=(dp(5), dp(14)))
 
         tk.Label(shell, text="类型", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
         kind_row = tk.Frame(shell, bg=CARD)
@@ -1706,20 +1696,10 @@ class RoutineEditor(tk.Toplevel):
             fg=SUBTLE,
             font=(FONT, 8),
         ).pack(side="left", padx=(12, 5))
-        reminder_time_entry = tk.Entry(
-            self.reminder_time_controls,
-            textvariable=self.reminder_time_var,
-            width=7,
-            justify="center",
-            bg=FIELD_BACKGROUND,
-            fg=INK,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            highlightcolor=ACCENT,
-            font=(FONT, 9),
-        )
-        reminder_time_entry.pack(side="left", ipady=4)
+        reminder_time_entry, time_control = form_entry(
+            self.reminder_time_controls, master, self.reminder_time_var, width=7)
+        reminder_time_entry.configure(justify="center")
+        time_control.pack(side="left")
         self._update_reminder_controls()
 
         tk.Label(shell, text="颜色", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
@@ -1746,10 +1726,12 @@ class RoutineEditor(tk.Toplevel):
 
         actions = self.actions
         if item:
-            tk.Button(actions, text="删除", command=self.delete, bg=DANGER_SOFT, fg=DANGER, relief="flat", bd=0, padx=14, pady=7, cursor="hand2").pack(side="left")
-        self.save_button = tk.Button(actions, text="保存", command=self.save, bg=ACCENT, fg=current_theme().text_on_accent, activebackground=ACCENT_HOVER, activeforeground=current_theme().text_on_accent, relief="flat", bd=0, padx=20, pady=7, font=(FONT, 9, "bold"), cursor="hand2")
-        self.save_button.pack(side="right")
-        tk.Button(actions, text="取消", command=self.close, bg=CONTROL_BACKGROUND, fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2").pack(side="right", padx=(0, 8))
+            _, delete = form_button(actions, master, "删除", self.delete, destructive=True)
+            delete.pack(side="left")
+        self.save_button, save = form_button(actions, master, "保存", self.save, primary=True)
+        save.pack(side="right")
+        _, cancel = form_button(actions, master, "取消", self.close, quiet=True)
+        cancel.pack(side="right", padx=(0, dp(8)))
 
         self.bind("<Escape>", lambda _event: self.close())
         bind_editor_shortcuts(self, master)
@@ -2322,27 +2304,10 @@ class DayDetailDialog(tk.Toplevel):
 
         footer = tk.Frame(shell, bg=CARD, padx=14, pady=11)
         footer.pack(fill="x")
-        ThemeButton(
-            footer,
-            self.master_app,
-            "＋ 新增事项",
-            self._add_event,
-            width=102,
-            height=32,
-            font_size=9,
-            surface_background=master.theme.schedule_card_background,
-            accented=True,
-        ).pack(side="right")
-        ThemeButton(
-            footer,
-            self.master_app,
-            "习惯清单",
-            self._open_routine_manager,
-            width=73,
-            height=30,
-            font_size=8,
-            surface_background=master.theme.schedule_card_background,
-        ).pack(side="left")
+        _, add_control = form_button(footer, master, "＋ 新增事项", self._add_event, primary=True)
+        add_control.pack(side="right")
+        _, habit_control = form_button(footer, master, "习惯清单", self._open_routine_manager)
+        habit_control.pack(side="left")
 
         self.bind("<Escape>", lambda _event: self.close())
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -3830,17 +3795,17 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         dp = self.dpi.px
         background = theme.ddl_pinned_background if pinned else theme.ddl_regular_background
         border = theme.ddl_pinned_border if pinned else theme.ddl_regular_border
-        rounded = pinned and theme.rounded_widget_shells
+        rounded = theme.rounded_widget_shells
         if rounded:
             frame = RoundedCardShell(parent, theme, dp, background,
-                                     outline="" if theme.quiet_button_edges else border, cursor="")
+                                     outline="" if pinned and theme.quiet_button_edges else border, cursor="")
             # Keep opaque children inside the curve, including the scroll viewport.
             content = tk.Frame(frame, bg=background)
             content.pack(fill="x", padx=dp(7), pady=dp(1))
         else:
             frame = content = tk.Frame(parent, bg=background, highlightbackground=border,
                                        highlightthickness=0 if theme.quiet_button_edges else dp(1))
-        if not pinned and theme.quiet_button_edges:
+        if not pinned and not rounded and theme.quiet_button_edges:
             tk.Frame(content, height=dp(1), bg=theme.divider).pack(fill="x")
         ddl_header = tk.Frame(content, bg=background, padx=dp(2 if rounded else 8), pady=dp(2 if pinned else 3))
         ddl_header.pack(fill="x")

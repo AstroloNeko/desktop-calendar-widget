@@ -10,9 +10,9 @@ from tkinter import font as tkfont, messagebox, ttk
 from tk_dispatcher import TkDispatcher
 from desktop_calendar.assistant.calendar_chat_protocol import ChatError, envelope, event_line
 from desktop_calendar.assistant.llm_provider import AIConfiguration
-from desktop_calendar.reminders.reminder_ui import reminder_button
-from desktop_calendar.ui.themed_controls import (RoundedCardShell, SettingsScroll, form_button,
-                                                  form_entry, themed_check)
+from desktop_calendar.ui.themed_controls import (
+    RoundedCardShell, SettingsScroll, build_segmented_tabs, form_button, form_combobox, form_entry, themed_check,
+)
 from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.remote_presentation import CONNECTION_LABELS, RemoteTrayConfig, model_status
 from desktop_calendar.remote_channels import channel_name
@@ -181,43 +181,6 @@ class _ChatWidgets:
         'uncertain': '结果待核查，请勿重复执行',
     }
 
-    def _embedded_button(self, parent, text, command, *, primary=False, quiet=False, compact=False):
-        theme, dp = self.app.theme, self.app.dpi.px
-        surface = parent.cget('bg')
-        fill = theme.accent if primary else surface if quiet else theme.control_background
-        fg = theme.text_on_accent if primary else theme.control_text
-        shell = RoundedCardShell(parent, theme, dp, fill, surface=surface,
-                                 outline='') if theme.rounded_widget_shells else None
-        button = tk.Button(shell or parent, text=text, command=command, font=(self.app.search_font, 8),
-                           fg=fg, bg=fill, activeforeground=fg,
-                           activebackground=theme.accent_hover if primary else theme.control_hover,
-                           disabledforeground=theme.text_disabled, relief='flat', bd=0,
-                           highlightthickness=0 if shell else dp(1), highlightbackground=fill,
-                           highlightcolor=theme.input_focus, padx=dp(4), pady=dp(1 if compact else 3), cursor='hand2')
-        def paint(_event=None, hovered=False):
-            disabled = str(button.cget('state')) == 'disabled'
-            destructive = getattr(button, '_destructive', False)
-            background = (theme.control_background if disabled else theme.danger_soft if destructive else
-                          button.cget('activebackground') if hovered else
-                          fill)
-            foreground = theme.danger if destructive else fg
-            button.configure(bg=background, fg=foreground, activeforeground=foreground,
-                             activebackground=theme.danger_soft if destructive else
-                             theme.accent_hover if primary else theme.control_hover)
-            border = theme.input_focus if button.focus_get() == button else theme.danger if destructive and not disabled else ''
-            if shell:
-                shell.set_fill(background)
-                shell.set_outline(border)
-            else:
-                button.configure(highlightbackground=border or background)
-        button.bind('<Enter>', lambda e: paint(e, True))
-        button.bind('<Leave>', paint)
-        button.bind('<FocusIn>', paint)
-        button.bind('<FocusOut>', paint)
-        if shell:
-            button.pack(fill='both', expand=True, padx=dp(5), pady=dp(1 if compact else 2))
-        return button, shell or button, paint
-
     def _build_chat(self, app, runtime, width, *, embedded=False):
         self.app, self.runtime, self.session_id, self.operation, self.busy = app, runtime, None, None, False
         self._embedded = embedded
@@ -227,53 +190,33 @@ class _ChatWidgets:
         bar = tk.Frame(self, bg=surface)
         bar.pack(fill='x', padx=dp(12), pady=dp(2 if embedded else 6))
         new_session = lambda: self.request(self.runtime.service.new_session)
-        self.sessions = ttk.Combobox(bar, state='readonly', width=1 if embedded else 10)
+        self.sessions, session_control = form_combobox(bar, app, state='readonly',
+                                                       width=1 if embedded else 10, compact=embedded)
+        button_font = (font, 8) if embedded else (font, 9)
         if embedded:
-            if theme.quiet_button_edges:
-                style = ttk.Style(self)
-                name = 'Assistant.Session.TCombobox'
-                # Vista paints its native border regardless of configured colors.
-                # Use themeable elements here without switching the app's ttk theme.
-                if 'clam' in style.theme_names():
-                    field, arrow = 'Assistant.Session.field', 'Assistant.Session.downarrow'
-                    elements = style.element_names()
-                    if field not in elements:
-                        style.element_create(field, 'from', 'clam', 'Combobox.field')
-                    if arrow not in elements:
-                        style.element_create(arrow, 'from', 'clam', 'Combobox.downarrow')
-                    style.layout(name, [
-                        (arrow, {'side': 'right', 'sticky': 'ns'}),
-                        (field, {'sticky': 'nswe', 'children': [
-                            ('Combobox.padding', {'expand': 1, 'sticky': 'nswe', 'children': [
-                                ('Combobox.textarea', {'sticky': 'nswe'})]})]})])
-                style.configure(name, fieldbackground=theme.input_background, bordercolor=theme.input_border,
-                                lightcolor=theme.input_border, darkcolor=theme.input_border,
-                                background=surface, foreground=theme.text_primary,
-                                arrowcolor=theme.text_secondary, arrowsize=dp(10))
-                style.map(name, fieldbackground=[('readonly', theme.input_background)],
-                          bordercolor=[('focus', theme.input_focus)])
-                self.sessions.configure(style=name)
-            self.settings_button, settings, _ = self._embedded_button(bar, 'AI 设置', self.configure_ai, quiet=True, compact=True)
+            self.settings_button, settings = form_button(
+                bar, app, 'AI 设置', self.configure_ai, quiet=True, compact=True, font=button_font)
             bar.columnconfigure(0, weight=1)
-            self.sessions.grid(row=0, column=0, sticky='nsew', padx=(0, dp(4)))
+            session_control.grid(row=0, column=0, sticky='nsew', padx=(0, dp(4)))
             settings.grid(row=0, column=1, sticky='e')
             tools = tk.Frame(bar, bg=surface)
             tools.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(dp(2), 0))
-            self.new_button, new, _ = self._embedded_button(tools, '＋ 新对话', new_session, compact=True)
-            self.clear_button, clear, _ = self._embedded_button(tools, '清除此对话', self.clear, quiet=True, compact=True)
+            self.new_button, new = form_button(tools, app, '＋ 新对话', new_session, compact=True, font=button_font)
+            self.clear_button, clear = form_button(
+                tools, app, '清除此对话', self.clear, quiet=True, compact=True, font=button_font)
             new.pack(side='left')
             clear.pack(side='right')
             self._session_labels = []
             self._session_font = tkfont.Font(root=self, font=self.sessions.cget('font') or 'TkTextFont')
             self.sessions.bind('<Configure>', lambda _e: self._fit_session_labels(), add='+')
         else:
-            self.settings_button = reminder_button(bar, app, '模型 / 本机API设置', self.configure_ai)
-            self.new_button = reminder_button(bar, app, '新对话', new_session)
-            self.clear_button = reminder_button(bar, app, '清除此对话', self.clear)
-            self.settings_button.pack(side='right')
-            self.new_button.pack(side='left')
-            self.clear_button.pack(side='left', padx=dp(5))
-            self.sessions.pack(side='left')
+            self.settings_button, settings = form_button(bar, app, '模型 / 本机API设置', self.configure_ai)
+            self.new_button, new = form_button(bar, app, '新对话', new_session)
+            self.clear_button, clear = form_button(bar, app, '清除此对话', self.clear, quiet=True)
+            settings.pack(side='right')
+            new.pack(side='left')
+            clear.pack(side='left', padx=dp(5))
+            session_control.pack(side='left', fill='x', expand=True)
         self.sessions.bind('<<ComboboxSelected>>', self.load_session)
         bottom = tk.Frame(self, bg=surface)
         bottom.pack(side='bottom', fill='x', padx=dp(12), pady=dp(8))
@@ -283,21 +226,21 @@ class _ChatWidgets:
                           bg=surface, fg=theme.text_secondary, height=2 if embedded else 0)
         if not embedded:
             status.pack(fill='x')
-        rounded = embedded and theme.rounded_widget_shells
+        rounded = theme.rounded_widget_shells
         field = RoundedCardShell(bottom, theme, dp, theme.input_background, outline=theme.input_border,
-                                 surface=surface, cursor='xterm') if rounded else bottom
+                                 surface=surface, cursor='xterm', radius=dp(7)) if rounded else bottom
         self.input = tk.Text(field, height=2 if embedded else 3, wrap='word', font=(font, 10),
                              bg=theme.input_background, fg=theme.text_primary, insertbackground=theme.text_primary,
                              undo=True, **(dict(width=1, bd=0, relief='flat', padx=dp(2), pady=dp(2),
                                  highlightthickness=0 if rounded else dp(1),
-                                 highlightbackground=theme.input_border, highlightcolor=theme.input_focus) if embedded else {}))
+                                 highlightbackground=theme.input_border, highlightcolor=theme.input_focus) if embedded or rounded else {}))
         if rounded:
             self.input.pack(fill='both', expand=True, padx=dp(7), pady=dp(4))
             field.bind('<Button-1>', lambda _e: self.input.focus_set())
             self.input.bind('<FocusIn>', lambda _e: field.set_outline(theme.input_focus))
             self.input.bind('<FocusOut>', lambda _e: field.set_outline(theme.input_border))
         if not embedded:
-            self.input.pack(fill='x', pady=dp(5))
+            (field if rounded else self.input).pack(fill='x', pady=dp(5))
         self.input.bind('<Return>', self.send)
         self.input.bind('<Shift-Return>', lambda _e: None)
         if embedded:
@@ -306,37 +249,37 @@ class _ChatWidgets:
                 if int(self.input.cget('height')) != lines:
                     self.input.configure(height=lines)
             self.bind('<Configure>', fit_composer, add='+')
-        self.candidate = ttk.Combobox(bottom, state='readonly')
-        actions = tk.Frame(bottom, bg=surface) if embedded else bottom
+        self.candidate, self._candidate_control = form_combobox(bottom, app, state='readonly', compact=embedded)
+        actions = tk.Frame(bottom, bg=surface)
+        self.confirm_button, confirm = form_button(actions, app, '确认此操作', self.confirm,
+                                                   primary=True, compact=embedded, font=button_font)
+        self.cancel_button, cancel = form_button(actions, app, '取消操作', self.cancel,
+                                                 quiet=True, compact=embedded, font=button_font)
         if embedded:
-            self.confirm_button, confirm, confirm_paint = self._embedded_button(actions, '确认此操作', self.confirm, primary=True)
-            self.cancel_button, cancel, cancel_paint = self._embedded_button(actions, '取消操作', self.cancel, quiet=True)
-            self.send_button, send, send_paint = self._embedded_button(bottom, '发送', self.send, primary=True)
-            self._action_paints = (confirm_paint, cancel_paint, send_paint)
+            self.send_button, send = form_button(bottom, app, '发送', self.send, primary=True, font=button_font)
             bottom.columnconfigure(0, weight=1)
-            self.candidate.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, dp(4)))
+            self._candidate_control.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, dp(4)))
             actions.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, dp(4)))
             actions.columnconfigure(0, weight=1)
             actions.columnconfigure(1, weight=1)
             confirm.grid(row=0, column=0, sticky='ew', padx=(0, dp(4)))
             cancel.grid(row=0, column=1, sticky='ew')
             self._pending_actions = actions
-            self.candidate.grid_remove()
+            self._candidate_control.grid_remove()
             actions.grid_remove()
             (field if rounded else self.input).grid(row=2, column=0, columnspan=2, sticky='ew', pady=(0, dp(4)))
             status.grid(row=3, column=0, sticky='ew', padx=(0, dp(4)))
             send.grid(row=3, column=1, sticky='se')
             status.bind('<Configure>', lambda e: status.configure(wraplength=e.width))
         else:
-            self.confirm_button = reminder_button(actions, app, '确认此操作', self.confirm)
-            self.cancel_button = reminder_button(actions, app, '取消操作', self.cancel)
-            self.send_button = reminder_button(bottom, app, '发送', self.send, primary=True)
-            self.send_button.pack(side='right')
-            self.close_button = reminder_button(bottom, app, '关闭', self.close)
-            self.close_button.pack(side='right', padx=dp(5))
-            self.confirm_button.pack(side='left')
-            self.cancel_button.pack(side='left', padx=dp(5))
-            self.candidate.pack(fill='x', pady=dp(4))
+            self._candidate_control.pack(fill='x', pady=(0, dp(4)))
+            actions.pack(fill='x')
+            self.send_button, send = form_button(actions, app, '发送', self.send, primary=True)
+            self.close_button, close = form_button(actions, app, '关闭', self.close, quiet=True)
+            send.pack(side='right')
+            close.pack(side='right', padx=dp(5))
+            confirm.pack(side='left')
+            cancel.pack(side='left', padx=dp(5))
         self.confirm_button.configure(state='disabled')
         self.cancel_button.configure(state='disabled')
         self.candidate.bind('<<ComboboxSelected>>', self.select_candidate)
@@ -403,9 +346,6 @@ class _ChatWidgets:
         self.send_button.configure(state='disabled')
         self.confirm_button.configure(state='disabled')
         self.cancel_button.configure(state='disabled')
-        if self._embedded:
-            for paint in self._action_paints:
-                paint()
         self.runtime.submit(function, self.display)
 
     def append(self, text, role=None):
@@ -485,12 +425,9 @@ class _ChatWidgets:
             if self._embedded:
                 preview_start = self.transcript.index('end-1c')
             self.render_operation(self.operation)
+        self.confirm_button.set_destructive(confirm_label != '确认执行')
         if self._embedded:
-            self.confirm_button._destructive = bool(pending and self.operation['preview'].get('after') is None
-                                                     and self.operation['preview'].get('before'))
-            for paint in self._action_paints:
-                paint()
-            (self.candidate.grid if self.candidates else self.candidate.grid_remove)()
+            (self._candidate_control.grid if self.candidates else self._candidate_control.grid_remove)()
             (self._pending_actions.grid if pending else self._pending_actions.grid_remove)()
             if preview_start is not None:
                 # Put the operation heading first in a narrow transcript; the rest is scrollable.
@@ -696,43 +633,14 @@ class AISettings(tk.Toplevel):
         status.pack(side='bottom', fill='x', padx=dp(16))
         tk.Frame(self, height=dp(1), bg=theme.divider).pack(side='bottom', fill='x')
 
-        style = ttk.Style(self)
-        style.configure('CalendarAI.TNotebook', background=bg, borderwidth=0, tabmargins=(0, 0, 0, 0))
-        style.layout('CalendarAI.TNotebook.Tab', [])
-        tab_strip = tk.Frame(self, bg=bg)
-        tab_strip.pack(fill='x', padx=dp(12), pady=(dp(7), dp(9)))
-        tk.Frame(self, height=dp(1), bg=theme.divider).pack(fill='x', padx=dp(12))
-        self.tabs = ttk.Notebook(self, style='CalendarAI.TNotebook')
+        self.tabs, pages = build_segmented_tabs(self, self.app, ('远程模型', '本机 API', '远程服务'),
+                                                padx=dp(12), pady=(dp(7), dp(6)))
         self.tabs.pack(fill='both', expand=True, padx=dp(12), pady=(dp(2), 0))
-        forms = []
-        tab_buttons = []
-
-        def add_tab(title):
-            page = tk.Frame(self.tabs, bg=bg)
-            self.tabs.add(page, text=title)
-            column = len(tab_buttons)
-            tab_strip.grid_columnconfigure(column, weight=1, uniform='settings_tabs')
-            shell = (RoundedCardShell(tab_strip, theme, dp, bg, surface=bg, outline=bg)
-                     if theme.rounded_widget_shells else None)
-            button = tk.Button(shell or tab_strip, text=title, command=lambda: self.tabs.select(page),
-                               bg=bg, fg=theme.text_secondary, activebackground=theme.control_hover,
-                               activeforeground=theme.text_primary, font=(font, 9), bd=0, relief='flat',
-                               highlightthickness=0 if shell else dp(1), highlightbackground=bg,
-                               highlightcolor=theme.input_focus, pady=dp(5), cursor='hand2')
-            if shell:
-                button.pack(fill='both', expand=True, padx=dp(7), pady=dp(2))
-                button.bind('<FocusIn>', lambda _e: shell.set_outline(theme.input_focus))
-                button.bind('<FocusOut>', lambda _e: shell.set_outline(button.cget('bg')))
-            (shell or button).grid(row=0, column=column, sticky='ew', padx=dp(2))
-            tab_buttons.append((page, button, shell))
-            scroll = SettingsScroll(page, self.app)
+        self.ai_tab, self.api_tab, self.remote_tab = pages
+        forms = [SettingsScroll(page, self.app) for page in pages]
+        for scroll in forms:
             scroll.pack(fill='both', expand=True)
-            forms.append(scroll)
-            return page, scroll
-
-        self.ai_tab, ai_form = add_tab('远程模型')
-        self.api_tab, api_form = add_tab('本机 API')
-        self.remote_tab, remote_form = add_tab('远程服务')
+        ai_form, api_form, remote_form = forms
         form, content = ai_form, ai_form.content
         wrapped = [status]
 
@@ -920,12 +828,12 @@ class AISettings(tk.Toplevel):
         safety_row.pack(fill='x', pady=(0, dp(6)))
         tk.Label(safety_row, text='在线兜底检查', bg=bg, fg=theme.text_primary,
                  font=(font, 9)).pack(side='left')
-        self.safety_check = ttk.Combobox(safety_row, state='readonly', font=(font, 9), width=10,
-                                         values=tuple(f'{minutes} 分钟' if minutes else '关闭'
-                                                      for minutes in SAFETY_CHECK_MINUTES))
+        self.safety_check, safety = form_combobox(safety_row, self.app, state='readonly', width=10,
+                                                  values=tuple(f'{minutes} 分钟' if minutes else '关闭'
+                                                               for minutes in SAFETY_CHECK_MINUTES))
         minutes = self.old['remote_safety_check_minutes']
         self.safety_check.current(SAFETY_CHECK_MINUTES.index(minutes) if minutes in SAFETY_CHECK_MINUTES else 0)
-        self.safety_check.pack(side='right')
+        safety.pack(side='right')
         self.safety_check.bind('<FocusIn>', lambda _e: form.reveal(safety_row), add='+')
         remote_actions = tk.Frame(advanced, bg=bg)
         remote_actions.pack(fill='x', pady=(0, dp(4)))
@@ -938,23 +846,9 @@ class AISettings(tk.Toplevel):
         self.clear_remote_button.bind('<FocusIn>', lambda _e: form.reveal(clear_remote), add='+')
         self.show_remote_mode()
 
-        def paint_tabs(_event=None):
-            selected = self.tabs.select()
-            for page, button, shell in tab_buttons:
-                active = str(page) == selected
-                fill = theme.accent if active else bg
-                color = theme.text_on_accent if active else theme.text_secondary
-                button.configure(bg=fill, fg=color, activeforeground=color,
-                                 activebackground=theme.accent_hover if active else theme.control_hover)
-                if shell:
-                    shell.set_fill(fill)
-                    shell.set_outline(theme.input_focus if button.focus_get() == button else fill)
-
-        self.tabs.bind('<<NotebookTabChanged>>', paint_tabs, add='+')
         self.tabs.bind('<<NotebookTabChanged>>', self.refresh_remote_panel, add='+')
         if show_remote:
             self.tabs.select(self.remote_tab)
-        paint_tabs()
         self.watch_remote_status()
         for key in ('timeout', 'port'):
             self.fields[key].configure(width=11)

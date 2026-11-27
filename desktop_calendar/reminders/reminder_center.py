@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 from calendar_core import EVENT_TYPE_LABELS
 from desktop_calendar.reminders.notification_model import BRIEF_TITLES
-from desktop_calendar.reminders.reminder_widgets import ReminderButton, card, reminder_font
+from desktop_calendar.reminders.reminder_widgets import card, reminder_font
 from desktop_calendar.reminders.reminder_overview import batch_channel_statuses
-from desktop_calendar.ui.themed_controls import SettingsScroll
+from desktop_calendar.ui.themed_controls import RoundedCardShell, SettingsScroll, form_button
 from desktop_calendar.ui.ui_draw import blend
 from desktop_calendar.updates.update_dialog import dialog_geometry
 from desktop_calendar.reminders.notification_dispatch import STATUS_LABELS
@@ -22,14 +22,17 @@ class PlanFilterCard(tk.Button):
 
     def __init__(self, parent, app, color, text, command):
         self.theme, self.color = app.theme, color
-        self.selected = self.hovered = False
+        self.selected = self.hovered = self.focused = False
         dp = app.dpi.px
-        self.surface = tk.Frame(parent, bg=self.theme.divider, cursor="hand2")
+        self.rounded = self.theme.rounded_widget_shells
+        self.surface = (RoundedCardShell(parent, self.theme, dp, self.theme.workspace_detail,
+                                         surface=parent.cget("bg"), radius=dp(8))
+                        if self.rounded else tk.Frame(parent, bg=self.theme.divider, cursor="hand2"))
         super().__init__(self.surface, textvariable=text, command=command, takefocus=True,
                          anchor="w", padx=dp(9), pady=dp(6), font=reminder_font(app, 9, "bold"),
-                         relief="flat", bd=0, highlightthickness=dp(1),
+                         relief="flat", bd=0, highlightthickness=0 if self.rounded else dp(1),
                          highlightcolor=self.theme.input_focus, cursor="hand2")
-        self.pack(fill="both", expand=True, padx=dp(1), pady=dp(1))
+        self.pack(fill="both", expand=True, padx=dp(5 if self.rounded else 1), pady=dp(2 if self.rounded else 1))
         self.surface.bind("<Enter>", lambda _event: self.set_hover(True))
         self.surface.bind("<Leave>", lambda event: self.set_hover(
             self.surface.winfo_containing(event.x_root, event.y_root) is self))
@@ -39,6 +42,8 @@ class PlanFilterCard(tk.Button):
             self.surface.winfo_containing(event.x_root, event.y_root) is self.surface))
         self.bind("<Return>", self.activate)
         self.bind("<space>", self.activate)
+        self.bind("<FocusIn>", lambda _event: self.set_focus(True))
+        self.bind("<FocusOut>", lambda _event: self.set_focus(False))
         self.paint()
 
     def activate(self, _event):
@@ -53,14 +58,22 @@ class PlanFilterCard(tk.Button):
         self.selected = selected
         self.paint()
 
+    def set_focus(self, focused):
+        self.focused = focused
+        self.paint()
+
     def paint(self):
         theme = self.theme
         base = theme.workspace_detail
         tinted = blend(base, self.color, .20 if self.hovered else .12)
         fill = tinted if self.selected else theme.control_hover if self.hovered else base
-        edge = self.color if self.selected or self.hovered else theme.divider
+        edge = theme.input_focus if self.focused else self.color if self.selected or self.hovered else theme.divider
         text = self.color if self.selected else theme.text_primary
-        self.surface.configure(bg=edge)
+        if self.rounded:
+            self.surface.set_fill(fill)
+            self.surface.set_outline(edge)
+        else:
+            self.surface.configure(bg=edge)
         self.configure(bg=fill, fg=text, highlightbackground=fill, activebackground=tinted, activeforeground=self.color)
 
 
@@ -68,6 +81,7 @@ class ReminderPlanPanel(tk.Frame):
     GROUPS = {"attention": "需要处理", "snoozed": "已稍后提醒", "upcoming": "即将提醒", "processed": "已处理"}
     COLUMNS = (("item", "事项 / 类型", 109), ("business", "提醒状态", 65),
                ("when", "计划提醒时间", 90), ("windows", "Windows 通知", 79), ("qq", "QQ 通知", 68))
+    EMPTY_DETAIL = "选择一项查看详情。"
 
     def __init__(self, parent, app, close, *, clock=datetime.now):
         theme, dp = app.theme, app.dpi.px
@@ -79,10 +93,11 @@ class ReminderPlanPanel(tk.Frame):
         self.active_filter = None
         width = dp(500)
 
-        self.detail = tk.StringVar(value="选择一项查看详情。")
-        self.details_title = tk.StringVar(value="选择一项查看详情。")
+        self.detail = tk.StringVar(value=self.EMPTY_DETAIL)
+        self.details_title = tk.StringVar(value=self.EMPTY_DETAIL)
         self.details_content = tk.StringVar()
         detail_card, detail_frame = card(self, app, padding=9)
+        self.detail_card = detail_card
         self.detail_frame = detail_frame
         detail_card.pack(side="bottom", fill="x", pady=(dp(8), 0))
         self.detail_heading = tk.Label(detail_frame, textvariable=self.details_title, anchor="w",
@@ -93,12 +108,15 @@ class ReminderPlanPanel(tk.Frame):
         self.detail_label.pack(fill="x", pady=(dp(3), 0))
         self.selection_actions = tk.Frame(detail_frame, bg=detail_frame.cget("bg"))
         self.selection_actions.pack(fill="x", pady=(dp(5), 0))
-        self.open_button = ReminderButton(self.selection_actions, app, "打开事项", self.open_event)
-        self.open_button.pack(side="left")
-        self.cancel_button = ReminderButton(self.selection_actions, app, "取消稍后提醒", self.cancel_snooze)
-        self.cancel_button.pack(side="left", padx=(dp(6), 0))
-        self.details_button = ReminderButton(self.selection_actions, app, "通知明细", self.open_details)
-        self.details_button.pack(side="left", padx=(dp(6), 0))
+        self.open_button, open_control = form_button(self.selection_actions, app, "打开事项", self.open_event,
+                                                     primary=True, font=reminder_font(app), compact=True)
+        open_control.pack(side="left")
+        self.cancel_button, cancel = form_button(self.selection_actions, app, "取消稍后提醒", self.cancel_snooze,
+                                                font=reminder_font(app), compact=True)
+        cancel.pack(side="left", padx=(dp(6), 0))
+        self.details_button, details = form_button(self.selection_actions, app, "通知明细", self.open_details,
+                                                  font=reminder_font(app), compact=True)
+        details.pack(side="left", padx=(dp(6), 0))
         self.detail.trace_add("write", self._render_detail)
         self.metrics = tk.Frame(self, bg=theme.panel_background)
         self.metrics.pack(fill="x", pady=(0, dp(8)))
@@ -118,13 +136,15 @@ class ReminderPlanPanel(tk.Frame):
         self.table_card, table_body = card(self, app, padding=8)
         self.table_card.pack(fill="both", expand=True)
         toolbar = tk.Frame(table_body, bg=theme.workspace_detail)
-        toolbar.pack(fill="x")
+        toolbar.pack(fill="x", pady=(0, dp(6)))
         self.list_title = tk.StringVar(self, value="全部提醒计划")
         tk.Label(toolbar, textvariable=self.list_title, bg=theme.workspace_detail, fg=theme.text_primary,
                  anchor="w", font=reminder_font(app, 10, "bold")).pack(side="left")
-        self.refresh_button = ReminderButton(toolbar, app, "刷新", self.refresh)
-        self.refresh_button.pack(side="right")
-        self.show_all_button = ReminderButton(toolbar, app, "查看全部", lambda: self.set_filter(None))
+        self.refresh_button, refresh = form_button(toolbar, app, "刷新", self.refresh,
+                                                   font=reminder_font(app), compact=True)
+        refresh.pack(side="right")
+        self.show_all_button, self._show_all_control = form_button(
+            toolbar, app, "查看全部", lambda: self.set_filter(None), font=reminder_font(app), compact=True)
         self.summary = tk.StringVar()
         self.summary_label = tk.Label(table_body, textvariable=self.summary, justify="left", anchor="w",
                                      bg=theme.workspace_detail, fg=theme.text_secondary, font=reminder_font(app, 8),
@@ -237,11 +257,11 @@ class ReminderPlanPanel(tk.Frame):
         for key, hub in self.filter_cards.items():
             hub.set_selected(key == group)
         if group:
-            self.show_all_button.pack(side="right", padx=self.app.dpi.px(6))
+            self._show_all_control.pack(side="right", padx=self.app.dpi.px(6))
         else:
             if self.show_all_button.focus_get() is self.show_all_button:
                 self.filter_cards[previous].focus_set()
-            self.show_all_button.pack_forget()
+            self._show_all_control.pack_forget()
         self.refresh(reset_scroll=True)
 
     def _title(self, visible_count):
@@ -349,11 +369,16 @@ class ReminderPlanPanel(tk.Frame):
             self.detail.set(f"{title}\n{row.rule}  ·  {when}\nWindows  {row.windows}    ·    QQ  {row.qq}"
                             + f"\n{row.detail}" + attempt + self.notice_items(row.batch))
         else:
-            self.detail.set("选择一项查看详情。")
+            self.detail.set(self.EMPTY_DETAIL)
 
     def _render_detail(self, *_args):
-        lines = self.detail.get().splitlines()
-        self.details_title.set(lines[0] if len(lines) > 1 else self.detail.get())
+        detail = self.detail.get()
+        if self._compact and detail == self.EMPTY_DETAIL:
+            self.detail_card.pack_forget()
+        elif not self.detail_card.winfo_manager():
+            self.detail_card.pack(side="bottom", fill="x", pady=(self.app.dpi.px(8), 0), before=self.metrics)
+        lines = detail.splitlines()
+        self.details_title.set(lines[0] if len(lines) > 1 else detail)
         summary = lines[1:3] if self._compact else lines[1:4]
         row = self.selected_row()
         if len(summary) == 3 and row and row.reason:
@@ -385,7 +410,8 @@ class ReminderPlanPanel(tk.Frame):
                 owner.grab_set()
                 self.details_button.focus_set()
 
-        ReminderButton(dialog, self.app, "关闭", close).pack(side="bottom", anchor="e", padx=dp(14), pady=dp(10))
+        _, close_control = form_button(dialog, self.app, "关闭", close, font=reminder_font(self.app))
+        close_control.pack(side="bottom", anchor="e", padx=dp(14), pady=dp(10))
         form = SettingsScroll(dialog, self.app)
         form.pack(fill="both", expand=True, padx=dp(14), pady=dp(10))
         label = tk.Label(form.content, text=self.detail.get(), bg=theme.panel_background, fg=theme.text_primary,

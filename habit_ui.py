@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from habit_schedule import SCHEDULE_FIELDS, schedule_label, validate_schedule_input
-from desktop_calendar.ui.themed_controls import themed_check
+from desktop_calendar.ui.themed_controls import form_combobox, form_entry, themed_check
 
 CHOICES = ("每天", "每隔 N 天", "每周", "每月", "每年", "自定义…")
 UNITS = {"天": "daily", "周": "weekly", "月": "monthly", "年": "yearly"}
@@ -21,6 +21,7 @@ class HabitScheduleForm(tk.Frame):
         theme = app.theme
         super().__init__(master, bg=theme.panel_background)
         self.theme = theme
+        self.app = app
         self.dp = app.dpi.px
         self.font = (font_family, 9)
         self.original = {key: getattr(item, key) for key in SCHEDULE_FIELDS} if item else {}
@@ -41,34 +42,39 @@ class HabitScheduleForm(tk.Frame):
 
         row = self.row()
         self.label(row, "重复周期").pack(side="left")
-        selector = ttk.Combobox(row, textvariable=self.choice, values=CHOICES, state="readonly", width=13, font=self.font)
-        selector.pack(side="right")
+        selector, selector_control = form_combobox(
+            row, app, textvariable=self.choice, values=CHOICES, state="readonly", width=13, font=self.font, compact=True)
+        selector_control.pack(side="right")
         selector.bind("<<ComboboxSelected>>", self.refresh)
         self.options = self.row()
         self.label(self.options, "每隔").pack(side="left")
-        self.entry(self.options, self.interval, 5).pack(side="left", padx=self.dp(5))
+        self.entry(self.options, self.interval, 5)[1].pack(side="left", padx=self.dp(5))
         self.unit_label = self.label(self.options, "天")
-        self.custom_unit = ttk.Combobox(self.options, textvariable=self.unit, values=tuple(UNITS), state="readonly", width=4, font=self.font)
+        self.custom_unit, self._custom_unit_control = form_combobox(
+            self.options, app, textvariable=self.unit, values=tuple(UNITS), state="readonly",
+            width=4, font=self.font, compact=True)
         self.custom_unit.bind("<<ComboboxSelected>>", self.refresh)
         self.week_row = self.row()
         for text, variable in zip("一二三四五六日", self.weekdays):
             self.check(self.week_row, "周" + text, variable, compact=True).pack(side="left", expand=True, fill="x", padx=self.dp(1))
         self.month_row = self.row()
         self.month_label = self.label(self.month_row, "月份")
-        self.month_entry = self.entry(self.month_row, self.year_month, 4)
+        self.month_entry, self._month_control = self.entry(self.month_row, self.year_month, 4)
         self.day_label = self.label(self.month_row, "日期")
         self.day_label.pack(side="left")
-        self.entry(self.month_row, self.month_day, 4).pack(side="left", padx=self.dp(5))
+        self.entry(self.month_row, self.month_day, 4)[1].pack(side="left", padx=self.dp(5))
         self.label(self.month_row, "日").pack(side="left")
         row = self.row()
         self.start_row = row
         self.label(row, "开始日期").pack(side="left")
-        self.entry(row, self.start, 12).pack(side="right")
+        self.entry(row, self.start, 12)[1].pack(side="right")
         row = self.row()
-        self.end_entry = self.entry(row, self.end, 12)
-        self.end_entry.pack(side="right")
-        ending = ttk.Combobox(row, textvariable=self.ending, values=("永不结束", "指定日期"), width=10, state="readonly", font=self.font)
-        ending.pack(side="left")
+        self.end_entry, end_control = self.entry(row, self.end, 12)
+        end_control.pack(side="right")
+        ending, ending_control = form_combobox(
+            row, app, textvariable=self.ending, values=("永不结束", "指定日期"),
+            width=10, state="readonly", font=self.font, compact=True)
+        ending_control.pack(side="left")
         ending.bind("<<ComboboxSelected>>", self.refresh)
         row = self.row()
         self.check(row, "仅工作日（含调休；跳过假期和请假日）", self.workdays).pack(anchor="w")
@@ -104,12 +110,10 @@ class HabitScheduleForm(tk.Frame):
                         font=self.font, anchor="w", justify="left", wraplength=self.dp(355))
 
     def entry(self, parent, variable, width):
-        return tk.Entry(parent, textvariable=variable, width=width, font=self.font,
-                        bg=self.theme.input_background, fg=self.theme.text_primary,
-                        insertbackground=self.theme.text_primary, relief="flat",
-                        disabledbackground=self.theme.control_background, disabledforeground=self.theme.text_muted,
-                        highlightthickness=self.dp(1), highlightbackground=self.theme.input_border,
-                        highlightcolor=self.theme.input_focus)
+        entry, control = form_entry(parent, self.app, variable, width=width)
+        entry.configure(font=self.font, disabledbackground=self.theme.control_disabled,
+                        disabledforeground=self.theme.text_disabled)
+        return entry, control
 
     def check(self, parent, text, variable, compact=False):
         return themed_check(parent, self.theme, self.dp, text=text, variable=variable, font=self.font,
@@ -143,9 +147,9 @@ class HabitScheduleForm(tk.Frame):
         if self.choice.get() != "每天":
             self.options.pack(fill="x", pady=self.dp(3), before=before)
             self.unit_label.pack_forget()
-            self.custom_unit.pack_forget()
+            self._custom_unit_control.pack_forget()
             if self.choice.get() == "自定义…":
-                self.custom_unit.pack(side="left")
+                self._custom_unit_control.pack(side="left")
             else:
                 self.unit_label.configure(text=next(key for key, value in UNITS.items() if value == frequency))
                 self.unit_label.pack(side="left")
@@ -154,10 +158,10 @@ class HabitScheduleForm(tk.Frame):
         if frequency in ("monthly", "yearly"):
             self.month_row.pack(fill="x", pady=self.dp(3), before=before)
             self.month_label.pack_forget()
-            self.month_entry.pack_forget()
+            self._month_control.pack_forget()
             if frequency == "yearly":
                 self.month_label.pack(side="left", before=self.day_label)
-                self.month_entry.pack(side="left", padx=self.dp(5), before=self.day_label)
+                self._month_control.pack(side="left", padx=self.dp(5), before=self.day_label)
         self.end_entry.configure(state="normal" if self.ending.get() == "指定日期" else "disabled")
         self._update_summary()
 

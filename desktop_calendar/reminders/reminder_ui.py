@@ -8,7 +8,7 @@ import time
 from types import SimpleNamespace
 from uuid import uuid4
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 
 from calendar_core import Event, normalize_reminder_time
 from notification_backend import WindowsNotificationBackend
@@ -22,25 +22,16 @@ from desktop_calendar.reminders.notification_model import (
     brief_content, brief_enabled, brief_heading, brief_item_context, brief_settings, brief_today_count,
     select_brief_items,
 )
-from desktop_calendar.ui.themed_controls import SettingsScroll, form_button, form_entry, themed_check
+from desktop_calendar.ui.themed_controls import (
+    RoundedCardShell, SettingsScroll, build_segmented_tabs, form_button, form_combobox, form_entry, themed_check,
+)
 from desktop_calendar.remote_presentation import CONNECTION_LABELS
-from desktop_calendar.reminders.reminder_widgets import COMBO, ReminderButton, card, combo_style, notebook_style, reminder_font
+from desktop_calendar.reminders.reminder_widgets import card, reminder_font
 
 
 def reminder_button(parent, app, text, command, *, primary=False):
-    """Small native-keyboard control with the existing theme's interaction colors."""
-    theme, dp = app.theme, app.dpi.px
-    background = theme.accent if primary else theme.control_background
-    foreground = theme.text_on_accent if primary else theme.control_text
-    button = tk.Button(parent, text=text, command=command, font=(app.search_font, 9),
-                       bg=background, fg=foreground, activebackground=theme.accent_hover if primary else theme.control_pressed,
-                       activeforeground=foreground, disabledforeground=theme.text_disabled,
-                       relief="flat", bd=0, highlightthickness=dp(1),
-                       highlightbackground=theme.accent if primary else theme.control_border,
-                       highlightcolor=theme.input_focus, padx=dp(10), pady=dp(5), cursor="hand2")
-    button.bind("<Enter>", lambda _e: button.configure(bg=(theme.accent_hover if primary else theme.control_hover))
-                if str(button.cget("state")) != "disabled" else None)
-    button.bind("<Leave>", lambda _e: button.configure(bg=background))
+    """Compatibility for callers that directly pack the returned native button."""
+    button, _ = form_button(parent, app, text, command, primary=primary, rounded=False)
     return button
 
 
@@ -441,15 +432,12 @@ class ReminderSettingsDialog(tk.Toplevel):
                     subtitle.pack(fill="x", pady=(dp(3), 0))
         self.bind("<Configure>", fit_header, add="+")
 
-        style = ttk.Style(self)
-        combo_style(style, app)
-        self.tabs = ttk.Notebook(self, style=notebook_style(style, app))
+        self.tabs, pages = build_segmented_tabs(
+            self, app, ("提醒规则", "每日简报", "通知通道", "提醒计划"),
+            padx=dp(20), pady=(0, dp(5)), font=reminder_font(app))
         self.tabs.pack(fill="both", expand=True, padx=dp(20), pady=(0, dp(5)))
-        self.tabs.enable_traversal()
         self.forms = []
-        for title in ("提醒规则", "每日简报", "通知通道"):
-            page = tk.Frame(self.tabs, bg=theme.panel_background)
-            self.tabs.add(page, text=title)
+        for page in pages[:3]:
             form = SettingsScroll(page, app)
             form.pack(fill="both", expand=True, pady=(dp(8), 0))
             self.forms.append(form)
@@ -459,8 +447,7 @@ class ReminderSettingsDialog(tk.Toplevel):
         self._build_channels(self.forms[2].content)
 
         from desktop_calendar.reminders.reminder_center import ReminderPlanPanel
-        page = tk.Frame(self.tabs, bg=theme.panel_background)
-        self.tabs.add(page, text="提醒计划")
+        page = pages[3]
         self.plan = ReminderPlanPanel(page, app, self.close, clock=self.clock_now)
         self.plan.pack(fill="both", expand=True, pady=(dp(8), 0))
         self.tabs.bind("<<NotebookTabChanged>>", self.tab_changed, add="+")
@@ -544,11 +531,11 @@ class ReminderSettingsDialog(tk.Toplevel):
         slot = tk.Frame(row, bg=row.cget("bg"), width=dp(width), height=dp(34))
         slot.pack(side="right", fill="x" if stretch else "none", expand=stretch)
         if values is None:
-            widget, control = form_entry(slot, self.app, variable, width=8, rounded=False)
+            widget, control = form_entry(slot, self.app, variable, width=8)
             widget.configure(justify="center", font=reminder_font(self.app))
         else:
-            widget = control = ttk.Combobox(slot, textvariable=variable, values=values, state="readonly",
-                                            width=8, font=reminder_font(self.app), style=COMBO)
+            widget, control = form_combobox(slot, self.app, textvariable=variable, values=values,
+                                            state="readonly", width=8, font=reminder_font(self.app))
         slot.pack_propagate(False)
         control.pack(fill="both", expand=True)
         self._focus_scroll(widget, slot)
@@ -621,31 +608,34 @@ class ReminderSettingsDialog(tk.Toplevel):
             self._check(channels, title, self.brief[channel], packed=False).pack(side="left", padx=(0, dp(8)), pady=dp(3))
         self._note(body, "最多补发四小时；晨间在进入晚间时段后停止补发，晚间不跨午夜。")
 
-        self.preview_card, preview = card(columns, self.app, surface=theme.input_background)
+        self.preview_card, preview = card(columns, self.app, padding=10, surface=theme.input_background)
         self.preview_slot = tk.StringVar(self, value="晨间预览")
         self._field(preview, "简报时段", self.preview_slot, ("晨间预览", "晚间预览"), width=110)
         self.preview_source = tk.StringVar(self, value="本机日程")
         self._field(preview, "简报预览", self.preview_source, ("本机日程", "示例数据"), width=110)
+        self.brief_test_button, test = form_button(preview, self.app, "发送晨间测试简报", self.test_brief,
+                                                  font=reminder_font(self.app), compact=True)
+        test.pack(anchor="w", pady=(dp(3), 0))
+        self._focus_scroll(self.brief_test_button, test)
+        self.brief_test_status = tk.StringVar(self)
+        self._note(preview, variable=self.brief_test_status)
         self._divider(preview, pady=4)
         self.preview_heading = self._label(preview, size=12, bold=True)
         self.preview_heading.pack(fill="x", pady=(dp(6), dp(3)))
         self.preview_date = self._label(preview, muted=True)
         self.preview_date.pack(fill="x")
-        self._divider(preview)
+        self._divider(preview, pady=4)
         self.preview_body = tk.Frame(preview, bg=preview.cget("bg"))
         self.preview_body.pack(fill="x")
-        self._divider(preview)
+        self._divider(preview, pady=4)
         previews = tk.Frame(preview, bg=preview.cget("bg"))
         previews.pack(anchor="w")
         for title in ("查看本周", "查看 DDL"):
-            label = tk.Label(previews, text=title, bg=theme.accent_soft, fg=theme.accent,
-                             padx=dp(10), pady=dp(5), font=reminder_font(self.app, 8))
-            label.pack(side="left", padx=(0, dp(6)))
-        self.brief_test_button = ReminderButton(preview, self.app, "发送晨间测试简报", self.test_brief)
-        self.brief_test_button.pack(anchor="w", pady=(dp(8), 0))
-        self._focus_scroll(self.brief_test_button)
-        self.brief_test_status = tk.StringVar(self)
-        self._note(preview, variable=self.brief_test_status)
+            shell = RoundedCardShell(previews, theme, dp, theme.accent_soft, radius=dp(7),
+                                     outline="", surface=previews.cget("bg"), cursor="")
+            tk.Label(shell, text=title, bg=theme.accent_soft, fg=theme.accent,
+                     font=reminder_font(self.app, 8)).pack(padx=dp(8), pady=dp(3))
+            shell.pack(side="left", padx=(0, dp(6)))
         self._brief_layout = None
         columns.bind("<Configure>", self._layout_brief)
         for control in (*self.brief.values(), self.private, self.preview_source, self.preview_slot):
@@ -685,10 +675,11 @@ class ReminderSettingsDialog(tk.Toplevel):
         self._divider(body)
         self._note(body, variable=self.windows_state)
         self._note(body, variable=self.test_status)
-        self.test_button = ReminderButton(body, app, "发送 Windows 测试通知", app.test_native_notification)
+        self.test_button, test = form_button(body, app, "发送 Windows 测试通知", app.test_native_notification,
+                                            font=reminder_font(app), compact=True)
         self.test_button.configure(state="disabled" if app._notification_test_pending else "normal")
-        self.test_button.pack(side="bottom", anchor="w", pady=(dp(8), 0))
-        self._focus_scroll(self.test_button)
+        test.pack(side="bottom", anchor="w", pady=(dp(8), 0))
+        self._focus_scroll(self.test_button, test)
 
         body = qq_body
         self._check(body, "启用日程与 DDL 的 QQ 推送", self.qq)
@@ -696,9 +687,10 @@ class ReminderSettingsDialog(tk.Toplevel):
         self._note(body, variable=self.qq_account)
         self.qq_status_labels = tuple(self._note(body, variable=value) for value in
                                       (self.qq_status_line, self.qq_test_status))
-        self.qq_test_button = ReminderButton(body, app, "发送 QQ 测试通知", app.test_qq_reminder)
-        self.qq_test_button.pack(side="bottom", anchor="w", pady=(dp(8), 0))
-        self._focus_scroll(self.qq_test_button)
+        self.qq_test_button, qq_test = form_button(body, app, "发送 QQ 测试通知", app.test_qq_reminder,
+                                                  font=reminder_font(app), compact=True)
+        qq_test.pack(side="bottom", anchor="w", pady=(dp(8), 0))
+        self._focus_scroll(self.qq_test_button, qq_test)
         self.qq.trace_add("write", lambda *_: self.refresh_channel_status())
 
         body = self._section(parent, "隐私保护")
@@ -1007,7 +999,6 @@ class ReminderSettingsDialog(tk.Toplevel):
                 context = brief_item_context(item, when.date())
                 if context:
                     context_label = self._label(row, context, muted=True)
-                    context_label.configure(width=10 if is_ddl else 6)
                     context_label.pack(side="left", padx=(0, dp(6)))
                 title = self._label(row, item["title"].replace("\n", " "))
                 title.pack(side="left", fill="x", expand=True)

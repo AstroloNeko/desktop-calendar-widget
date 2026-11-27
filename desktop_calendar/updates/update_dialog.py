@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
 from pathlib import Path
 
 from dpi_utils import WorkArea
+from desktop_calendar.ui.themed_controls import form_button, form_combobox
 from desktop_calendar.updates.update_manager import UpdateInfo
 from desktop_calendar.updates.release_notes import NoteBlock, inline_text as _inline_text, release_note_blocks, load_history
 from desktop_calendar.updates.release_notes_ui import NotesDocument
@@ -51,21 +51,13 @@ class UpdateAvailableDialog(tk.Toplevel):
         # Pack fixed chrome FIRST so growing notes cannot displace the actions.
         self.actions = tk.Frame(self, bg=theme.panel_background)
         self.actions.pack(side="bottom", fill="x", padx=px(16), pady=px(12))
-        self.later_button = tk.Button(
-            self.actions, text="关闭" if history else "稍后再说", command=self.close,
-            bg=theme.control_background, fg=theme.control_text,
-            activebackground=theme.control_hover, activeforeground=theme.control_text,
-            relief="flat", font=(font_family, 9), padx=px(14), pady=px(7),
-        )
-        self.update_button = tk.Button(
-            self.actions, text="立即更新", command=lambda: self.close(True),
-            bg=theme.accent, fg=theme.text_on_accent,
-            activebackground=theme.accent_hover, activeforeground=theme.text_on_accent,
-            relief="flat", font=(font_family, 9, "bold"), padx=px(14), pady=px(7),
-        )
+        self.later_button, later = form_button(self.actions, master, "关闭" if history else "稍后再说",
+                                               self.close, font=(font_family, 9))
+        self.update_button, update = form_button(self.actions, master, "立即更新", lambda: self.close(True),
+                                                primary=True, font=(font_family, 9, "bold"))
         if not history:
-            self.update_button.pack(side="right")
-        self.later_button.pack(side="right", padx=(0, px(8)))
+            update.pack(side="right")
+        later.pack(side="right", padx=(0, px(8)))
         header = tk.Frame(self, bg=theme.panel_background)
         header.pack(side="top", fill="x", padx=px(16), pady=(px(14), px(10)))
         tk.Label(header, text="桌面月历 Desktop Calendar" if history else "发现桌面月历新版本", anchor="w",
@@ -122,9 +114,10 @@ class ReleaseHistoryDialog(UpdateAvailableDialog):
         selector.pack(fill="x", padx=px(16), pady=(0, px(8)), before=self.document)
         tk.Label(selector, text="查看版本", bg=theme.panel_background,
                  fg=theme.text_secondary, font=(font_family, 9)).pack(side="left")
-        self.version_selector = ttk.Combobox(selector, state="readonly",
-                                            values=[entry.title for entry in self.entries])
-        self.version_selector.pack(side="left", fill="x", expand=True, padx=(px(8), 0))
+        self.version_selector, version_control = form_combobox(
+            selector, master, state="readonly", font=(font_family, 9),
+            values=[entry.title for entry in self.entries])
+        version_control.pack(side="left", fill="x", expand=True, padx=(px(8), 0))
         self.version_selector.current(self.entries.index(current))
         self.version_selector.bind("<<ComboboxSelected>>", self._select_version)
         tk.Label(selector, text="来源：本地随附 CHANGELOG · 离线可用", anchor="w",
