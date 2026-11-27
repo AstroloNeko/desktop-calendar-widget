@@ -74,56 +74,38 @@
         "target": { "$ref": "#/$defs/hex64" }
       }
     },
-    "briefContextVersion": {
-      "type": "integer",
-      "const": 1,
-      "description": "Opt-in for the v1 brief context extension. Invalid or unsupported session advertisements are ignored at runtime."
-    },
-    "notificationSessionBriefCapabilityRequest": {
+    "briefCompletion": {
       "type": "object",
-      "description": "The optional extension field of POST /api/notifications/session. Other session request fields belong to the interaction protocol.",
-      "properties": { "brief_context_version": { "$ref": "#/$defs/briefContextVersion" } }
-    },
-    "proactiveNotificationCapability": {
-      "type": "object",
-      "description": "The proactive_notifications member returned by POST /api/notifications/session.",
+      "description": "Client-computed daily completion counts for non-private evening briefs only. Cloud never computes completion rates or judges item completion; runtime enforces 0 <= completed <= total.",
+      "required": ["total", "completed"],
       "additionalProperties": false,
-      "required": ["enabled", "protocol_version", "endpoint", "supported_actions"],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "protocol_version": { "type": "integer", "const": 1 },
-        "endpoint": { "const": "/api/notifications/proactive" },
-        "supported_actions": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/proactiveActionDecl/properties/action" }
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
         },
-        "brief_context_version": { "$ref": "#/$defs/briefContextVersion" }
-      },
-      "dependentSchemas": {
-        "brief_context_version": { "properties": { "enabled": { "const": true } } }
+        "completed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        }
       }
     },
     "briefContext": {
       "type": "object",
+      "description": "Optional morning/evening brief context sent only after POST /api/notifications/session negotiates proactive_notifications.brief_context_version == 1. Never persisted in cloud ledger.",
       "required": ["slot"],
       "additionalProperties": false,
       "properties": {
-        "slot": { "enum": ["morning", "evening"] },
-        "completion": {
-          "type": "object",
-          "description": "Local non-private evening statistics. Runtime additionally enforces completed <= total.",
-          "additionalProperties": false,
-          "required": ["total", "completed"],
-          "properties": {
-            "total": { "type": "integer", "minimum": 0, "maximum": 5000 },
-            "completed": { "type": "integer", "minimum": 0, "maximum": 5000 }
-          }
-        }
+        "slot": {
+          "type": "string",
+          "enum": ["morning", "evening"]
+        },
+        "completion": { "$ref": "#/$defs/briefCompletion" }
       },
-      "dependentSchemas": {
-        "completion": { "properties": { "slot": { "const": "evening" } } }
-      }
+      "if": { "properties": { "slot": { "not": { "const": "evening" } } } },
+      "then": { "not": { "required": ["completion"] } }
     },
     "proactiveNotificationRequest": {
       "type": "object",
@@ -171,7 +153,6 @@
           "minimum": 0,
           "maximum": 500
         },
-        "brief_context": { "$ref": "#/$defs/briefContext" },
         "brief_counts": {
           "type": "object",
           "description": "Full counts before display quotas. The five counts must sum to count.",
@@ -185,6 +166,7 @@
             "overdue": { "type": "integer", "minimum": 0, "maximum": 500 }
           }
         },
+        "brief_context": { "$ref": "#/$defs/briefContext" },
         "items": {
           "type": "array",
           "maxItems": 50,
@@ -231,14 +213,9 @@
           "if": { "properties": { "private": { "const": true } } },
           "then": {
             "properties": {
-              "items": { "maxItems": 0 },
-              "brief_context": { "not": { "required": ["completion"] } }
+              "items": { "maxItems": 0 }
             }
           }
-        },
-        {
-          "if": { "required": ["brief_context"] },
-          "then": { "properties": { "type": { "const": "brief" } } }
         },
         {
           "if": {
@@ -248,6 +225,33 @@
             ]
           },
           "then": { "not": { "required": ["brief_counts"] } }
+        },
+        {
+          "if": { "properties": { "type": { "not": { "const": "brief" } } } },
+          "then": { "not": { "required": ["brief_context"] } }
+        },
+        {
+          "if": { "properties": { "private": { "const": true } } },
+          "then": {
+            "properties": {
+              "brief_context": {
+                "not": { "required": ["completion"] }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": { "const": "brief" },
+              "private": { "const": true }
+            }
+          },
+          "then": {
+            "properties": {
+              "actions": { "maxItems": 0 }
+            }
+          }
         },
         {
           "if": { "properties": { "is_test": { "const": true } } },

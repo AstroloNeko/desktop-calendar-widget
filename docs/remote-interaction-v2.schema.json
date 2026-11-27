@@ -38,7 +38,7 @@
     },
     "clientCapabilityDeclarationV2": {
       "type": "object",
-      "description": "Declared by v0.14.0+ clients on POST /api/notifications/session and EVERY POST /api/jobs/claim request.",
+      "description": "Declared by v0.14.0+ clients on POST /api/notifications/session and EVERY POST /api/jobs/claim request. Optional brief_context_version is sent on POST /api/notifications/session to negotiate morning/evening brief_context support.",
       "additionalProperties": false,
       "properties": {
         "interaction_schema_version": {
@@ -53,6 +53,18 @@
         "client_version": {
           "type": "string",
           "maxLength": 64
+        },
+        "brief_context_version": {
+          "type": "integer",
+          "const": 1,
+          "description": "Optional morning/evening brief context negotiation version sent on POST /api/notifications/session by v0.14.0+ clients."
+        }
+      },
+      "if": { "required": ["brief_context_version"] },
+      "then": {
+        "required": ["interaction_schema_version"],
+        "properties": {
+          "interaction_schema_version": { "const": 2 }
         }
       }
     },
@@ -96,6 +108,51 @@
                   "view_ddl"
                 ]
               }
+            },
+            "brief_context_version": {
+              "type": "integer",
+              "const": 1,
+              "description": "Advertised ONLY when enabled is true AND the client explicitly requested brief_context_version: 1 on POST /api/notifications/session."
+            }
+          },
+          "if": { "properties": { "enabled": { "const": false } } },
+          "then": { "not": { "required": ["brief_context_version"] } }
+        },
+        "proactive_availability": {
+          "type": "object",
+          "description": "Per-account diagnostic breakdown separating server protocol support, client v2 negotiation, account eligibility, and user opt-out preference.",
+          "additionalProperties": false,
+          "required": [
+            "protocol_supported",
+            "client_negotiated",
+            "account_eligible",
+            "user_preference",
+            "available",
+            "reason"
+          ],
+          "properties": {
+            "protocol_supported": { "type": "boolean" },
+            "client_negotiated": { "type": "boolean" },
+            "account_eligible": { "type": "boolean" },
+            "user_preference": {
+              "type": "string",
+              "enum": ["allowed", "opted_out"]
+            },
+            "available": { "type": "boolean" },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "available",
+                "proactive_disabled",
+                "qq_not_configured",
+                "interaction_v2_disabled",
+                "client_v2_required",
+                "user_disabled",
+                "qq_not_bound",
+                "qq_channel_inactive",
+                "qq_not_allowed",
+                "user_opt_out"
+              ]
             }
           }
         }

@@ -2,7 +2,8 @@
 # Requires PowerShell 7.4+ and uses only local references.
 $ErrorActionPreference = 'Stop'
 $schemaPath = Join-Path $PSScriptRoot '../docs/proactive-notifications-v1.schema.json'
-$schema = Get-Content -LiteralPath $schemaPath -Raw | ConvertFrom-Json -AsHashtable
+$sessionPath = Join-Path $PSScriptRoot '../docs/remote-interaction-v2.schema.json'
+$session = Get-Content -LiteralPath $sessionPath -Raw | ConvertFrom-Json -AsHashtable
 $seed = @{
     protocol_version = 1; type = 'brief'; channel = 'qq'; account_id = 'synthetic'
     notification_id = 'a' * 64; private = $false; count = 0; items = @()
@@ -13,7 +14,7 @@ $script:checked = 0
 
 function Check-Schema($Name, $Payload, [bool] $Expected, $Definition) {
     $validator = if ($Definition) {
-        @{ '$schema' = $schema['$schema']; '$defs' = $schema['$defs']; '$ref' = ('#/$defs/' + $Definition) } |
+        @{ '$schema' = $session['$schema']; '$defs' = $session['$defs']; '$ref' = ('#/$defs/' + $Definition) } |
             ConvertTo-Json -Depth 50 -Compress
     } else {
         Get-Content -LiteralPath $schemaPath -Raw
@@ -57,16 +58,19 @@ foreach ($bad in @(
 )) {
     Check-Brief 'invalid context or count' @{brief_context=$bad} $false
 }
-$offer = 'notificationSessionBriefCapabilityRequest'
-Check-Schema 'legacy session request' @{} $true $offer
-Check-Schema 'session advertises version 1' @{brief_context_version=1} $true $offer
-Check-Schema 'unknown version is outside the contract' @{brief_context_version=2} $false $offer
-Check-Schema 'Boolean version rejected' @{brief_context_version=$true} $false $offer
-$response = @{enabled=$true; protocol_version=1; endpoint='/api/notifications/proactive'; supported_actions=@()}
-$capability = 'proactiveNotificationCapability'
+Check-Brief 'private actions rejected' @{private=$true; actions=@(@{action='view_today'; target='a'*64})} $false
+$offer = 'clientCapabilityDeclarationV2'
+Check-Schema 'legacy session request' @{interaction_schema_version=1} $true $offer
+Check-Schema 'session advertises version 1' @{interaction_schema_version=2; brief_context_version=1} $true $offer
+Check-Schema 'extension needs version 2' @{interaction_schema_version=1; brief_context_version=1} $false $offer
+Check-Schema 'unknown version is outside the contract' @{interaction_schema_version=2; brief_context_version=2} $false $offer
+Check-Schema 'Boolean version rejected' @{interaction_schema_version=2; brief_context_version=$true} $false $offer
+$proactive = @{enabled=$true; protocol_version=1; endpoint='/api/notifications/proactive'; supported_actions=@()}
+$response = @{interaction_schema_version=2; proactive_notifications=$proactive}
+$capability = 'serverSessionCapabilitiesV2'
 Check-Schema 'legacy session response' $response $true $capability
-$response.brief_context_version=1
+$proactive.brief_context_version=1
 Check-Schema 'negotiated session response' $response $true $capability
-$response.enabled=$false
+$proactive.enabled=$false
 Check-Schema 'disabled response cannot echo capability' $response $false $capability
 Write-Output "Schema cases passed: $script:checked"
