@@ -130,7 +130,9 @@ from desktop_calendar.ui.ui_draw import (
     vertical_multi_gradient,
 )
 from desktop_calendar.ui.ui_theme import ACTIVE_THEMES, Theme, get_theme, normalize_theme_name
-from desktop_calendar.ui.themed_controls import RoundedCardShell, configure_scrollbars, themed_check, themed_popup_menu
+from desktop_calendar.ui.themed_controls import (
+    RoundedCardShell, configure_scrollbars, form_button, form_entry, themed_check, themed_popup_menu,
+)
 
 
 WINDOW_WIDTH = 372
@@ -1045,19 +1047,9 @@ class EventEditor(tk.Toplevel):
             widget.bind("<B1-Motion>", self._drag)
 
         tk.Label(shell, text="要做什么？", bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
-        self.title_entry = tk.Entry(
-            shell,
-            textvariable=self.title_var,
-            bg=FIELD_BACKGROUND,
-            fg=INK,
-            insertbackground=INK,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            highlightcolor=ACCENT,
-            font=(FONT, 11),
-        )
-        self.title_entry.pack(fill="x", pady=(4, 12), ipady=7)
+        dp = master.dpi.px
+        self.title_entry, title_field = form_entry(shell, master, self.title_var, font_size=11)
+        title_field.pack(fill="x", pady=(dp(4), dp(12)))
 
         date_row = tk.Frame(shell, bg=CARD)
         date_row.pack(fill="x")
@@ -1066,9 +1058,11 @@ class EventEditor(tk.Toplevel):
         time_col = tk.Frame(date_row, bg=CARD, width=scale_px(115))
         time_col.pack(side="right", padx=(6, 0))
         self._field_label(date_col, "日期与持续时间")
-        self._flat_entry(date_col, self.date_var).pack(fill="x", ipady=6)
+        _, date_field = form_entry(date_col, master, self.date_var, width=18)
+        date_field.pack(fill="x")
         self._field_label(time_col, "时间（可选）")
-        self._flat_entry(time_col, self.time_var, width=10).pack(fill="x", ipady=6)
+        _, time_field = form_entry(time_col, master, self.time_var, width=10)
+        time_field.pack(fill="x")
 
         shortcuts = tk.Frame(shell, bg=CARD)
         shortcuts.pack(fill="x", pady=(7, 10))
@@ -1302,12 +1296,12 @@ class EventEditor(tk.Toplevel):
         actions = tk.Frame(shell, bg=CARD)
         actions.pack(fill="x")
         if event:
-            delete = tk.Button(actions, text="删除", command=self.delete, bg=DANGER_SOFT, fg=DANGER, relief="flat", bd=0, padx=14, pady=6, cursor="hand2")
+            _, delete = form_button(actions, master, "删除", self.delete, danger=True)
             delete.pack(side="left")
-        save = tk.Button(actions, text="保存", command=self.save, bg=ACCENT, fg=current_theme().text_on_accent, activebackground=ACCENT_HOVER, activeforeground=current_theme().text_on_accent, relief="flat", bd=0, padx=20, pady=7, font=(FONT, 9, "bold"), cursor="hand2")
+        _, save = form_button(actions, master, "保存", self.save, primary=True)
         save.pack(side="right")
-        cancel = tk.Button(actions, text="取消", command=self.close, bg=CONTROL_BACKGROUND, fg=SUBTLE, relief="flat", bd=0, padx=14, pady=7, cursor="hand2")
-        cancel.pack(side="right", padx=(0, 8))
+        _, cancel = form_button(actions, master, "取消", self.close, quiet=True)
+        cancel.pack(side="right", padx=(0, dp(8)))
 
         self.bind("<Escape>", lambda _event: self.close())
         bind_editor_shortcuts(self, master, event=True)
@@ -1342,22 +1336,6 @@ class EventEditor(tk.Toplevel):
     @staticmethod
     def _field_label(parent: tk.Widget, text: str) -> None:
         tk.Label(parent, text=text, bg=CARD, fg=SUBTLE, font=(FONT, 8)).pack(anchor="w")
-
-    @staticmethod
-    def _flat_entry(parent: tk.Widget, variable: tk.StringVar, width: int = 18) -> tk.Entry:
-        return tk.Entry(
-            parent,
-            textvariable=variable,
-            width=width,
-            bg=FIELD_BACKGROUND,
-            fg=INK,
-            insertbackground=INK,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            highlightcolor=ACCENT,
-            font=(FONT, 9),
-        )
 
     def _choose_color(self, color: str) -> None:
         self.color_mode_var.set("override")
@@ -2453,10 +2431,9 @@ class DayDetailDialog(tk.Toplevel):
 
     def _base_row(self, color: str, done: bool, command: Callable[[], None]) -> tuple[tk.Frame, tk.Frame, TaskCheck]:
         background = current_theme().card_done_background if done else current_theme().schedule_card_background
-        row = tk.Frame(self.list_inner, bg=background, highlightthickness=1, highlightbackground=current_theme().schedule_card_border)
-        row.pack(fill="x", pady=(0, 7), padx=1)
+        row = self.master_app._agenda_card_surface(background, parent=self.list_inner)
         stripe = tk.Frame(row, bg=current_theme().event_done if done else color, width=EVENT_STRIPE_WIDTH)
-        stripe.pack(side="left", fill="y")
+        stripe.pack(side="left", fill="y", pady=self.master_app.dpi.px(3))
         stripe.pack_propagate(False)
         check = TaskCheck(
             row,
@@ -2799,21 +2776,14 @@ class DDLListDialog(tk.Toplevel):
         else:
             background = theme.schedule_card_background
             border = theme.schedule_card_border
-        row = tk.Frame(
-            self.list_inner,
-            bg=background,
-            highlightthickness=1,
-            highlightbackground=border,
-            cursor="hand2",
-        )
-        row.pack(fill="x", pady=(0, 7), padx=1)
+        row = self.master_app._agenda_card_surface(background, parent=self.list_inner, outline=border)
         stripe = tk.Frame(
             row,
             bg=event_stripe_color(theme, item, self.master_app.store.effective_event_color(item)),
             width=EVENT_STRIPE_WIDTH,
             cursor="hand2",
         )
-        stripe.pack(side="left", fill="y")
+        stripe.pack(side="left", fill="y", pady=self.master_app.dpi.px(3))
         stripe.pack_propagate(False)
         check = TaskCheck(
             row,
@@ -5869,15 +5839,15 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
     def _open_ddl_detail(self, event: Event) -> None:
         self.open_day_detail(self.store.event_end_date(event))
 
-    def _agenda_card_surface(self, background, *, parent=None):
+    def _agenda_card_surface(self, background, *, parent=None, outline=None):
         theme, dp = self.theme, self.dpi.px
         parent = self.agenda_inner if parent is None else parent
         if not theme.rounded_widget_shells:
             card = tk.Frame(parent, bg=background, highlightthickness=1,
-                            highlightbackground=theme.schedule_card_border, cursor="hand2")
+                            highlightbackground=outline or theme.schedule_card_border, cursor="hand2")
             card.pack(fill="x", pady=(0, 5), padx=1)
             return card
-        shell = RoundedCardShell(parent, theme, dp, background, surface=parent.cget("bg"))
+        shell = RoundedCardShell(parent, theme, dp, background, outline=outline, surface=parent.cget("bg"))
         shell.pack(fill="x", padx=dp(1), pady=(0, dp(6)))
         card = tk.Frame(shell, bg=background, cursor="hand2")
         card.pack(fill="both", expand=True, padx=dp(6), pady=dp(3))

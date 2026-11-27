@@ -53,14 +53,14 @@ def themed_popup_menu(parent, theme, font):
                    selectcolor=theme.accent)
 
 
-def form_entry(parent, app, variable, *, show="", width=1, rounded=True):
+def form_entry(parent, app, variable, *, show="", width=1, rounded=True, font_size=9):
     """The geometry widget may be a shell; the entry remains a native Tk field."""
     theme, dp = app.theme, app.dpi.px
     shell = (RoundedCardShell(parent, theme, dp, theme.input_background, surface=parent.cget("bg"),
                               outline=theme.input_border, cursor="xterm")
              if rounded and theme.rounded_widget_shells else None)
     entry = tk.Entry(shell or parent, textvariable=variable, show=show, width=width,
-                     font=(app.search_font, 9), bg=theme.input_background,
+                     font=(app.search_font, font_size), bg=theme.input_background,
                      fg=theme.text_primary, insertbackground=theme.text_primary,
                      relief="flat", bd=0, highlightthickness=0 if shell else dp(1),
                      highlightbackground=theme.input_border, highlightcolor=theme.input_focus)
@@ -72,7 +72,7 @@ def form_entry(parent, app, variable, *, show="", width=1, rounded=True):
     return entry, shell or entry
 
 
-def form_button(parent, app, text, command, *, primary=False, quiet=False):
+def form_button(parent, app, text, command, *, primary=False, quiet=False, danger=False):
     """A native button with a theme surface, for settings actions that stay enabled."""
     theme, dp = app.theme, app.dpi.px
     surface = parent.cget("bg")
@@ -80,6 +80,9 @@ def form_button(parent, app, text, command, *, primary=False, quiet=False):
     hover = theme.accent_hover if primary else theme.control_hover
     fg = theme.text_on_accent if primary else theme.control_text
     border = theme.accent if primary else fill if quiet else theme.control_border
+    if danger:
+        fill, hover, fg, border = (theme.danger_soft, theme.event_type_ddl_background,
+                                   theme.danger, theme.event_type_ddl_border)
     shell = (RoundedCardShell(parent, theme, dp, fill, surface=surface, outline=border)
              if theme.rounded_widget_shells else None)
     button = tk.Button(shell or parent, text=text, command=command, font=(app.search_font, 9),
