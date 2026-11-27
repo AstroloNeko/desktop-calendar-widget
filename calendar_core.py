@@ -224,6 +224,9 @@ class Event:
         return datetime.combine(self.end_date_for(workday_predicate), self.due_at.time())
 
     def covers(self, day: date, workday_predicate: Callable[[date], bool] = system_is_workday) -> bool:
+        offset = (day - self.due_date).days
+        if offset < 0 or not self.skip_non_working_days:
+            return 0 <= offset < self.duration_days
         return day in self.occurrence_dates(workday_predicate)
 
     def day_number(self, day: date, workday_predicate: Callable[[date], bool] = system_is_workday) -> int:
@@ -733,6 +736,22 @@ class Store:
     def events_on(self, day: date, include_done: bool = True) -> list[Event]:
         events = [item for item in self.events if self.event_covers(item, day) and (include_done or not item.done)]
         return sorted(events, key=lambda item: (item.done, EVENT_TYPE_RANK[item.event_type]))
+
+    def month_grid_events(self, first: date, last: date) -> tuple[dict[date, list[Event]], set[date]]:
+        """Build one render's event buckets in events_on order and its active deadline markers."""
+        by_day: dict[date, list[Event]] = {}
+        deadlines: set[date] = set()
+        for event in sorted(self.events, key=lambda item: (item.done, EVENT_TYPE_RANK[item.event_type])):
+            start = event.due_date
+            if start > last or (not event.skip_non_working_days and (first - start).days >= event.duration_days):
+                continue
+            days = self.event_dates(event)
+            for day in days:
+                if first <= day <= last:
+                    by_day.setdefault(day, []).append(event)
+            if not event.done and self.event_has_deadline(event) and first <= days[-1] <= last:
+                deadlines.add(days[-1])
+        return by_day, deadlines
 
     def upcoming(self, days: int = 7, include_overdue: bool = True) -> list[Event]:
         now = datetime.now()

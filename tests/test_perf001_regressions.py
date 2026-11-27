@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -193,6 +193,29 @@ class Perf001P0RegressionTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 store.save_preferences({"theme": "modern"})
         self.assertEqual(store.settings["theme"], "slate")
+
+    def test_grid_index_matches_existing_day_and_ddl_queries_with_workday_overrides(self):
+        store = self._sqlite_store()
+        first = date(2026, 10, 26)
+        events = [
+            Event("work", "Workdays", "2026-10-23T08:00", duration_days=8, skip_non_working_days=True, end_as_ddl=True),
+            Event("overlap", "Span", "2026-10-25T12:00", duration_days=5),
+            Event("ddl", "Due", "2026-10-27T18:00", event_type="ddl"),
+            Event("done", "Closed", "2026-10-27T08:00", event_type="ddl", done=True),
+            Event("early", "Historical", "2026-01-01T10:00"),
+        ]
+        store.repository.apply_changes({"events": events, "date_states": {"2026-10-27": "leave"}})
+        for leave in (True, False):
+            if not leave:
+                store.repository.apply_changes({"date_states": {}})
+            buckets, deadlines = store.month_grid_events(first, first + timedelta(days=41))
+            for offset in range(42):
+                day = first + timedelta(days=offset)
+                expected = sorted((e for e in events if day in e.occurrence_dates(store.is_workday)),
+                                  key=lambda e: (e.done, {"ddl": 0, "general": 2}[e.event_type]))
+                self.assertEqual(store.events_on(day), expected)
+                self.assertEqual(buckets.get(day, []), expected)
+                self.assertEqual(day in deadlines, store.has_ddl_on(day))
 
     def test_compact_selection_updates_only_two_cells_and_falls_back_on_time_or_month_change(self):
         cells = [SimpleNamespace(day=date(2026, 5, d), draw=Mock(), selected=(d == 1)) for d in (1, 2, 3)]

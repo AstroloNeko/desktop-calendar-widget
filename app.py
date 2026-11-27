@@ -4489,10 +4489,11 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
         while len(weeks) < 6:
             start = weeks[-1][-1] + timedelta(days=1)
             weeks.append([start + timedelta(days=index) for index in range(7)])
+        events_by_day, deadlines = self.store.month_grid_events(weeks[0][0], weeks[-1][-1])
         for index, cell in enumerate(self.day_cells):
             row, column = divmod(index, 7)
             day = weeks[row][column]
-            day_events = self.store.events_on(day)
+            day_events = events_by_day.get(day, ())
             colors = [
                 self.store.effective_event_color(event) if not event.done else self.theme.event_done
                 for event in day_events
@@ -4513,7 +4514,7 @@ class CalendarApp(ApplicationLifecycleMixin, NativeReminderMixin, BulkActionsMix
                 today=day == today,
                 colors=colors,
                 holiday=system_holiday or status_holiday,
-                ddl=self.store.has_ddl_on(day),
+                ddl=day in deadlines,
                 date_status=custom_status,
             )
         self.render_agenda()
