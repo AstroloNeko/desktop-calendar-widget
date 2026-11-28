@@ -23,6 +23,8 @@
 - Modern 和 Slate 在独立 Windows 桌面上完成交互验证。两个主题分别在紧凑、全局模式静置 5 秒，未测得持续绘制或控件重建。正常用户桌面的闪烁仍待复核。右栏和缩放仍偏慢。
 - 测试包为 `build/perf2/DesktopCalendar-v0.14.0-PERF001-7964e42-win64-QA.zip`，SHA-256 为 `23a89b2bf5586f14d711584c1bd634ef3909cf840000a5c281820fe0672d5ce9`。已核对 CRC、源码清单、四个 x64 模块和合成 SQLite 重开。解压后运行 `Start-Isolated-QA.cmd`；种子包含 14 个事项，Windows／QQ 通知均关闭。当前包的正常桌面目视体验待人工验收。
 
+2026-11-28 悬停修正包：`build/perf2/DesktopCalendar-v0.14.0-c34360b-win64-QA.zip`，源码 `c34360b414d39834365987d251100ec47d43b550`，SHA-256 `74804f0b096d2bcf4308799def9cda1b20953fce0cc4dd2dcd4c420a23c97025`。旧版共享按钮在 Enter 事件中将外框请求尺寸从 88×42 改为 378×265。修复后，Modern 和 Slate 的后台与提醒窗口各 9 个可见按钮通过悬停尺寸检查，6 项离线定向测试通过。此前的全量结果对应上一版。
+
 ## 后续任务
 
 | 任务 | 完成条件 |
