@@ -30,6 +30,28 @@ class SlateControlTests(unittest.TestCase):
         self.assertNotEqual(shell.coords(item), before)
         self.assertEqual(before[1::2], shell.coords(item)[1::2])
 
+    def test_dialog_button_hover_preserves_requested_and_actual_geometry(self):
+        from types import SimpleNamespace
+        from desktop_calendar.ui.themed_controls import form_button
+        for theme in ("modern", "slate"):
+            with self.subTest(theme=theme):
+                dialog = tk.Toplevel(self.root)
+                app = SimpleNamespace(theme=get_theme(theme), dpi=SimpleNamespace(px=self.dp), search_font="Segoe UI")
+                button, shell = form_button(dialog, app, "Close", lambda: None, quiet=True)
+                shell.pack()
+                self.root.update()
+                def dimensions():
+                    return shell.winfo_reqwidth(), shell.winfo_reqheight(), shell.winfo_width(), shell.winfo_height()
+                initial = dimensions()
+                self.assertEqual(initial[0], button.winfo_reqwidth() + 2*self.dp(5))
+                self.assertEqual(initial[1], button.winfo_reqheight() + 2*self.dp(2))
+                for transition in ("<Enter>", "<Leave>", "<FocusIn>", "<FocusOut>") * 3:
+                    button.event_generate(transition)
+                    self.assertEqual(dimensions()[:2], initial[:2], transition)
+                    self.root.update()
+                    self.assertEqual(dimensions(), initial, transition)
+                dialog.destroy()
+
     def test_native_keyboard_variable_and_disabled_behavior(self):
         variable = tk.BooleanVar(self.root)
         calls = []

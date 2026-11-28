@@ -129,7 +129,8 @@ class _FormButton(tk.Button):
         super().configure(bg=color, fg=fg, activebackground=hover, activeforeground=fg, cursor=cursor,
                           takefocus=not disabled, highlightbackground=border)
         if self._shell:
-            self._shell.configure(cursor=cursor)
+            # Configuring the Canvas itself restores its default requested size.
+            # Only change its artwork after the native button has been packed.
             self._shell.set_fill(color)
             self._shell.set_outline(theme.input_focus if self._focused and not disabled else border)
 
@@ -140,7 +141,7 @@ def form_button(parent, app, text, command, *, primary=False, quiet=False, dange
     theme, dp = app.theme, app.dpi.px
     surface = parent.cget("bg")
     shell = (RoundedCardShell(parent, theme, dp, surface, surface=surface,
-                              radius=dp(7) if radius is None else radius)
+                              radius=dp(7) if radius is None else radius, cursor="")
              if rounded and theme.rounded_widget_shells else None)
     button = _FormButton(shell or parent, app, text, command, shell=shell, surface=surface,
                          primary=primary, quiet=quiet, destructive=destructive or danger,
